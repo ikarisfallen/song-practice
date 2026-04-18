@@ -738,18 +738,21 @@ function renderChart(song, barsIn, timesigStr) {
   const bars = expandBarsByRepeats(barsIn, songRepeats);
   const { results: quarterNotes, chordEvents, patterns } = generateQuarterNotes(bars, ts);
 
-  // Index patterns by the bar where they start/end so the bar loop can attach
-  // bracket labels below the staff.
-  const patternStartByBar = {}; // barIdx → [{pat, chordIdxInBar, chordsInBar}]
-  const patternEndByBar = {};
-  patterns.forEach(pat => {
-    const first = chordEvents[pat.firstIdx];
-    const last = chordEvents[pat.lastIdx];
-    (patternStartByBar[first.barIdx] = patternStartByBar[first.barIdx] || [])
-      .push({ pat, chordIdxInBar: first.chordIdxInBar, chordsInBar: first.chordsInBar });
-    (patternEndByBar[last.barIdx] = patternEndByBar[last.barIdx] || [])
-      .push({ pat, chordIdxInBar: last.chordIdxInBar, chordsInBar: last.chordsInBar });
-  });
+  // Each unique key-pattern name gets a stable color from a rotating palette.
+  // Same key across the score → same color.
+  const PATTERN_COLORS = [
+    '#1e6fd4', '#c92a2a', '#2b8a3e', '#862e9c',
+    '#d9480f', '#087f5b', '#9c6e00', '#d6336c'
+  ];
+  const keyColor = {};
+  let nextColorIdx = 0;
+  function colorFor(name) {
+    if (!(name in keyColor)) {
+      keyColor[name] = PATTERN_COLORS[nextColorIdx % PATTERN_COLORS.length];
+      nextColorIdx++;
+    }
+    return keyColor[name];
+  }
 
   // State for courtesy accidentals, carried across bars.
   // letter index: 0=F,1=C,2=G,3=D,4=A,5=E,6=B (same as ExerciseBuilder.qml noteName)
@@ -794,6 +797,7 @@ function renderChart(song, barsIn, timesigStr) {
     // insertion happens after svg exists below
 
     let x = leftPadding;
+    const barPosInRow = []; // { barIdx, noteStartX, noteEndX } for pattern overlays
     rowBars.forEach((bar, i) => {
       const barIdx = rowStart + i;
       const isFirstInRow = i === 0;
@@ -908,43 +912,67 @@ function renderChart(song, barsIn, timesigStr) {
         });
       }
 
-      // Pattern bracket labels below the staff.
-      // Draw "[KeyName" at the start bar (at the chord's x position) and "]"
-      // at the end bar. A dashed line connects them when both live in this row.
-      const starts = patternStartByBar[barIdx] || [];
-      const ends = patternEndByBar[barIdx] || [];
-      const chordCx = (chordIdx, chordsInBar) =>
-        labelAreaX0 + (chordIdx + 0.5) * (labelAreaW / Math.max(1, chordsInBar));
-      starts.forEach(entry => {
-        const cx = chordCx(entry.chordIdxInBar, entry.chordsInBar);
-        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        t.setAttribute('x', cx);
-        t.setAttribute('y', patternLabelY);
-        t.setAttribute('text-anchor', 'start');
-        t.setAttribute('font-family', 'serif');
-        t.setAttribute('font-style', 'italic');
-        t.setAttribute('font-size', 11);
-        t.setAttribute('fill', '#000');
-        t.textContent = '[ ' + entry.pat.keyName;
-        svg.appendChild(t);
-      });
-      ends.forEach(entry => {
-        const cx = chordCx(entry.chordIdxInBar, entry.chordsInBar);
-        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        t.setAttribute('x', cx);
-        t.setAttribute('y', patternLabelY);
-        t.setAttribute('text-anchor', 'end');
-        t.setAttribute('font-family', 'serif');
-        t.setAttribute('font-size', 11);
-        t.setAttribute('fill', '#000');
-        t.textContent = ']';
-        svg.appendChild(t);
+      // Track bar geometry for the per-row pattern overlay drawn after the loop
+      barPosInRow.push({
+        barIdx,
+        noteStartX: stave.getNoteStartX(),
+        noteEndX: stave.getNoteEndX()
       });
 
       // Record bounds for highlighting
       barElements[barIdx] = { rowEl, x, y: staffY, w: width, h: 80 };
 
       x += width;
+    });
+
+    // Draw pattern overlays (bold key name + underline spanning the pattern).
+    // For patterns that cross row boundaries, each row draws its own segment.
+    const rowSvg = rowEl.querySelector('svg');
+    const rowFirstBar = rowStart;
+    const rowLastBar = rowStart + rowBars.length - 1;
+    patterns.forEach(pat => {
+      const patFirst = chordEvents[pat.firstIdx].barIdx;
+      const patLast = chordEvents[pat.lastIdx].barIdx;
+      const iFirst = Math.max(rowFirstBar, patFirst);
+      const iLast = Math.min(rowLastBar, patLast);
+      if (iFirst > iLast) return;
+      const leftBar = barPosInRow.find(b => b.barIdx === iFirst);
+      const rightBar = barPosInRow.find(b => b.barIdx === iLast);
+      if (!leftBar || !rightBar) return;
+      const startX = leftBar.noteStartX;
+      const endX = rightBar.noteEndX;
+      const color = colorFor(pat.keyName);
+      let lineStartX = startX;
+      const isPatternStart = iFirst === patFirst;
+      if (isPatternStart) {
+        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', startX);
+        t.setAttribute('y', patternLabelY);
+        t.setAttribute('text-anchor', 'start');
+        t.setAttribute('font-family', 'serif');
+        t.setAttribute('font-weight', 'bold');
+        t.setAttribute('font-size', 16);
+        t.setAttribute('fill', color);
+        t.textContent = pat.keyName;
+        rowSvg.appendChild(t);
+        try {
+          const bb = t.getBBox();
+          lineStartX = bb.x + bb.width + 4;
+        } catch (e) {
+          lineStartX = startX + pat.keyName.length * 8 + 4;
+        }
+      }
+      if (endX > lineStartX) {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', lineStartX);
+        line.setAttribute('y1', patternLabelY + 2);
+        line.setAttribute('x2', endX);
+        line.setAttribute('y2', patternLabelY + 2);
+        line.setAttribute('stroke', color);
+        line.setAttribute('stroke-width', 2);
+        line.setAttribute('stroke-linecap', 'round');
+        rowSvg.appendChild(line);
+      }
     });
 
     // Insert measure number text
