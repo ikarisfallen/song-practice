@@ -1139,8 +1139,8 @@ function midiToName(m) {
 }
 
 // ===== Tone.js playback =====
-let transport, piano, hat, rideBody, rideBell, rideNoise;
-let drumMode = 'hat'; // 'hat' | 'ride'
+let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut;
+let drumMode = 'hat'; // 'hat' | 'ride' | 'click'
 let playbackPart;
 let playing = false;
 let currentPlaylist = []; // sequence of { bar, idx } one entry = one bar
@@ -1170,15 +1170,27 @@ async function initAudio() {
   await Tone.loaded();
   document.getElementById('status').textContent = 'Ready';
 
-  const hatFilter = new Tone.Filter({ type: 'highpass', frequency: 7000, Q: 0.8 }).toDestination();
+  // Shared drum bus so a single slider controls all drum volumes
+  const initVol = parseInt(document.getElementById('drumVol').value, 10) / 100;
+  drumsOut = new Tone.Gain(isFinite(initVol) ? initVol : 0.75).toDestination();
+
+  const hatFilter = new Tone.Filter({ type: 'highpass', frequency: 7000, Q: 0.8 }).connect(drumsOut);
   hat = new Tone.NoiseSynth({
     noise: { type: 'white' },
     envelope: { attack: 0.001, decay: 0.06, sustain: 0, release: 0.05 },
     volume: -6
   }).connect(hatFilter);
 
+  // Metronome click: short high-pass-filtered noise burst
+  const clickFilter = new Tone.Filter({ type: 'highpass', frequency: 3000, Q: 1 }).connect(drumsOut);
+  click = new Tone.NoiseSynth({
+    noise: { type: 'white' },
+    envelope: { attack: 0.0001, decay: 0.02, sustain: 0, release: 0.005 },
+    volume: -4
+  }).connect(clickFilter);
+
   // Ride cymbal = body (long metallic wash) + bell (bright ping) + noise shimmer
-  const rideVerb = new Tone.Reverb({ decay: 1.4, wet: 0.2 }).toDestination();
+  const rideVerb = new Tone.Reverb({ decay: 1.4, wet: 0.2 }).connect(drumsOut);
   rideBody = new Tone.MetalSynth({
     frequency: 220,
     envelope: { attack: 0.001, decay: 1.2, release: 0.6 },
@@ -1197,7 +1209,7 @@ async function initAudio() {
     octaves: 0.8,
     volume: -26
   }).connect(rideVerb);
-  const rideHP = new Tone.Filter({ type: 'highpass', frequency: 5000, Q: 1.2 }).connect(rideVerb);
+  const rideHP = new Tone.Filter({ type: 'highpass', frequency: 5000, Q: 1.2 }).connect(drumsOut);
   rideNoise = new Tone.NoiseSynth({
     noise: { type: 'white' },
     envelope: { attack: 0.001, decay: 0.35, sustain: 0.05, release: 0.6 },
@@ -1293,6 +1305,11 @@ async function startPlayback(song, bars) {
       // hi-hat on beats 2 and 4
       events.push({ time: `${barNum}:1:0`, type: 'hat' });
       events.push({ time: `${barNum}:3:0`, type: 'hat' });
+    } else if (drumMode === 'click') {
+      // metronome on every quarter note; accent beat 1
+      for (let beat = 0; beat < beatsPerBar; beat++) {
+        events.push({ time: `${barNum}:${beat}:0`, type: 'click', accent: beat === 0 });
+      }
     } else if (drumMode === 'ride') {
       // classic jazz spang-a-lang: quarters on 1..4 plus skip notes on &2 and &4
       // (Transport.swing pushes the "and" eighths into the triplet feel)
@@ -1323,6 +1340,7 @@ async function startPlayback(song, bars) {
     }
     if (ev.type === 'hat') hat.triggerAttackRelease('16n', time, 0.6);
     if (ev.type === 'hatFoot') hat.triggerAttackRelease('32n', time, 0.25);
+    if (ev.type === 'click') click.triggerAttackRelease('32n', time, ev.accent ? 0.95 : 0.55);
     if (ev.type === 'ride') {
       // "spang" (downbeat) = body + bell + shimmer; "a" (skip) = body + light shimmer, softer
       const skip = !!ev.accent; // skip notes tagged with accent:true
@@ -1405,6 +1423,11 @@ document.querySelectorAll('#repeatSeg button').forEach(b => {
       await startPlayback(window.currentSong.song, expanded);
     }
   });
+});
+
+document.getElementById('drumVol').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10) / 100;
+  if (drumsOut) drumsOut.gain.rampTo(v, 0.05);
 });
 
 document.querySelectorAll('#drumSeg button').forEach(b => {

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=7" />
+<link rel="stylesheet" href="style.css?v=8" />
 </head>
 <body>
 <div id="app">
@@ -24,9 +24,11 @@
     <div class="drum-row">
       <span class="drum-label">Drums</span>
       <div class="seg" id="drumSeg" role="tablist">
-        <button type="button" data-mode="hat" class="active">Hi-hat 2 & 4</button>
-        <button type="button" data-mode="ride">Jazz Ride</button>
+        <button type="button" data-mode="hat" class="active">Hi-hat</button>
+        <button type="button" data-mode="ride">Ride</button>
+        <button type="button" data-mode="click">Click</button>
       </div>
+      <input type="range" id="drumVol" class="drum-vol" min="0" max="100" value="75" aria-label="Drum volume" />
     </div>
     <div class="drum-row">
       <span class="drum-label">Per line</span>
@@ -59,6 +61,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>
