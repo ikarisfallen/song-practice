@@ -997,7 +997,7 @@ async function startPlayback(song, bars) {
 
   const isSwing = /swing|jazz|bossa|bop/i.test(song.styleFull || song.style || '');
   const isFunk = /funk|fusion/i.test(song.styleFull || song.style || '');
-  Tone.Transport.bpm.value = parseInt(document.getElementById('tempo').value, 10) || song.bpm || 120;
+  Tone.Transport.bpm.value = currentTempo;
   Tone.Transport.swing = isSwing ? 0.55 : 0;
   Tone.Transport.swingSubdivision = '8n';
 
@@ -1109,8 +1109,6 @@ function loadFromURL(url) {
   const song = parseIRealSong(url);
   const tokens = tokenize(song.body);
   const { bars, timesig } = buildBars(tokens);
-  document.getElementById('tempo').value = song.bpm;
-  document.getElementById('tempoVal').textContent = song.bpm;
   renderChart(song, bars, timesig);
   window.currentSong = { song, bars };
   document.getElementById('status').textContent = `Loaded: ${song.title} (${bars.length} bars)`;
@@ -1123,9 +1121,14 @@ document.getElementById('playBtn').addEventListener('click', async () => {
   const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
   await startPlayback(window.currentSong.song, expanded);
 });
-document.getElementById('tempo').addEventListener('input', e => {
-  document.getElementById('tempoVal').textContent = e.target.value;
-  if (Tone.Transport) Tone.Transport.bpm.value = parseInt(e.target.value, 10);
+let currentTempo = 120;
+document.querySelectorAll('#tempoSeg button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#tempoSeg button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    currentTempo = parseInt(b.dataset.bpm, 10) || 120;
+    if (Tone.Transport) Tone.Transport.bpm.value = currentTempo;
+  });
 });
 function rerenderCurrent() {
   if (!window.currentSong) return;

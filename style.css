@@ -64,6 +64,8 @@ button.play.playing { background: #ef4444; color: #fff; }
 .seg button + button { border-left: 1px solid #334654; }
 .seg button.active { background: #3da9fc; color: #052033; font-weight: 600; }
 .seg button:active { transform: scale(0.97); }
+.tempo-seg { flex: 1; }
+.tempo-seg button { flex: 1; padding: 8px 6px; }
 
 .file { font-size: 12px; }
 .fileBtn {
