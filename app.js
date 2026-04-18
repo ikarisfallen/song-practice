@@ -1088,34 +1088,29 @@ function chordNotes(ch, octave = 4) {
   return ivs.map(i => rootMidi + i);
 }
 
-// Jazz voicing: rootless, 3-4 note, randomized inversion, centered mid-register.
+// Jazz voicing: full chord (root + 3/5/7) with an optional random tension,
+// in close voicing around the middle of the piano, randomized inversions.
 function jazzVoicing(ch) {
   if (!ch || ch.nc || ch.slash) return null;
   const pc = pcFromChord(ch);
   const ivs = intervalsFor(ch.rest || '');
-  // Drop the root; keep chord tones (3,5,7) and one tension (9/11/13) if present
-  const chordTones = ivs.filter(i => i > 0 && i < 12);
+  // Keep root + chord tones in one octave, plus up to one higher tension
+  const chordTones = ivs.filter(i => i < 12);
   const tensions = ivs.filter(i => i >= 12);
-  let upper = [...chordTones];
+  let intervals = [...chordTones];
   if (tensions.length) {
-    // add one random tension
-    upper.push(tensions[Math.floor(Math.random() * tensions.length)]);
+    intervals.push(tensions[Math.floor(Math.random() * tensions.length)]);
   }
-  // Trim/pad to 3 or 4 notes
-  upper = upper.slice(0, 4);
-  // Build MIDI: root at C4 so chord sits around middle
-  const rootMidi = 60 + pc; // C4-area root
-  let notes = upper.map(i => rootMidi + i);
-  // Bring into ideal range (F3=53 .. C5=72)
-  while (notes[0] < 53) notes = notes.map(n => n + 12);
-  while (notes[0] > 65) notes = notes.map(n => n - 12);
+  intervals = intervals.slice(0, 5);
+  // Place the root in the low-middle piano register (C3..B3)
+  const rootMidi = 12 * 4 + pc;
+  let notes = intervals.map(i => rootMidi + i);
   // Random inversion: rotate bottom note(s) up an octave
   const inv = Math.floor(Math.random() * Math.min(notes.length, 3));
   for (let k = 0; k < inv; k++) {
     const bottom = notes.shift();
     notes.push(bottom + 12);
   }
-  // Sort for nicer voicing
   notes.sort((a, b) => a - b);
   return notes;
 }
