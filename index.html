@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#1b2730" />
+<title>Song Practice</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="meta">
+      <div class="title" id="songTitle">—</div>
+      <div class="composer" id="songComposer"></div>
+      <div class="style" id="songStyle"></div>
+    </div>
+    <div class="controls">
+      <button id="playBtn" class="play">▶</button>
+      <div class="tempo">
+        <label>Tempo <span id="tempoVal">120</span></label>
+        <input type="range" id="tempo" min="40" max="260" value="120" />
+      </div>
+      <div class="file">
+        <label for="fileInput" class="fileBtn">Load iRealPro HTML</label>
+        <input type="file" id="fileInput" accept=".html,.htm,.txt" />
+      </div>
+    </div>
+    <div class="drum-row">
+      <span class="drum-label">Drums</span>
+      <div class="seg" id="drumSeg" role="tablist">
+        <button type="button" data-mode="hat" class="active">Hi-hat 2 & 4</button>
+        <button type="button" data-mode="ride">Jazz Ride</button>
+      </div>
+    </div>
+    <div class="drum-row">
+      <span class="drum-label">Per line</span>
+      <div class="seg" id="mplSeg" role="tablist">
+        <button type="button" data-mpl="1">1</button>
+        <button type="button" data-mpl="2">2</button>
+        <button type="button" data-mpl="4" class="active">4</button>
+        <button type="button" data-mpl="6">6</button>
+        <button type="button" data-mpl="8">8</button>
+      </div>
+    </div>
+    <div class="drum-row">
+      <span class="drum-label">Repeats</span>
+      <div class="seg" id="repeatSeg" role="tablist">
+        <button type="button" data-r="1" class="active">1</button>
+        <button type="button" data-r="2">2</button>
+        <button type="button" data-r="3">3</button>
+        <button type="button" data-r="4">4</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="chart" class="chart"></div>
+  </main>
+
+  <footer>
+    <div class="status" id="status">Ready</div>
+  </footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
