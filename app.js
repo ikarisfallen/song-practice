@@ -308,6 +308,39 @@ function exParseRoot(chordText) {
   return { pitchClass: semi, tpc };
 }
 
+// Classify chord quality for pattern detection (ii-V-I etc.)
+function getChordType(chordText) {
+  const q = chordText.replace(/^[A-Ga-g][#♯b♭]?/, '');
+  if (/[øØ]/.test(q)) return 'halfdim';
+  if (/m7[b♭]5|min7[b♭]5|mi7[b♭]5/i.test(q)) return 'halfdim';
+  if (/^h/i.test(q)) return 'halfdim'; // iRealPro half-dim
+  if (/dim|°/i.test(q)) return 'other';
+  if (/^o/i.test(q)) return 'other';
+  if (/^(m(?!a)|min|mi|\-|−)/i.test(q) && /maj|ma/i.test(q)) return 'other';
+  if (/maj|ma/i.test(q)) return 'major';
+  if (/^M([0-9]|$)/.test(q)) return 'major';
+  if (/[Δ∆\^]/.test(q)) return 'major';
+  if (/^m|^-|^−/i.test(q)) return 'minor';
+  if (/^6/.test(q)) return 'major';
+  if (/^[0-9]/.test(q)) return 'dominant';
+  if (/sus/i.test(q)) return 'dominant';
+  if (/aug|\+/i.test(q)) return 'other';
+  return 'major';
+}
+
+// TPC → readable note name (e.g. 11 → "E♭")
+function tpcToNoteName(tpc) {
+  const letters = ['F','C','G','D','A','E','B'];
+  const idx = (((tpc - 13) % 7) + 7) % 7;
+  const name = letters[idx];
+  const acc = (tpc - 13 - idx) / 7;
+  if (acc <= -2) return name + '♭♭';
+  if (acc === -1) return name + '♭';
+  if (acc === 1) return name + '♯';
+  if (acc >= 2) return name + '♯♯';
+  return name;
+}
+
 function exGetScale(chordText) {
   const q = chordText.replace(/^[A-Ga-g][#♯b♭]?/, '');
   if (/[øØ]/.test(q)) return SCALE_LOCRIAN;
@@ -371,65 +404,200 @@ function chordToCanonical(ch) {
   return ch.root + (ch.rest || '');
 }
 
-// Given an expanded bars array and a time signature, walk beat-by-beat and
-// generate a quarter-note pitch sequence using the Quarter Notes algorithm.
-// Returns an array parallel to bars: beatPitches[barIdx] = [ {pitch, tpc} | null, ... ].
-function generateQuarterNotes(bars, ts) {
-  const beatsPerBar = ts.num;
-  // Build flat beat list with chord per beat
-  const beatList = [];
+// Build a flat list of chord events from bars. Kcl/repeat-prev bars inherit
+// the source bar's chords so patterns still register correctly.
+function buildChordEventList(bars) {
+  const out = [];
   for (let bi = 0; bi < bars.length; bi++) {
     const bar = bars[bi];
-    const chords = (bar.chords || []).filter(c => !c.slash && !c.nc);
-    const bc = new Array(beatsPerBar).fill(null);
-    if (chords.length === 1) bc.fill(chords[0]);
-    else if (chords.length === 2) {
-      const half = Math.floor(beatsPerBar / 2);
-      for (let i = 0; i < half; i++) bc[i] = chords[0];
-      for (let i = half; i < beatsPerBar; i++) bc[i] = chords[1];
-    } else if (chords.length > 2) {
-      for (let i = 0; i < beatsPerBar; i++)
-        bc[i] = chords[Math.min(chords.length - 1, Math.floor(i * chords.length / beatsPerBar))];
-    }
-    // If bar is a repeat of prev (repeatPrev set), inherit prev bar's chords
-    if (bar.repeatPrev && bi > 0) {
+    let chords = (bar.chords || []).filter(c => !c.slash && !c.nc);
+    if (chords.length === 0 && bar.repeatPrev && bi >= bar.repeatPrev) {
       const src = bars[bi - bar.repeatPrev];
-      if (src) {
-        const srcChords = (src.chords || []).filter(c => !c.slash && !c.nc);
-        if (srcChords.length === 1) bc.fill(srcChords[0]);
-        else if (srcChords.length === 2) {
-          const half = Math.floor(beatsPerBar / 2);
-          for (let i = 0; i < half; i++) bc[i] = srcChords[0];
-          for (let i = half; i < beatsPerBar; i++) bc[i] = srcChords[1];
+      if (src && src.chords) chords = src.chords.filter(c => !c.slash && !c.nc);
+    }
+    const chordsInBar = chords.length;
+    chords.forEach((ch, ci) => {
+      const root = exParseRoot(chordToCanonical(ch));
+      if (!root) return;
+      out.push({
+        barIdx: bi,
+        chordIdxInBar: ci,
+        chordsInBar,
+        chord: ch,
+        root,
+        type: getChordType(chordToCanonical(ch))
+      });
+    });
+  }
+  return out;
+}
+
+// Detect ii-V-I (251), ii-V (25), V-I (51) patterns with optional 6 before ii
+// and 4 after I extensions. Returns [{ firstIdx, lastIdx, keyRoot, keyMode,
+// keyName }] where firstIdx/lastIdx index into the flat chord event list.
+function detectKeyPatterns(chordEvents) {
+  const used = chordEvents.map(() => false);
+  const isP4Up = (a, b) => b === (a + 5) % 12;
+  const raw = [];
+
+  function scanTriple(iType, iiType, iiiType, mode) {
+    for (let i = 0; i < chordEvents.length - 2; i++) {
+      if (used[i] || used[i+1] || used[i+2]) continue;
+      if (chordEvents[i].type === iType &&
+          chordEvents[i+1].type === iiType &&
+          chordEvents[i+2].type === iiiType &&
+          isP4Up(chordEvents[i].root.pitchClass, chordEvents[i+1].root.pitchClass) &&
+          isP4Up(chordEvents[i+1].root.pitchClass, chordEvents[i+2].root.pitchClass)) {
+        const iChord = chordEvents[i+2];
+        let keyName, keyRoot;
+        if (mode === 'major') {
+          keyName = tpcToNoteName(iChord.root.tpc) + 'Maj';
+          keyRoot = iChord.root;
+        } else {
+          const relMaj = tpcToNoteName(iChord.root.tpc - 3);
+          keyName = tpcToNoteName(iChord.root.tpc) + 'm (' + relMaj + 'Maj)';
+          keyRoot = iChord.root;
         }
+        raw.push({
+          type: '251', keyMode: mode,
+          firstIdx: i, lastIdx: i+2,
+          iiIdx: i, iIdx: i+2,
+          keyRoot, keyName
+        });
+        used[i] = used[i+1] = used[i+2] = true;
       }
     }
-    for (let b = 0; b < beatsPerBar; b++) beatList.push({ barIdx: bi, beat: b, chord: bc[b] });
   }
 
-  // Walk and assign pitches
+  function scanPair(aType, bType, kind, mode) {
+    for (let i = 0; i < chordEvents.length - 1; i++) {
+      if (used[i] || used[i+1]) continue;
+      if (chordEvents[i].type === aType &&
+          chordEvents[i+1].type === bType &&
+          isP4Up(chordEvents[i].root.pitchClass, chordEvents[i+1].root.pitchClass)) {
+        let keyRoot, keyName, iiIdx = -1, iIdx = -1;
+        if (kind === '25') {
+          // Key is a P4 above the V (= V tpc - 1 in circle of fifths)
+          const keyTpc = chordEvents[i+1].root.tpc - 1;
+          const keyPc = (chordEvents[i+1].root.pitchClass + 5) % 12;
+          keyRoot = { pitchClass: keyPc, tpc: keyTpc };
+          if (mode === 'major') keyName = tpcToNoteName(keyTpc) + 'Maj';
+          else keyName = tpcToNoteName(keyTpc) + 'm (' + tpcToNoteName(keyTpc - 3) + 'Maj)';
+          iiIdx = i;
+        } else {
+          // 51: key is the I chord
+          keyRoot = chordEvents[i+1].root;
+          if (mode === 'major') keyName = tpcToNoteName(keyRoot.tpc) + 'Maj';
+          else keyName = tpcToNoteName(keyRoot.tpc) + 'm (' + tpcToNoteName(keyRoot.tpc - 3) + 'Maj)';
+          iIdx = i+1;
+        }
+        raw.push({
+          type: kind, keyMode: mode,
+          firstIdx: i, lastIdx: i+1,
+          iiIdx, iIdx,
+          keyRoot, keyName
+        });
+        used[i] = used[i+1] = true;
+      }
+    }
+  }
+
+  // Pass 1-2: ii-V-I in major / minor
+  scanTriple('minor',   'dominant', 'major', 'major');
+  scanTriple('halfdim', 'dominant', 'minor', 'minor');
+  // Pass 3-4: ii-V
+  scanPair('minor',   'dominant', '25', 'major');
+  scanPair('halfdim', 'dominant', '25', 'minor');
+  // Pass 5-6: V-I
+  scanPair('dominant', 'major', '51', 'major');
+  scanPair('dominant', 'minor', '51', 'minor');
+
+  // Phase 2: extend with 6 before ii and 4 after I
+  const patterns = [];
+  for (const pat of raw) {
+    let startIdx = pat.firstIdx;
+    let endIdx = pat.lastIdx;
+    // 6 before ii
+    if (pat.iiIdx >= 0) {
+      const b = pat.iiIdx - 1;
+      if (b >= 0 && !used[b] &&
+          chordEvents[b].type === 'minor' &&
+          isP4Up(chordEvents[b].root.pitchClass, chordEvents[pat.iiIdx].root.pitchClass)) {
+        startIdx = b;
+        used[b] = true;
+      }
+    }
+    // 4 after I
+    if (pat.iIdx >= 0) {
+      const after = pat.iIdx + 1;
+      const reqType = pat.keyMode === 'major' ? 'major' : 'minor';
+      if (after < chordEvents.length && !used[after] &&
+          chordEvents[after].type === reqType &&
+          isP4Up(chordEvents[pat.iIdx].root.pitchClass, chordEvents[after].root.pitchClass)) {
+        endIdx = after;
+        used[after] = true;
+      }
+    }
+    // Repeated I for 251
+    if (pat.type === '251' && pat.iIdx >= 0 && endIdx === pat.lastIdx) {
+      const next = pat.iIdx + 1;
+      if (next < chordEvents.length && !used[next] &&
+          chordEvents[next].root.pitchClass === chordEvents[pat.iIdx].root.pitchClass &&
+          chordEvents[next].type === chordEvents[pat.iIdx].type) {
+        endIdx = next;
+        used[next] = true;
+      }
+    }
+    patterns.push({
+      firstIdx: startIdx, lastIdx: endIdx,
+      keyRoot: pat.keyRoot,
+      keyMode: pat.keyMode,
+      keyName: pat.keyName
+    });
+  }
+  return patterns;
+}
+
+// Scale to use for a detected key. Major → Ionian (no Ab on EbMaj7 as IV of
+// BbMaj). Minor → melodic minor so V7 has its leading tone AND i6 has its
+// natural 6th.
+function scaleForKey(keyRoot, keyMode) {
+  if (keyMode === 'major') return { root: keyRoot, scale: SCALE_IONIAN };
+  return { root: keyRoot, scale: SCALE_MELODIC_MINOR };
+}
+
+// Walk the chord-event sequence and generate quarter-note pitches. When a
+// chord is inside a detected key pattern, the whole pattern uses the key's
+// scale (major → Ionian, minor → melodic minor) instead of each chord's own
+// mode — so borrowed chords (e.g. EbMaj7 as IV of BbMaj) draw from the key
+// scale, avoiding out-of-key notes.
+// Returns { results, chordEvents, patterns, effectiveScales }.
+function generateQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat) return scaleForKey(pat.keyRoot, pat.keyMode);
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
   let direction = -1;
-  let currentKey = null;  // chord canonical text
   let tones = [];
   let toneIdx = 0;
   let lastPitch = -1;
-  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  let lastSig = null;
 
-  for (let i = 0; i < beatList.length; i++) {
-    const entry = beatList[i];
-    const ch = entry.chord;
-    if (!ch) continue;
-    const key = chordToCanonical(ch);
-    if (key !== currentKey) {
-      const root = exParseRoot(key);
-      if (!root) continue;
-      const scale = exGetScale(key);
-      tones = buildScaleTones(root.pitchClass, root.tpc, scale);
-      currentKey = key;
-      if (tones.length === 0) continue;
+  chordEvents.forEach((ce, i) => {
+    const eff = effective[i];
+    const sig = eff.root.pitchClass + '|' + eff.root.tpc + '|' + eff.scale[0].s + ',' + eff.scale.length;
+    if (sig !== lastSig) {
+      tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+      lastSig = sig;
+      if (tones.length === 0) return;
       if (lastPitch < 0) {
-        // first chord: start on root in C3 octave, descending
-        let sp = root.pitchClass + 48;
+        let sp = eff.root.pitchClass + 48;
         while (sp < EX_LOW) sp += 12;
         while (sp > EX_HIGH) sp -= 12;
         toneIdx = findClosestIndex(tones, sp);
@@ -439,30 +607,38 @@ function generateQuarterNotes(bars, ts) {
         direction = cont.dir;
       }
     }
-    if (tones.length === 0) continue;
+    if (tones.length === 0) return;
 
-    let p = tones[toneIdx].pitch;
-    let t = tones[toneIdx].tpc;
-    if (p === lastPitch && tones.length > 1) {
-      let ti = toneIdx + direction;
-      if (ti < 0) { direction = 1; ti = toneIdx + 1; }
-      else if (ti >= tones.length) { direction = -1; ti = toneIdx - 1; }
-      if (ti >= 0 && ti < tones.length && tones[ti].pitch !== lastPitch) {
-        toneIdx = ti; p = tones[ti].pitch; t = tones[ti].tpc;
+    // Beat range for this chord event
+    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
+    const startBeat = ce.chordIdxInBar * beatsPerChord;
+    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
+      ? beatsPerBar : startBeat + beatsPerChord;
+
+    for (let b = startBeat; b < endBeat; b++) {
+      let p = tones[toneIdx].pitch;
+      let t = tones[toneIdx].tpc;
+      if (p === lastPitch && tones.length > 1) {
+        let ti = toneIdx + direction;
+        if (ti < 0) { direction = 1; ti = toneIdx + 1; }
+        else if (ti >= tones.length) { direction = -1; ti = toneIdx - 1; }
+        if (ti >= 0 && ti < tones.length && tones[ti].pitch !== lastPitch) {
+          toneIdx = ti; p = tones[ti].pitch; t = tones[ti].tpc;
+        }
       }
-    }
-    results[entry.barIdx][entry.beat] = { pitch: p, tpc: t };
-    lastPitch = p;
+      results[ce.barIdx][b] = { pitch: p, tpc: t };
+      lastPitch = p;
 
-    // advance
-    let ni = toneIdx + direction;
-    if (ni < 0) { direction = 1; ni = toneIdx + 1; }
-    else if (ni >= tones.length) { direction = -1; ni = toneIdx - 1; }
-    if (ni < 0) ni = 0;
-    if (ni >= tones.length) ni = tones.length - 1;
-    toneIdx = ni;
-  }
-  return results;
+      let ni = toneIdx + direction;
+      if (ni < 0) { direction = 1; ni = toneIdx + 1; }
+      else if (ni >= tones.length) { direction = -1; ni = toneIdx - 1; }
+      if (ni < 0) ni = 0;
+      if (ni >= tones.length) ni = tones.length - 1;
+      toneIdx = ni;
+    }
+  });
+
+  return { results, chordEvents, patterns };
 }
 
 // TPC → letter + accidental (e.g. TPC 7 → { letter:'C', acc:'b' })
@@ -560,7 +736,20 @@ function renderChart(song, barsIn, timesigStr) {
 
   // Expand by song repeats and generate quarter notes across the whole thing
   const bars = expandBarsByRepeats(barsIn, songRepeats);
-  const quarterNotes = generateQuarterNotes(bars, ts);
+  const { results: quarterNotes, chordEvents, patterns } = generateQuarterNotes(bars, ts);
+
+  // Index patterns by the bar where they start/end so the bar loop can attach
+  // bracket labels below the staff.
+  const patternStartByBar = {}; // barIdx → [{pat, chordIdxInBar, chordsInBar}]
+  const patternEndByBar = {};
+  patterns.forEach(pat => {
+    const first = chordEvents[pat.firstIdx];
+    const last = chordEvents[pat.lastIdx];
+    (patternStartByBar[first.barIdx] = patternStartByBar[first.barIdx] || [])
+      .push({ pat, chordIdxInBar: first.chordIdxInBar, chordsInBar: first.chordsInBar });
+    (patternEndByBar[last.barIdx] = patternEndByBar[last.barIdx] || [])
+      .push({ pat, chordIdxInBar: last.chordIdxInBar, chordsInBar: last.chordsInBar });
+  });
 
   // State for courtesy accidentals, carried across bars.
   // letter index: 0=F,1=C,2=G,3=D,4=A,5=E,6=B (same as ExerciseBuilder.qml noteName)
@@ -575,7 +764,8 @@ function renderChart(song, barsIn, timesigStr) {
   const firstMeasureClefWidth = 68; // bass clef + 8vb + time sig on line 1
   const clefOnlyExtra = 44; // bass clef + 8vb on other lines
   const staffY = 26;
-  const staffHeight = 120;
+  const staffHeight = 140;
+  const patternLabelY = 118;
 
   for (let rowStart = 0; rowStart < bars.length; rowStart += mpl) {
     const rowBars = bars.slice(rowStart, rowStart + mpl);
@@ -717,6 +907,39 @@ function renderChart(song, barsIn, timesigStr) {
           svg.appendChild(t);
         });
       }
+
+      // Pattern bracket labels below the staff.
+      // Draw "[KeyName" at the start bar (at the chord's x position) and "]"
+      // at the end bar. A dashed line connects them when both live in this row.
+      const starts = patternStartByBar[barIdx] || [];
+      const ends = patternEndByBar[barIdx] || [];
+      const chordCx = (chordIdx, chordsInBar) =>
+        labelAreaX0 + (chordIdx + 0.5) * (labelAreaW / Math.max(1, chordsInBar));
+      starts.forEach(entry => {
+        const cx = chordCx(entry.chordIdxInBar, entry.chordsInBar);
+        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', cx);
+        t.setAttribute('y', patternLabelY);
+        t.setAttribute('text-anchor', 'start');
+        t.setAttribute('font-family', 'serif');
+        t.setAttribute('font-style', 'italic');
+        t.setAttribute('font-size', 11);
+        t.setAttribute('fill', '#000');
+        t.textContent = '[ ' + entry.pat.keyName;
+        svg.appendChild(t);
+      });
+      ends.forEach(entry => {
+        const cx = chordCx(entry.chordIdxInBar, entry.chordsInBar);
+        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', cx);
+        t.setAttribute('y', patternLabelY);
+        t.setAttribute('text-anchor', 'end');
+        t.setAttribute('font-family', 'serif');
+        t.setAttribute('font-size', 11);
+        t.setAttribute('fill', '#000');
+        t.textContent = ']';
+        svg.appendChild(t);
+      });
 
       // Record bounds for highlighting
       barElements[barIdx] = { rowEl, x, y: staffY, w: width, h: 80 };
