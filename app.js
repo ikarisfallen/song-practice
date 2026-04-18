@@ -1175,23 +1175,30 @@ document.querySelectorAll('#drumSeg button').forEach(b => {
 // in songs/ and add its filename to songs/index.json.
 
 async function loadSongByFilename(filename) {
-  const res = await fetch('songs/' + encodeURIComponent(filename));
-  if (!res.ok) {
-    document.getElementById('status').textContent = 'Failed to load: ' + filename;
-    return;
+  try {
+    const res = await fetch('songs/' + encodeURIComponent(filename));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    loadFromHTMLText(text);
+  } catch (e) {
+    document.getElementById('status').textContent =
+      'Failed to load ' + filename + ': ' + e.message;
   }
-  const text = await res.text();
-  loadFromHTMLText(text);
 }
 
 async function initSongLibrary() {
   const sel = document.getElementById('songSelect');
+  if (!sel) { document.getElementById('status').textContent = '#songSelect missing'; return; }
   let songs;
   try {
     const res = await fetch('songs/index.json');
-    songs = (await res.json()).songs;
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    songs = data.songs;
+    if (!Array.isArray(songs) || songs.length === 0) throw new Error('empty manifest');
   } catch (e) {
-    document.getElementById('status').textContent = 'Could not load songs/index.json';
+    document.getElementById('status').textContent =
+      'Could not load songs/index.json: ' + e.message;
     return;
   }
   sel.innerHTML = '';
@@ -1205,7 +1212,7 @@ async function initSongLibrary() {
     if (playing) stopPlayback();
     loadSongByFilename(sel.value);
   });
-  if (songs.length) await loadSongByFilename(songs[0]);
+  await loadSongByFilename(songs[0]);
 }
 
 initSongLibrary();
