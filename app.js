@@ -1311,6 +1311,10 @@ function midiToName(m) {
 // ===== Tone.js playback =====
 let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut;
 let realHihat, brushSweep, brushTap;
+// Real drum loops, looped via the Transport. Each entry records the source
+// bpm so playbackRate can be adapted if the user-selected tempo differs.
+const realLoops = {};  // key "ballad-4/4" → { player, sourceBpm }
+let currentRealLoop = null;
 let drumMode = 'hat'; // 'hat' | 'ride' | 'click'
 let countInBars = 0;  // 0, 1, or 2 measures of click before the song starts
 let playbackPart;
@@ -1411,12 +1415,46 @@ async function initAudio() {
     volume: -6
   }).connect(brushTapFilter);
 
+  // Real drum loops. Add an entry per {tier, timesig}. Each loop is seamless
+  // across its full duration (must be an exact whole number of bars) and is
+  // played back on the Transport so it stays phase-locked with the song.
+  // Each loop declares the number of beats (bars × beats-per-bar) it contains.
+  // That's all we need — the true source bpm is derived from the file's
+  // actual duration, so minor cropping errors can't drift the loop out of
+  // sync: playbackRate compensates automatically and the loop plays for
+  // exactly N beats at the Transport tempo.
+  realLoops['ballad-4/4'] = {
+    player: new Tone.Player({
+      url: 'drums/ballad-4-4-80bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 16 // 4 bars of 4/4
+  };
+  realLoops['medium-4/4'] = {
+    player: new Tone.Player({
+      url: 'drums/medium-4-4-120bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 16 // 4 bars of 4/4
+  };
+  realLoops['up-4/4'] = {
+    player: new Tone.Player({
+      url: 'drums/up-4-4-180bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 16 // 4 bars of 4/4
+  };
+
   await Tone.loaded();
   document.getElementById('status').textContent = 'Ready';
 }
 
 function stopPlayback() {
   if (playbackPart) { playbackPart.stop(); playbackPart.dispose(); playbackPart = null; }
+  if (currentRealLoop) {
+    try { currentRealLoop.player.stop(); currentRealLoop.player.unsync(); } catch (e) {}
+    currentRealLoop = null;
+  }
   Tone.Transport.stop();
   Tone.Transport.cancel();
   playing = false;
@@ -1535,9 +1573,12 @@ async function startPlayback(song, bars) {
       const tempoTier = currentTempo < 100 ? 'ballad' : (currentTempo < 150 ? 'medium' : 'up');
 
       if (tempoTier === 'ballad') {
-        // Slow jazz brushes: sweep the snare on beat 1 (and 3 in 4/4), tap
-        // on the backbeats.
-        if (beatsPerBar === 4) {
+        // Prefer the real recorded loop when we have one for this time sig.
+        // Otherwise fall back to the synthesized brush layer.
+        const loopKey = 'ballad-' + ts.str;
+        if (realLoops[loopKey] && realLoops[loopKey].player.loaded) {
+          // nothing to push — the player is started once after the event loop.
+        } else if (beatsPerBar === 4) {
           events.push({ time: `${absBar}:0:0`, type: 'brushSweep' });
           events.push({ time: `${absBar}:2:0`, type: 'brushSweep' });
           events.push({ time: `${absBar}:1:0`, type: 'brushTap' });
@@ -1553,8 +1594,12 @@ async function startPlayback(song, bars) {
           }
         }
       } else if (tempoTier === 'medium') {
-        // Crisp hi-hat spang-a-lang using the acoustic-kit hihat sample.
-        if (beatsPerBar === 4) {
+        // Prefer the real recorded loop for this time sig; otherwise fall
+        // back to the synthesized crisp hi-hat spang-a-lang.
+        const loopKey = 'medium-' + ts.str;
+        if (realLoops[loopKey] && realLoops[loopKey].player.loaded) {
+          // handled by the loop sync after the event loop
+        } else if (beatsPerBar === 4) {
           events.push({ time: `${absBar}:0:0`, type: 'realHihat' });
           events.push({ time: `${absBar}:1:0`, type: 'realHihat' });
           events.push({ time: `${absBar}:1:2`, type: 'realHihat', accent: true });
@@ -1572,11 +1617,15 @@ async function startPlayback(song, bars) {
           }
         }
       } else {
-        // Up tempo brush shuffle: swung 8ths. The "and" hit on each beat
-        // gets Transport.swing treatment for triplet feel.
-        for (let b = 0; b < beatsPerBar; b++) {
-          events.push({ time: `${absBar}:${b}:0`, type: 'brushTap', accent: b === 0 });
-          events.push({ time: `${absBar}:${b}:2`, type: 'brushTap' });
+        // Up tempo: prefer the recorded loop; otherwise synthesized brush shuffle.
+        const loopKey = 'up-' + ts.str;
+        if (realLoops[loopKey] && realLoops[loopKey].player.loaded) {
+          // handled by the loop sync after the event loop
+        } else {
+          for (let b = 0; b < beatsPerBar; b++) {
+            events.push({ time: `${absBar}:${b}:0`, type: 'brushTap', accent: b === 0 });
+            events.push({ time: `${absBar}:${b}:2`, type: 'brushTap' });
+          }
         }
       }
     }
@@ -1619,6 +1668,27 @@ async function startPlayback(song, bars) {
   playbackPart.loopStart = `${offset}:0:0`;
   playbackPart.loopEnd = `${offset + playlist.length}:0:0`;
   playbackPart.start(0);
+
+  // If Real mode has a recorded drum loop for this tempo tier + time sig,
+  // sync it to the Transport so it phase-locks with the bars. Adjust
+  // playbackRate when the user tempo differs from the loop's source bpm.
+  currentRealLoop = null;
+  if (drumMode === 'ride') {
+    const tempoTier2 = currentTempo < 100 ? 'ballad' : (currentTempo < 150 ? 'medium' : 'up');
+    const key = tempoTier2 + '-' + ts.str;
+    const entry = realLoops[key];
+    if (entry && entry.player.loaded && entry.player.buffer) {
+      // Derive the loop's actual bpm from its audio duration so any tiny
+      // cropping error gets absorbed by playbackRate. Result: the loop plays
+      // for exactly entry.beats at Transport tempo, forever — no drift.
+      const effectiveSourceBpm = (60 * entry.beats) / entry.player.buffer.duration;
+      entry.player.playbackRate = currentTempo / effectiveSourceBpm;
+      entry.player.unsync();
+      entry.player.sync().start(`${offset}:0:0`);
+      currentRealLoop = entry;
+    }
+  }
+
   Tone.Transport.start();
   playing = true;
   const btn = document.getElementById('playBtn');
