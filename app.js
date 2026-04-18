@@ -591,7 +591,9 @@ function generateQuarterNotes(bars, ts) {
 
   chordEvents.forEach((ce, i) => {
     const eff = effective[i];
-    const sig = eff.root.pitchClass + '|' + eff.root.tpc + '|' + eff.scale[0].s + ',' + eff.scale.length;
+    // Full scale signature so scales with the same root but different
+    // intervals (e.g. G melodic minor vs G Mixolydian) still trigger a rebuild.
+    const sig = eff.root.pitchClass + '|' + eff.root.tpc + '|' + eff.scale.map(x => x.s).join(',');
     if (sig !== lastSig) {
       tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
       lastSig = sig;
@@ -835,6 +837,28 @@ function renderChart(song, barsIn, timesigStr) {
       const currMeasureAlterations = {}; // letter → level (only where level != key default)
       const ACC_GLYPH = { '-2': 'bb', '-1': 'b', '0': 'n', '1': '#', '2': '##' };
 
+      // Map each beat to the chord active there so we can suppress courtesy
+      // accidentals on chord tones (the chord symbol already implies them).
+      let barChordsForBeat = (bar.chords || []).filter(c => !c.slash && !c.nc);
+      if (barChordsForBeat.length === 0 && bar.repeatPrev && barIdx >= bar.repeatPrev) {
+        const src = bars[barIdx - bar.repeatPrev];
+        if (src && src.chords) barChordsForBeat = src.chords.filter(c => !c.slash && !c.nc);
+      }
+      const chordAtBeat = (beat) => {
+        if (!barChordsForBeat.length) return null;
+        if (barChordsForBeat.length === 1) return barChordsForBeat[0];
+        if (barChordsForBeat.length === 2) return beat < Math.floor(ts.num / 2) ? barChordsForBeat[0] : barChordsForBeat[1];
+        const idx = Math.min(barChordsForBeat.length - 1, Math.floor(beat * barChordsForBeat.length / ts.num));
+        return barChordsForBeat[idx];
+      };
+      const isChordTone = (ch, midi) => {
+        if (!ch) return false;
+        const pc = pcFromChord(ch);
+        const ivs = intervalsFor(ch.rest || '').filter(i => i < 12);
+        const chordPCs = new Set(ivs.map(i => (pc + i) % 12));
+        return chordPCs.has(((midi % 12) + 12) % 12);
+      };
+
       for (let b = 0; b < ts.num; b++) {
         const bp = beatPitches[b];
         if (bp) {
@@ -856,8 +880,13 @@ function renderChart(song, barsIn, timesigStr) {
               showLevel = level; // sharp/flat/etc must be drawn
             } else if (letterIdx in prevMeasureAlterations &&
                        prevMeasureAlterations[letterIdx] !== keyDefault) {
-              // Previous measure altered this letter → courtesy natural
-              showLevel = 0;
+              // Would normally show a courtesy natural. Skip when the note is
+              // a chord tone of the current chord — the chord symbol itself
+              // already clarifies that this note is natural.
+              const activeChord = chordAtBeat(b);
+              if (!isChordTone(activeChord, bp.pitch)) {
+                showLevel = 0;
+              }
             }
             currMeasureSeen[letterIdx] = level;
           } else if (currMeasureSeen[letterIdx] !== level) {
