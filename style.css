@@ -17,6 +17,18 @@ header {
 }
 .meta { line-height: 1.2; }
 .title { font-size: 20px; font-weight: 700; }
+.song-select {
+  font-size: 18px; font-weight: 700;
+  background: #14202a; color: #e6e3da;
+  border: 1px solid #334654; border-radius: 6px;
+  padding: 6px 28px 6px 8px; width: 100%;
+  font-family: inherit;
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23e6e3da' d='M0 0 L6 8 L12 0 Z'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+.song-select:focus { outline: 1px solid #3da9fc; }
 .composer { font-size: 13px; color: #9ab; }
 .style { font-size: 12px; color: #7a8c9a; font-style: italic; }
 

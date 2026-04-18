@@ -476,19 +476,23 @@ function tpcToLetterAcc(tpc) {
 
 // Build VexFlow key like "c#/4" for the given sounding MIDI + TPC, using
 // the 8vb bass clef (so written = sounding + 1 octave).
+// Returns { key, acc, letterIdx, level } where letterIdx matches the
+// ExerciseBuilder convention 0=F,1=C,2=G,3=D,4=A,5=E,6=B and level is
+// -2=bb, -1=b, 0=natural, 1=#, 2=##.
 function midiTpcToVexKey(soundingMidi, tpc) {
   const { letter, acc } = tpcToLetterAcc(tpc);
   const altAdjust = { 'bb': -2, 'b': -1, '': 0, '#': 1, '##': 2 }[acc];
-  const writtenMidi = soundingMidi + 12; // 8vb: written an octave above sounding
-  const letterRef = writtenMidi - altAdjust; // natural-letter MIDI
+  const writtenMidi = soundingMidi + 12;
+  const letterRef = writtenMidi - altAdjust;
   const octave = Math.floor(letterRef / 12) - 1;
   const key = letter.toLowerCase() + acc + '/' + octave;
-  return { key, acc };
+  const LETTER_IDX = { F: 0, C: 1, G: 2, D: 3, A: 4, E: 5, B: 6 };
+  return { key, acc, letterIdx: LETTER_IDX[letter], level: altAdjust };
 }
 
 // ===== Render (sheet music via VexFlow) =====
-let measuresPerLine = 4;
-let songRepeats = 1;
+let measuresPerLine = 2;
+let songRepeats = 2;
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
 
 function expandBarsByRepeats(bars, n) {
@@ -504,6 +508,11 @@ function chordText(ch) {
   if (ch.slash) return '/';
   const rootLetter = ch.root;
   let r = ch.rest || '';
+  // Leading accidental on the root (e.g. "Bb^7" → root='B', rest='b^7')
+  let rootAcc = '';
+  if (r[0] === 'b') { rootAcc = '♭'; r = r.substring(1); }
+  else if (r[0] === '#') { rootAcc = '♯'; r = r.substring(1); }
+  // Quality
   let quality = '';
   if (r.startsWith('^')) {
     r = r.substring(1);
@@ -522,12 +531,10 @@ function chordText(ch) {
     r = r.substring(1);
     quality = 'aug';
   }
-  // leading accidental on root (e.g. "Bb7" → rest starts with 'b' before a digit)
+  // Remaining extensions + alterations: convert accidentals to pretty glyphs
   r = r.replace(/#/g, '♯').replace(/b/g, '♭');
-  let out = rootLetter + quality + r;
-  if (ch.bass) {
-    out += '/' + ch.bass.replace('b', '♭').replace('#', '♯');
-  }
+  let out = rootLetter + rootAcc + quality + r;
+  if (ch.bass) out += '/' + ch.bass.replace('b', '♭').replace('#', '♯');
   return out;
 }
 
@@ -543,7 +550,6 @@ function renderChart(song, barsIn, timesigStr) {
   const chartEl = document.getElementById('chart');
   chartEl.innerHTML = '';
   barElements.length = 0;
-  document.getElementById('songTitle').textContent = song.title;
   document.getElementById('songComposer').textContent = song.composer || '';
   document.getElementById('songStyle').textContent =
     (song.styleFull || song.style || '') + (song.key ? ' · ' + song.key : '') + (song.bpm ? ' · ' + song.bpm + ' bpm' : '');
@@ -558,6 +564,12 @@ function renderChart(song, barsIn, timesigStr) {
   // Expand by song repeats and generate quarter notes across the whole thing
   const bars = expandBarsByRepeats(barsIn, songRepeats);
   const quarterNotes = generateQuarterNotes(bars, ts);
+
+  // State for courtesy accidentals, carried across bars.
+  // letter index: 0=F,1=C,2=G,3=D,4=A,5=E,6=B (same as ExerciseBuilder.qml noteName)
+  // level: -2=bb, -1=b, 0=natural, 1=#, 2=##
+  // In C major (no key sig) the default level for every letter is 0.
+  let prevMeasureAlterations = {};
 
   const mpl = measuresPerLine;
   const measureWidth = 240;
@@ -627,24 +639,53 @@ function renderChart(song, barsIn, timesigStr) {
       // Quarter notes per beat (generated from chord scales).
       const beatPitches = quarterNotes[barIdx] || [];
       const notes = [];
+      // Per-measure courtesy-accidental state (ported from ExerciseBuilder.qml)
+      const currMeasureSeen = {};       // letter → accidental level displayed so far
+      const currMeasureAlterations = {}; // letter → level (only where level != key default)
+      const ACC_GLYPH = { '-2': 'bb', '-1': 'b', '0': 'n', '1': '#', '2': '##' };
+
       for (let b = 0; b < ts.num; b++) {
         const bp = beatPitches[b];
         if (bp) {
-          const { key, acc } = midiTpcToVexKey(bp.pitch, bp.tpc);
+          const { key, letterIdx, level } = midiTpcToVexKey(bp.pitch, bp.tpc);
           // Stem direction: on/above middle line of the staff → stem down,
           // below middle line → stem up. Bass-clef middle line is D3 (MIDI 50);
           // we render an octave up (8vb), so written MIDI = sounding + 12.
           // Therefore sounding MIDI >= 38 (D2) → stem down.
           const stemDir = bp.pitch >= 38 ? VF.Stem.DOWN : VF.Stem.UP;
           const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: 'q', stem_direction: stemDir });
-          if (acc) n.addModifier(new VF.Accidental(acc), 0);
+
+          // Decide whether to show an accidental on this note.
+          // Key default level for every letter = 0 (C major / no key signature).
+          const keyDefault = 0;
+          let showLevel = null;
+          if (!(letterIdx in currMeasureSeen)) {
+            // First occurrence of this letter in the current measure
+            if (level !== keyDefault) {
+              showLevel = level; // sharp/flat/etc must be drawn
+            } else if (letterIdx in prevMeasureAlterations &&
+                       prevMeasureAlterations[letterIdx] !== keyDefault) {
+              // Previous measure altered this letter → courtesy natural
+              showLevel = 0;
+            }
+            currMeasureSeen[letterIdx] = level;
+          } else if (currMeasureSeen[letterIdx] !== level) {
+            // Accidental changed mid-measure → must redraw
+            showLevel = level;
+            currMeasureSeen[letterIdx] = level;
+          }
+          if (showLevel !== null) {
+            n.addModifier(new VF.Accidental(ACC_GLYPH[String(showLevel)]), 0);
+          }
+          if (level !== keyDefault) currMeasureAlterations[letterIdx] = level;
+
           notes.push(n);
         } else {
           notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
         }
       }
-      // Auto-apply accidentals so only first occurrence in a bar shows
-      try { VF.Accidental.applyAccidentals([{ getTickables: () => notes }], 'C'); } catch (e) { /* fallback ignored */ }
+      // Carry this measure's alterations to the next measure
+      prevMeasureAlterations = currMeasureAlterations;
       const voice = new VF.Voice({ num_beats: ts.num, beat_value: ts.denom, resolution: VF.RESOLUTION });
       voice.setStrict(false);
       voice.addTickables(notes);
@@ -1128,13 +1169,43 @@ document.querySelectorAll('#drumSeg button').forEach(b => {
   });
 });
 
-document.getElementById('fileInput').addEventListener('change', async e => {
-  const f = e.target.files[0];
-  if (!f) return;
-  const text = await f.text();
-  loadFromHTMLText(text);
-});
+// ===== Song library =====
+// Songs are served from /songs. The manifest at songs/index.json lists the
+// filenames (HTML exports from iReal Pro). To add a song: drop the HTML file
+// in songs/ and add its filename to songs/index.json.
 
-// ===== Bundled test song: If I Were A Bell =====
-const BUNDLED_URL = "irealb://If%20I%20Were%20A%20Bell=Loesser%20Frank==Medium%20Up%20Swing=F=5=1r34LbKcu7C%7CQyX4G7XyX7D%7CQyX7hAZL%20lKcQyX7%5EF%7CQyX7C%7CQyQ%7CG74T%5BA%2AZLC%2F7%2AB%5BF6DZL7A%207hE%7CQyX6ZFL7C%206bBZLA%2F7F%20%2D7%20D%2D%5DQyX7ZL%20lc7LZA%5E%5EF%7CQyX7C%7CQyX7GA%5B%2A%5D%207C%207%2DG%7CQyX77XyQKE%207hBC%2F6FZQ%7CD7X6bBZLA%2F7F%206F%5BC%5D%2AQyX7C%7CQyX7G%7CQy%20Bo7LyX7hA%20Bb7LZAh7%20D7LZG%2D7XyQ%7CC7XyQ%7CUF6XyQ%7CAh7%20D7%20Z=Jazz%2DMedium%20Up%20Swing=160=3";
-loadFromURL(BUNDLED_URL);
+async function loadSongByFilename(filename) {
+  const res = await fetch('songs/' + encodeURIComponent(filename));
+  if (!res.ok) {
+    document.getElementById('status').textContent = 'Failed to load: ' + filename;
+    return;
+  }
+  const text = await res.text();
+  loadFromHTMLText(text);
+}
+
+async function initSongLibrary() {
+  const sel = document.getElementById('songSelect');
+  let songs;
+  try {
+    const res = await fetch('songs/index.json');
+    songs = (await res.json()).songs;
+  } catch (e) {
+    document.getElementById('status').textContent = 'Could not load songs/index.json';
+    return;
+  }
+  sel.innerHTML = '';
+  songs.forEach(filename => {
+    const opt = document.createElement('option');
+    opt.value = filename;
+    opt.textContent = filename.replace(/\.html?$/i, '');
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => {
+    if (playing) stopPlayback();
+    loadSongByFilename(sel.value);
+  });
+  if (songs.length) await loadSongByFilename(songs[0]);
+}
+
+initSongLibrary();

@@ -11,7 +11,7 @@
 <div id="app">
   <header>
     <div class="meta">
-      <div class="title" id="songTitle">—</div>
+      <select id="songSelect" class="song-select" aria-label="Song"></select>
       <div class="composer" id="songComposer"></div>
       <div class="style" id="songStyle"></div>
     </div>
@@ -20,10 +20,6 @@
       <div class="tempo">
         <label>Tempo <span id="tempoVal">120</span></label>
         <input type="range" id="tempo" min="40" max="260" value="120" />
-      </div>
-      <div class="file">
-        <label for="fileInput" class="fileBtn">Load iRealPro HTML</label>
-        <input type="file" id="fileInput" accept=".html,.htm,.txt" />
       </div>
     </div>
     <div class="drum-row">
@@ -37,8 +33,8 @@
       <span class="drum-label">Per line</span>
       <div class="seg" id="mplSeg" role="tablist">
         <button type="button" data-mpl="1">1</button>
-        <button type="button" data-mpl="2">2</button>
-        <button type="button" data-mpl="4" class="active">4</button>
+        <button type="button" data-mpl="2" class="active">2</button>
+        <button type="button" data-mpl="4">4</button>
         <button type="button" data-mpl="6">6</button>
         <button type="button" data-mpl="8">8</button>
       </div>
@@ -46,8 +42,8 @@
     <div class="drum-row">
       <span class="drum-label">Repeats</span>
       <div class="seg" id="repeatSeg" role="tablist">
-        <button type="button" data-r="1" class="active">1</button>
-        <button type="button" data-r="2">2</button>
+        <button type="button" data-r="1">1</button>
+        <button type="button" data-r="2" class="active">2</button>
         <button type="button" data-r="3">3</button>
         <button type="button" data-r="4">4</button>
       </div>
