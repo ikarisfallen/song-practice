@@ -67,6 +67,27 @@ button.play.playing { background: #ef4444; color: #fff; }
 .tempo-seg { flex: 1; }
 .tempo-seg button { flex: 1; padding: 8px 6px; }
 .drum-vol { flex: 1; min-width: 60px; accent-color: #3da9fc; }
+.wake-label {
+  font-size: 13px; color: #cde; display: inline-flex; align-items: center; gap: 8px;
+  user-select: none; cursor: pointer;
+}
+.switch-input {
+  position: absolute; opacity: 0; pointer-events: none;
+}
+.switch {
+  width: 40px; height: 22px; border-radius: 11px;
+  background: #334654; position: relative; flex-shrink: 0;
+  transition: background 0.15s ease;
+}
+.switch::before {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #e6e3da; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  transition: transform 0.15s ease;
+}
+.switch-input:checked + .switch { background: #3da9fc; }
+.switch-input:checked + .switch::before { transform: translateX(18px); }
+.switch-input:focus-visible + .switch { outline: 2px solid #3da9fc; outline-offset: 2px; }
 
 .file { font-size: 12px; }
 .fileBtn {
@@ -98,6 +119,11 @@ main { flex: 1; padding: 10px; }
   stroke: #3da9fc;
   stroke-width: 2;
   pointer-events: none;
+}
+.form-separator {
+  height: 0;
+  border-top: 2px solid #000;
+  margin: 10px 6px;
 }
 
 .bar {
@@ -176,5 +202,3 @@ main { flex: 1; padding: 10px; }
   font-size: 11px; border-top: 1px solid #2a3a48;
 }
 
-@media (min-width: 600px) { .chart { grid-template-columns: repeat(4, 1fr); max-width: 800px; margin: 0 auto; } }
-@media (max-width: 380px) { .chart { gap: 2px; } .bar { font-size: 16px; padding: 14px 3px 4px 3px; min-height: 60px; } }

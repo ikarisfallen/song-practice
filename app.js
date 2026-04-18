@@ -115,6 +115,11 @@ function buildBars(tokens) {
   }
   function endBar(type) {
     if (cur) { cur.rightBar = type; bars.push(cur); cur = null; }
+    // A strong closing barline (repeat/double/final) can arrive after Kcl
+    // already pushed the last bar — in that case stamp it onto that bar.
+    else if (bars.length > 0 && type !== 'single' && bars[bars.length - 1].rightBar === 'single') {
+      bars[bars.length - 1].rightBar = type;
+    }
   }
 
   for (const t of tokens) {
@@ -665,7 +670,7 @@ function midiTpcToVexKey(soundingMidi, tpc) {
   const octave = Math.floor(letterRef / 12) - 1;
   const key = letter.toLowerCase() + acc + '/' + octave;
   const LETTER_IDX = { F: 0, C: 1, G: 2, D: 3, A: 4, E: 5, B: 6 };
-  return { key, acc, letterIdx: LETTER_IDX[letter], level: altAdjust };
+  return { key, acc, letterIdx: LETTER_IDX[letter], level: altAdjust, octave };
 }
 
 // ===== Render (sheet music via VexFlow) =====
@@ -769,11 +774,23 @@ function renderChart(song, barsIn, timesigStr) {
   const firstMeasureClefWidth = 68; // bass clef + 8vb + time sig on line 1
   const clefOnlyExtra = 44; // bass clef + 8vb on other lines
   const staffY = 26;
-  const staffHeight = 140;
-  const patternLabelY = 118;
+  // VexFlow's bass-clef staff lines end up at y ≈ 66 (top) .. 106 (bottom).
+  // The lowest F the generator can produce (written F2 via the 8vb clef) sits
+  // around y = 111, in the space just below the bottom line. Place the
+  // pattern line just below that with the label tucked right under.
+  const patternLineY = 118;
+  const patternTextY = patternLineY + 14;
+  const staffHeight = patternTextY + 10;
 
-  for (let rowStart = 0; rowStart < bars.length; rowStart += mpl) {
-    const rowBars = bars.slice(rowStart, rowStart + mpl);
+  const formSize = barsIn.length; // length of one pass of the form
+  let rowStart = 0;
+  while (rowStart < bars.length) {
+    // Clip each row to the next pass boundary so repeats always break on a
+    // new row and get their horizontal separator.
+    const passIdx = Math.floor(rowStart / formSize);
+    const passBoundary = Math.min(bars.length, (passIdx + 1) * formSize);
+    const rowEnd = Math.min(rowStart + mpl, passBoundary);
+    const rowBars = bars.slice(rowStart, rowEnd);
     const isFirstRow = rowStart === 0;
     const clefExtra = isFirstRow ? firstMeasureClefWidth : clefOnlyExtra;
     const rowWidth = leftPadding + clefExtra + rowBars.length * measureWidth + rightPadding;
@@ -832,37 +849,19 @@ function renderChart(song, barsIn, timesigStr) {
       // Quarter notes per beat (generated from chord scales).
       const beatPitches = quarterNotes[barIdx] || [];
       const notes = [];
-      // Per-measure courtesy-accidental state (ported from ExerciseBuilder.qml)
-      const currMeasureSeen = {};       // letter → accidental level displayed so far
-      const currMeasureAlterations = {}; // letter → level (only where level != key default)
+      // Per-measure courtesy-accidental state. Keyed by "letter:octave" (the
+      // specific staff position) so a courtesy only fires when the same line
+      // or space was altered in the previous bar — not just the same letter
+      // in a distant octave.
+      const currMeasureSeen = {};       // "letter:octave" → level seen so far
+      const currMeasureAlterations = {}; // "letter:octave" → level (if != default)
       const ACC_GLYPH = { '-2': 'bb', '-1': 'b', '0': 'n', '1': '#', '2': '##' };
-
-      // Map each beat to the chord active there so we can suppress courtesy
-      // accidentals on chord tones (the chord symbol already implies them).
-      let barChordsForBeat = (bar.chords || []).filter(c => !c.slash && !c.nc);
-      if (barChordsForBeat.length === 0 && bar.repeatPrev && barIdx >= bar.repeatPrev) {
-        const src = bars[barIdx - bar.repeatPrev];
-        if (src && src.chords) barChordsForBeat = src.chords.filter(c => !c.slash && !c.nc);
-      }
-      const chordAtBeat = (beat) => {
-        if (!barChordsForBeat.length) return null;
-        if (barChordsForBeat.length === 1) return barChordsForBeat[0];
-        if (barChordsForBeat.length === 2) return beat < Math.floor(ts.num / 2) ? barChordsForBeat[0] : barChordsForBeat[1];
-        const idx = Math.min(barChordsForBeat.length - 1, Math.floor(beat * barChordsForBeat.length / ts.num));
-        return barChordsForBeat[idx];
-      };
-      const isChordTone = (ch, midi) => {
-        if (!ch) return false;
-        const pc = pcFromChord(ch);
-        const ivs = intervalsFor(ch.rest || '').filter(i => i < 12);
-        const chordPCs = new Set(ivs.map(i => (pc + i) % 12));
-        return chordPCs.has(((midi % 12) + 12) % 12);
-      };
 
       for (let b = 0; b < ts.num; b++) {
         const bp = beatPitches[b];
         if (bp) {
-          const { key, letterIdx, level } = midiTpcToVexKey(bp.pitch, bp.tpc);
+          const { key, letterIdx, level, octave } = midiTpcToVexKey(bp.pitch, bp.tpc);
+          const posKey = letterIdx + ':' + octave;
           // Stem direction: on/above middle line of the staff → stem down,
           // below middle line → stem up. Bass-clef middle line is D3 (MIDI 50);
           // we render an octave up (8vb), so written MIDI = sounding + 12.
@@ -874,30 +873,27 @@ function renderChart(song, barsIn, timesigStr) {
           // Key default level for every letter = 0 (C major / no key signature).
           const keyDefault = 0;
           let showLevel = null;
-          if (!(letterIdx in currMeasureSeen)) {
-            // First occurrence of this letter in the current measure
+          if (!(posKey in currMeasureSeen)) {
+            // First occurrence of this exact staff position in the measure
             if (level !== keyDefault) {
               showLevel = level; // sharp/flat/etc must be drawn
-            } else if (letterIdx in prevMeasureAlterations &&
-                       prevMeasureAlterations[letterIdx] !== keyDefault) {
-              // Would normally show a courtesy natural. Skip when the note is
-              // a chord tone of the current chord — the chord symbol itself
-              // already clarifies that this note is natural.
-              const activeChord = chordAtBeat(b);
-              if (!isChordTone(activeChord, bp.pitch)) {
-                showLevel = 0;
-              }
+            } else if (posKey in prevMeasureAlterations &&
+                       prevMeasureAlterations[posKey] !== keyDefault) {
+              // Same staff position was altered in the previous measure →
+              // draw a courtesy natural so the reader doesn't carry the
+              // accidental across the bar line visually.
+              showLevel = 0;
             }
-            currMeasureSeen[letterIdx] = level;
-          } else if (currMeasureSeen[letterIdx] !== level) {
-            // Accidental changed mid-measure → must redraw
+            currMeasureSeen[posKey] = level;
+          } else if (currMeasureSeen[posKey] !== level) {
+            // Accidental changed mid-measure on the same position → redraw
             showLevel = level;
-            currMeasureSeen[letterIdx] = level;
+            currMeasureSeen[posKey] = level;
           }
           if (showLevel !== null) {
             n.addModifier(new VF.Accidental(ACC_GLYPH[String(showLevel)]), 0);
           }
-          if (level !== keyDefault) currMeasureAlterations[letterIdx] = level;
+          if (level !== keyDefault) currMeasureAlterations[posKey] = level;
 
           notes.push(n);
         } else {
@@ -971,12 +967,26 @@ function renderChart(song, barsIn, timesigStr) {
       const startX = leftBar.noteStartX;
       const endX = rightBar.noteEndX;
       const color = colorFor(pat.keyName);
-      let lineStartX = startX;
       const isPatternStart = iFirst === patFirst;
+
+      // Horizontal line spans the full measure range (from the left edge of
+      // the first measure in this row to the right edge of the last one).
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', startX);
+      line.setAttribute('y1', patternLineY);
+      line.setAttribute('x2', endX);
+      line.setAttribute('y2', patternLineY);
+      line.setAttribute('stroke', color);
+      line.setAttribute('stroke-width', 2);
+      line.setAttribute('stroke-linecap', 'round');
+      rowSvg.appendChild(line);
+
+      // Key-name text just under the line, aligned with the measure's left
+      // edge — only on the row where the pattern actually starts.
       if (isPatternStart) {
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         t.setAttribute('x', startX);
-        t.setAttribute('y', patternLabelY);
+        t.setAttribute('y', patternTextY);
         t.setAttribute('text-anchor', 'start');
         t.setAttribute('font-family', 'serif');
         t.setAttribute('font-weight', 'bold');
@@ -984,23 +994,6 @@ function renderChart(song, barsIn, timesigStr) {
         t.setAttribute('fill', color);
         t.textContent = pat.keyName;
         rowSvg.appendChild(t);
-        try {
-          const bb = t.getBBox();
-          lineStartX = bb.x + bb.width + 4;
-        } catch (e) {
-          lineStartX = startX + pat.keyName.length * 8 + 4;
-        }
-      }
-      if (endX > lineStartX) {
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('x1', lineStartX);
-        line.setAttribute('y1', patternLabelY + 2);
-        line.setAttribute('x2', endX);
-        line.setAttribute('y2', patternLabelY + 2);
-        line.setAttribute('stroke', color);
-        line.setAttribute('stroke-width', 2);
-        line.setAttribute('stroke-linecap', 'round');
-        rowSvg.appendChild(line);
       }
     });
 
@@ -1017,6 +1010,14 @@ function renderChart(song, barsIn, timesigStr) {
       svgEl.style.width = '100%';
       svgEl.style.height = 'auto';
     }
+
+    // Add a horizontal separator between full-form repeats.
+    if (rowEnd === passBoundary && passBoundary < bars.length) {
+      const sep = document.createElement('div');
+      sep.className = 'form-separator';
+      chartEl.appendChild(sep);
+    }
+    rowStart = rowEnd;
   }
 }
 
@@ -1313,27 +1314,20 @@ async function startPlayback(song, bars) {
     else if (bar.repeatPrev === 2 && playlist[barNum - 2]) bar = playlist[barNum - 2].bar;
     else lastResolved = bar;
 
-    // Determine chord per 16th slot (for comping lookup)
-    const chords = (bar.chords || []).filter(c => !c.slash && !c.nc);
-    const chordForSlot = (slot16) => {
-      if (chords.length === 0) return null;
-      if (chords.length === 1) return chords[0];
-      if (chords.length === 2) return slot16 < 8 ? chords[0] : chords[1];
-      // 3+: distribute evenly
-      const idx = Math.min(chords.length - 1, Math.floor(slot16 / (16 / chords.length)));
-      return chords[idx];
-    };
-
     events.push({ time: barNum + ':0:0', type: 'barStart', idx: entry.idx });
 
-    // Random jazz comping pattern for this bar
-    const pat = COMPING_PATTERNS[Math.floor(Math.random() * COMPING_PATTERNS.length)];
-    for (const slot of pat) {
-      const ch = chordForSlot(slot);
-      if (!ch) continue;
-      const dur = Math.random() < 0.25 ? '4n' : '8n'; // mostly short, occasional longer
-      events.push({ time: `${barNum}:0:${slot}`, type: 'comp', ch, dur });
-    }
+    // One stab per chord symbol, placed at the same beat as the chord
+    // sits visually in the measure.
+    const chords = (bar.chords || []).filter(c => !c.slash && !c.nc);
+    chords.forEach((ch, ci) => {
+      const beat = ci * beatsPerBar / chords.length;
+      const wholeBeat = Math.floor(beat);
+      const sixteenth = Math.round((beat - wholeBeat) * 4);
+      events.push({
+        time: `${barNum}:${wholeBeat}:${sixteenth}`,
+        type: 'comp', ch, dur: '4n'
+      });
+    });
 
     // Drums
     if (drumMode === 'hat') {
@@ -1406,12 +1400,45 @@ async function loadFromHTMLText(text) {
   const url = m[0];
   return loadFromURL(url);
 }
+// Expand iReal Pro repeat markers ({ ... }) into two literal copies of the
+// bars so the chord sequence shows twice and the quarter-note walker can
+// continue through the second pass with different notes. Non-repeated bars
+// pass through unchanged.
+function expandIRealRepeats(bars) {
+  const out = [];
+  let i = 0;
+  const stripRepeatBarlines = (src) => {
+    const b = { ...src, markers: src.markers ? [...src.markers] : [] };
+    if (b.leftBar === 'repeatStart') b.leftBar = 'single';
+    if (b.rightBar === 'repeatEnd') b.rightBar = 'single';
+    return b;
+  };
+  while (i < bars.length) {
+    if (bars[i].leftBar === 'repeatStart') {
+      let j = i;
+      while (j < bars.length && bars[j].rightBar !== 'repeatEnd') j++;
+      if (j < bars.length) {
+        // Both copies are literal bars now — strip the repeat barlines so
+        // there's no misleading :|| or ||: on the seam.
+        for (let k = i; k <= j; k++) out.push(stripRepeatBarlines(bars[k]));
+        for (let k = i; k <= j; k++) out.push(stripRepeatBarlines(bars[k]));
+        i = j + 1;
+        continue;
+      }
+    }
+    out.push(bars[i]);
+    i++;
+  }
+  return out;
+}
+
 function loadFromURL(url) {
   const song = parseIRealSong(url);
   const tokens = tokenize(song.body);
-  const { bars, timesig } = buildBars(tokens);
+  let { bars, timesig } = buildBars(tokens);
+  bars = expandIRealRepeats(bars);
   renderChart(song, bars, timesig);
-  window.currentSong = { song, bars };
+  window.currentSong = { song, bars, timesig };
   document.getElementById('status').textContent = `Loaded: ${song.title} (${bars.length} bars)`;
 }
 
@@ -1431,10 +1458,49 @@ document.querySelectorAll('#tempoSeg button').forEach(b => {
     if (Tone.Transport) Tone.Transport.bpm.value = currentTempo;
   });
 });
+// ===== Wake Lock (prevent phone sleep while practicing) =====
+let wakeLockSentinel = null;
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) {
+    document.getElementById('status').textContent = 'Wake lock not supported on this browser.';
+    return false;
+  }
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request('screen');
+    wakeLockSentinel.addEventListener('release', () => { wakeLockSentinel = null; });
+    return true;
+  } catch (e) {
+    document.getElementById('status').textContent = 'Wake lock failed: ' + e.message;
+    return false;
+  }
+}
+async function releaseWakeLock() {
+  if (wakeLockSentinel) {
+    try { await wakeLockSentinel.release(); } catch (e) {}
+    wakeLockSentinel = null;
+  }
+}
+document.getElementById('wakeLock').addEventListener('change', async e => {
+  if (e.target.checked) {
+    const ok = await acquireWakeLock();
+    if (!ok) e.target.checked = false;
+  } else {
+    await releaseWakeLock();
+  }
+});
+// Re-acquire after tab/screen visibility changes — the browser auto-releases
+// the lock when the page is hidden.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible'
+      && document.getElementById('wakeLock').checked
+      && !wakeLockSentinel) {
+    acquireWakeLock();
+  }
+});
+
 function rerenderCurrent() {
   if (!window.currentSong) return;
-  const { song, bars } = window.currentSong;
-  const { timesig } = buildBars(tokenize(song.body));
+  const { song, bars, timesig } = window.currentSong;
   renderChart(song, bars, timesig);
 }
 
