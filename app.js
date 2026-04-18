@@ -1000,6 +1000,17 @@ function pcFromRoot(root) {
   if (m[2] === '#') pc++; else if (m[2] === 'b') pc--;
   return ((pc % 12) + 12) % 12;
 }
+// Chord pitch class: the parser stores the root as a single letter and keeps
+// the accidental as the first char of rest (e.g. Bb^7 → root='B', rest='b^7').
+// Combine them here so playback uses the correct root.
+function pcFromChord(ch) {
+  let pc = NOTE_MAP[ch.root];
+  if (pc === undefined) return 0;
+  const rest = ch.rest || '';
+  if (rest[0] === '#') pc++;
+  else if (rest[0] === 'b') pc--;
+  return ((pc % 12) + 12) % 12;
+}
 // Return intervals from root (semitones) for the chord voicing
 function intervalsFor(rest) {
   const s = rest || '';
@@ -1070,7 +1081,7 @@ function intervalsFor(rest) {
 }
 function chordNotes(ch, octave = 4) {
   if (ch.nc || ch.slash) return null;
-  const pc = pcFromRoot(ch.root);
+  const pc = pcFromChord(ch);
   const ivs = intervalsFor(ch.rest || '');
   // Build MIDI pitch numbers around given octave
   const rootMidi = 12 * (octave + 1) + pc; // C4 = 60
@@ -1080,7 +1091,7 @@ function chordNotes(ch, octave = 4) {
 // Jazz voicing: rootless, 3-4 note, randomized inversion, centered mid-register.
 function jazzVoicing(ch) {
   if (!ch || ch.nc || ch.slash) return null;
-  const pc = pcFromRoot(ch.root);
+  const pc = pcFromChord(ch);
   const ivs = intervalsFor(ch.rest || '');
   // Drop the root; keep chord tones (3,5,7) and one tension (9/11/13) if present
   const chordTones = ivs.filter(i => i > 0 && i < 12);
@@ -1128,7 +1139,7 @@ const COMPING_PATTERNS = [
 ];
 function bassNote(ch, octave = 2) {
   if (ch.nc || ch.slash) return null;
-  const pc = ch.bass ? pcFromRoot(ch.bass) : pcFromRoot(ch.root);
+  const pc = ch.bass ? pcFromRoot(ch.bass) : pcFromChord(ch);
   return 12 * (octave + 1) + pc;
 }
 function midiToName(m) {
