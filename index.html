@@ -10,49 +10,63 @@
 <body>
 <div id="app">
   <header>
-    <div class="meta">
-      <select id="songSelect" class="song-select" aria-label="Song"></select>
-    </div>
-    <div class="controls">
+    <div class="top-row">
       <button id="playBtn" class="play">▶</button>
-      <div class="seg tempo-seg" id="tempoSeg" role="tablist">
-        <button type="button" data-bpm="80">Ballad (80)</button>
-        <button type="button" data-bpm="120" class="active">Medium (120)</button>
-        <button type="button" data-bpm="180">Up (180)</button>
-      </div>
+      <select id="songSelect" class="song-select" aria-label="Song"></select>
+      <button id="optionsToggle" class="options-toggle" aria-label="Toggle options" aria-expanded="false">⚙</button>
     </div>
-    <div class="drum-row">
-      <span class="drum-label">Drums</span>
-      <div class="seg" id="drumSeg" role="tablist">
-        <button type="button" data-mode="hat" class="active">Hi-hat</button>
-        <button type="button" data-mode="ride">Ride</button>
-        <button type="button" data-mode="click">Click</button>
+    <div id="optionsPanel" class="options-panel" hidden>
+      <div class="drum-row">
+        <span class="drum-label">Tempo</span>
+        <div class="seg tempo-seg" id="tempoSeg" role="tablist">
+          <button type="button" data-bpm="80">Ballad (80)</button>
+          <button type="button" data-bpm="120" class="active">Medium (120)</button>
+          <button type="button" data-bpm="180">Up (180)</button>
+        </div>
       </div>
-      <input type="range" id="drumVol" class="drum-vol" min="0" max="100" value="75" aria-label="Drum volume" />
-    </div>
-    <div class="drum-row">
-      <span class="drum-label">Per line</span>
-      <div class="seg" id="mplSeg" role="tablist">
-        <button type="button" data-mpl="1">1</button>
-        <button type="button" data-mpl="2" class="active">2</button>
-        <button type="button" data-mpl="4">4</button>
-        <button type="button" data-mpl="6">6</button>
-        <button type="button" data-mpl="8">8</button>
+      <div class="drum-row">
+        <span class="drum-label">Drums</span>
+        <div class="seg" id="drumSeg" role="tablist">
+          <button type="button" data-mode="hat" class="active">Hi-hat</button>
+          <button type="button" data-mode="ride">Ride</button>
+          <button type="button" data-mode="click">Click</button>
+        </div>
+        <input type="range" id="drumVol" class="drum-vol" min="0" max="100" value="75" aria-label="Drum volume" />
       </div>
-      <span class="drum-label">Repeats</span>
-      <div class="seg" id="repeatSeg" role="tablist">
-        <button type="button" data-r="1">1</button>
-        <button type="button" data-r="2" class="active">2</button>
-        <button type="button" data-r="3">3</button>
-        <button type="button" data-r="4">4</button>
+      <div class="drum-row">
+        <span class="drum-label">Per line</span>
+        <div class="seg" id="mplSeg" role="tablist">
+          <button type="button" data-mpl="1">1</button>
+          <button type="button" data-mpl="2" class="active">2</button>
+          <button type="button" data-mpl="4">4</button>
+          <button type="button" data-mpl="6">6</button>
+          <button type="button" data-mpl="8">8</button>
+        </div>
       </div>
-    </div>
-    <div class="drum-row">
-      <label class="wake-label">
-        <input type="checkbox" id="wakeLock" class="switch-input" />
-        <span class="switch" aria-hidden="true"></span>
-        <span>Keep screen on</span>
-      </label>
+      <div class="drum-row">
+        <span class="drum-label">Repeats</span>
+        <div class="seg" id="repeatSeg" role="tablist">
+          <button type="button" data-r="1">1</button>
+          <button type="button" data-r="2" class="active">2</button>
+          <button type="button" data-r="3">3</button>
+          <button type="button" data-r="4">4</button>
+        </div>
+      </div>
+      <div class="drum-row">
+        <span class="drum-label">Count-in</span>
+        <div class="seg" id="countInSeg" role="tablist">
+          <button type="button" data-count="0" class="active">Off</button>
+          <button type="button" data-count="1">1 bar</button>
+          <button type="button" data-count="2">2 bars</button>
+        </div>
+      </div>
+      <div class="drum-row">
+        <label class="wake-label">
+          <input type="checkbox" id="wakeLock" class="switch-input" />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Keep screen on</span>
+        </label>
+      </div>
     </div>
   </header>
 

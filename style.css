@@ -35,6 +35,21 @@ header {
 .controls {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
+.top-row {
+  display: flex; align-items: center; gap: 10px;
+}
+.top-row .song-select { flex: 1; min-width: 0; }
+.options-toggle {
+  background: #2a3a48; color: #cde;
+  border: 1px solid #334654; border-radius: 6px;
+  padding: 10px 12px; font-size: 18px; cursor: pointer;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+.options-toggle:active { transform: scale(0.96); }
+.options-toggle[aria-expanded="true"] { background: #3da9fc; color: #052033; border-color: #3da9fc; }
+.options-panel { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.options-panel[hidden] { display: none; }
 button.play {
   width: 48px; height: 48px; border-radius: 50%;
   background: #3da9fc; color: #052033; border: 0;

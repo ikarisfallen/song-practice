@@ -793,7 +793,10 @@ function renderChart(song, barsIn, timesigStr) {
     const rowBars = bars.slice(rowStart, rowEnd);
     const isFirstRow = rowStart === 0;
     const clefExtra = isFirstRow ? firstMeasureClefWidth : clefOnlyExtra;
-    const rowWidth = leftPadding + clefExtra + rowBars.length * measureWidth + rightPadding;
+    // Always size the row as if it were a full MPL row so short rows (last
+    // row, end-of-pass) keep the same per-bar width as full rows and the
+    // remainder of the staff sits as empty space to the right.
+    const rowWidth = leftPadding + clefExtra + mpl * measureWidth + rightPadding;
 
     const rowEl = document.createElement('div');
     rowEl.className = 'staff-row';
@@ -1177,6 +1180,7 @@ function midiToName(m) {
 // ===== Tone.js playback =====
 let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut;
 let drumMode = 'hat'; // 'hat' | 'ride' | 'click'
+let countInBars = 0;  // 0, 1, or 2 measures of click before the song starts
 let playbackPart;
 let playing = false;
 let currentPlaylist = []; // sequence of { bar, idx } one entry = one bar
@@ -1306,6 +1310,15 @@ async function startPlayback(song, bars) {
   let tick = 0;
   let lastResolved = null;
 
+  // Count-in: N bars of click before the song, then shift all song events
+  // forward by N bars so they land on their expected beats.
+  const offset = countInBars;
+  for (let cb = 0; cb < offset; cb++) {
+    for (let beat = 0; beat < beatsPerBar; beat++) {
+      events.push({ time: `${cb}:${beat}:0`, type: 'click', accent: beat === 0 });
+    }
+  }
+
   for (let barNum = 0; barNum < playlist.length; barNum++) {
     const entry = playlist[barNum];
     let bar = entry.bar;
@@ -1314,7 +1327,8 @@ async function startPlayback(song, bars) {
     else if (bar.repeatPrev === 2 && playlist[barNum - 2]) bar = playlist[barNum - 2].bar;
     else lastResolved = bar;
 
-    events.push({ time: barNum + ':0:0', type: 'barStart', idx: entry.idx });
+    const absBar = barNum + offset;
+    events.push({ time: absBar + ':0:0', type: 'barStart', idx: entry.idx });
 
     // One stab per chord symbol, placed at the same beat as the chord
     // sits visually in the measure.
@@ -1324,7 +1338,7 @@ async function startPlayback(song, bars) {
       const wholeBeat = Math.floor(beat);
       const sixteenth = Math.round((beat - wholeBeat) * 4);
       events.push({
-        time: `${barNum}:${wholeBeat}:${sixteenth}`,
+        time: `${absBar}:${wholeBeat}:${sixteenth}`,
         type: 'comp', ch, dur: '4n'
       });
     });
@@ -1332,25 +1346,25 @@ async function startPlayback(song, bars) {
     // Drums
     if (drumMode === 'hat') {
       // hi-hat on beats 2 and 4
-      events.push({ time: `${barNum}:1:0`, type: 'hat' });
-      events.push({ time: `${barNum}:3:0`, type: 'hat' });
+      events.push({ time: `${absBar}:1:0`, type: 'hat' });
+      events.push({ time: `${absBar}:3:0`, type: 'hat' });
     } else if (drumMode === 'click') {
       // metronome on every quarter note; accent beat 1
       for (let beat = 0; beat < beatsPerBar; beat++) {
-        events.push({ time: `${barNum}:${beat}:0`, type: 'click', accent: beat === 0 });
+        events.push({ time: `${absBar}:${beat}:0`, type: 'click', accent: beat === 0 });
       }
     } else if (drumMode === 'ride') {
       // classic jazz spang-a-lang: quarters on 1..4 plus skip notes on &2 and &4
       // (Transport.swing pushes the "and" eighths into the triplet feel)
-      events.push({ time: `${barNum}:0:0`, type: 'ride' });
-      events.push({ time: `${barNum}:1:0`, type: 'ride' });
-      events.push({ time: `${barNum}:1:2`, type: 'ride', accent: true });
-      events.push({ time: `${barNum}:2:0`, type: 'ride' });
-      events.push({ time: `${barNum}:3:0`, type: 'ride' });
-      events.push({ time: `${barNum}:3:2`, type: 'ride', accent: true });
+      events.push({ time: `${absBar}:0:0`, type: 'ride' });
+      events.push({ time: `${absBar}:1:0`, type: 'ride' });
+      events.push({ time: `${absBar}:1:2`, type: 'ride', accent: true });
+      events.push({ time: `${absBar}:2:0`, type: 'ride' });
+      events.push({ time: `${absBar}:3:0`, type: 'ride' });
+      events.push({ time: `${absBar}:3:2`, type: 'ride', accent: true });
       // foot hi-hat (chick) on 2 and 4
-      events.push({ time: `${barNum}:1:0`, type: 'hatFoot' });
-      events.push({ time: `${barNum}:3:0`, type: 'hatFoot' });
+      events.push({ time: `${absBar}:1:0`, type: 'hatFoot' });
+      events.push({ time: `${absBar}:3:0`, type: 'hatFoot' });
     }
   }
 
@@ -1529,6 +1543,31 @@ document.querySelectorAll('#repeatSeg button').forEach(b => {
 document.getElementById('drumVol').addEventListener('input', e => {
   const v = parseInt(e.target.value, 10) / 100;
   if (drumsOut) drumsOut.gain.rampTo(v, 0.05);
+});
+
+// Options panel toggle
+(function () {
+  const toggle = document.getElementById('optionsToggle');
+  const panel = document.getElementById('optionsPanel');
+  if (!toggle || !panel) return;
+  toggle.addEventListener('click', () => {
+    const hidden = panel.hasAttribute('hidden');
+    if (hidden) {
+      panel.removeAttribute('hidden');
+      toggle.setAttribute('aria-expanded', 'true');
+    } else {
+      panel.setAttribute('hidden', '');
+      toggle.setAttribute('aria-expanded', 'false');
+    }
+  });
+})();
+
+document.querySelectorAll('#countInSeg button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#countInSeg button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    countInBars = parseInt(b.dataset.count, 10) || 0;
+  });
 });
 
 document.querySelectorAll('#drumSeg button').forEach(b => {
