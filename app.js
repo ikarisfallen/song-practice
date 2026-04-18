@@ -44,6 +44,10 @@ function parseIRealSong(url) {
 // Produces a flat sequence of "cells" (4-beat slots) for display AND playback.
 // Also tracks navigation markers (segno/coda/fine/DC/DS) for expansion.
 function tokenize(body) {
+  // Strip iRealPro alternate-chord groups (chords in parentheses). They're
+  // meant to be shown as small substitute chords above the main one — for
+  // this app we only use the main chords.
+  body = body.replace(/\([^()]*\)/g, '');
   // returns array of tokens
   const tokens = [];
   let i = 0;
@@ -560,7 +564,47 @@ function detectKeyPatterns(chordEvents) {
       keyName: pat.keyName
     });
   }
-  return patterns;
+
+  // Phase 3: greedily absorb unused tonic (I / i) chords on either side of
+  // each pattern — e.g. an FMaj7 sitting next to an "FMaj" ii-V belongs in
+  // the same scale line.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pat of patterns) {
+      const tonicType = pat.keyMode === 'major' ? 'major' : 'minor';
+      const tonicPc = pat.keyRoot.pitchClass;
+      const before = pat.firstIdx - 1;
+      if (before >= 0 && !used[before] &&
+          chordEvents[before].type === tonicType &&
+          chordEvents[before].root.pitchClass === tonicPc) {
+        pat.firstIdx = before;
+        used[before] = true;
+        changed = true;
+      }
+      const after = pat.lastIdx + 1;
+      if (after < chordEvents.length && !used[after] &&
+          chordEvents[after].type === tonicType &&
+          chordEvents[after].root.pitchClass === tonicPc) {
+        pat.lastIdx = after;
+        used[after] = true;
+        changed = true;
+      }
+    }
+  }
+
+  // Phase 4: merge adjacent patterns that share the same key name.
+  patterns.sort((a, b) => a.firstIdx - b.firstIdx);
+  const merged = [];
+  for (const pat of patterns) {
+    const last = merged[merged.length - 1];
+    if (last && last.keyName === pat.keyName && last.lastIdx + 1 === pat.firstIdx) {
+      last.lastIdx = pat.lastIdx;
+    } else {
+      merged.push(pat);
+    }
+  }
+  return merged;
 }
 
 // Scale to use for a detected key. Major → Ionian (no Ab on EbMaj7 as IV of
@@ -838,16 +882,36 @@ function renderChart(song, barsIn, timesigStr) {
       else if (bar.rightBar === 'double') stave.setEndBarType(VF.Barline.type.DOUBLE);
       else stave.setEndBarType(VF.Barline.type.SINGLE);
 
-      // Section marker (rehearsal letter)
-      if (bar.section) {
-        stave.setSection(bar.section, 0);
-      }
-      // Ending bracket
-      if (bar.ending) {
-        stave.setRepetition && stave.setRepetition(VF.Repetition.type.NONE, 0, 0);
-        stave.setVoltaType && stave.setVoltaType(VF.Volta.type.MID, bar.ending, 0);
-      }
+      // iRealPro N1/N2 ending brackets aren't meaningful here since repeats
+      // are already expanded into literal bars; skip them to avoid stray
+      // horizontal lines above the chord labels.
       stave.setContext(context).draw();
+
+      // Render the rehearsal letter ourselves, tucked up into the left margin
+      // so it doesn't share a column with the chord label at beat 1.
+      if (bar.section) {
+        const svgForSection = rowEl.querySelector('svg');
+        const bx = stave.getX() + 2;
+        const by = 2;
+        const bw = 13, bh = 13;
+        const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        r.setAttribute('x', bx); r.setAttribute('y', by);
+        r.setAttribute('width', bw); r.setAttribute('height', bh);
+        r.setAttribute('fill', '#000');
+        r.setAttribute('stroke', 'none');
+        svgForSection.appendChild(r);
+        const st = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        st.setAttribute('x', bx + bw / 2);
+        st.setAttribute('y', by + bh - 2);
+        st.setAttribute('text-anchor', 'middle');
+        st.setAttribute('font-family', 'serif');
+        st.setAttribute('font-weight', 'bold');
+        st.setAttribute('font-size', 10);
+        st.setAttribute('fill', '#fff');
+        st.setAttribute('stroke', 'none');
+        st.textContent = bar.section;
+        svgForSection.appendChild(st);
+      }
 
       // Quarter notes per beat (generated from chord scales).
       const beatPitches = quarterNotes[barIdx] || [];
@@ -859,6 +923,9 @@ function renderChart(song, barsIn, timesigStr) {
       const currMeasureSeen = {};       // "letter:octave" → level seen so far
       const currMeasureAlterations = {}; // "letter:octave" → level (if != default)
       const ACC_GLYPH = { '-2': 'bb', '-1': 'b', '0': 'n', '1': '#', '2': '##' };
+      // A new section (rehearsal letter) is a hard reset for the reader —
+      // don't carry courtesy accidentals across it.
+      if (bar.section) prevMeasureAlterations = {};
 
       for (let b = 0; b < ts.num; b++) {
         const bp = beatPitches[b];
@@ -925,16 +992,21 @@ function renderChart(song, barsIn, timesigStr) {
       const labelAreaX0 = noteStart;
       const labelAreaW = noteEnd - noteStart;
       {
+        const n = Math.max(1, displayChords.length);
         displayChords.forEach((ch, ci) => {
-          const cx = labelAreaX0 + (ci + 0.5) * (labelAreaW / Math.max(1, displayChords.length));
+          // Chord label is anchored at the beat the chord falls on — chord ci
+          // of n starts at fraction ci/n of the note area (so a single chord
+          // sits at the left, two chords at beats 1 and 3, etc.)
+          const cx = labelAreaX0 + (ci / n) * labelAreaW;
           const cy = staffY - 6;
           const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
           t.setAttribute('x', cx);
           t.setAttribute('y', cy);
-          t.setAttribute('text-anchor', 'middle');
+          t.setAttribute('text-anchor', 'start');
           t.setAttribute('font-family', 'serif');
           t.setAttribute('font-size', 15);
           t.setAttribute('fill', '#000');
+          t.setAttribute('stroke', 'none');
           t.textContent = chordText(ch);
           svg.appendChild(t);
         });
@@ -959,18 +1031,31 @@ function renderChart(song, barsIn, timesigStr) {
     const rowFirstBar = rowStart;
     const rowLastBar = rowStart + rowBars.length - 1;
     patterns.forEach(pat => {
-      const patFirst = chordEvents[pat.firstIdx].barIdx;
-      const patLast = chordEvents[pat.lastIdx].barIdx;
+      const firstCE = chordEvents[pat.firstIdx];
+      const lastCE = chordEvents[pat.lastIdx];
+      const patFirst = firstCE.barIdx;
+      const patLast = lastCE.barIdx;
       const iFirst = Math.max(rowFirstBar, patFirst);
       const iLast = Math.min(rowLastBar, patLast);
       if (iFirst > iLast) return;
       const leftBar = barPosInRow.find(b => b.barIdx === iFirst);
       const rightBar = barPosInRow.find(b => b.barIdx === iLast);
       if (!leftBar || !rightBar) return;
-      const startX = leftBar.noteStartX;
-      const endX = rightBar.noteEndX;
-      const color = colorFor(pat.keyName);
       const isPatternStart = iFirst === patFirst;
+      const isPatternEnd = iLast === patLast;
+      // Position the line at the specific chord within each bar — otherwise
+      // a V-I that straddles a bar line looks like it covers the whole bar.
+      let startX = leftBar.noteStartX;
+      if (isPatternStart && firstCE.chordsInBar > 1) {
+        const w = (leftBar.noteEndX - leftBar.noteStartX) / firstCE.chordsInBar;
+        startX = leftBar.noteStartX + firstCE.chordIdxInBar * w;
+      }
+      let endX = rightBar.noteEndX;
+      if (isPatternEnd && lastCE.chordsInBar > 1) {
+        const w = (rightBar.noteEndX - rightBar.noteStartX) / lastCE.chordsInBar;
+        endX = rightBar.noteStartX + (lastCE.chordIdxInBar + 1) * w;
+      }
+      const color = colorFor(pat.keyName);
 
       // Horizontal line spans the full measure range (from the left edge of
       // the first measure in this row to the right edge of the last one).
@@ -995,6 +1080,10 @@ function renderChart(song, barsIn, timesigStr) {
         t.setAttribute('font-weight', 'bold');
         t.setAttribute('font-size', 16);
         t.setAttribute('fill', color);
+        // VexFlow's SVG context sets a default stroke, which produces a
+        // black outline around bold glyphs. Force stroke:none so the whole
+        // text is filled with `color`.
+        t.setAttribute('stroke', 'none');
         t.textContent = pat.keyName;
         rowSvg.appendChild(t);
       }
@@ -1397,6 +1486,11 @@ async function startPlayback(song, bars) {
     if (ev.type === 'ride') ride.triggerAttackRelease('8n', time, 0.4);
   }, events.map(e => [e.time, e]));
 
+  // Loop the song indefinitely. Start loop after the count-in bars so the
+  // count-in only plays once.
+  playbackPart.loop = true;
+  playbackPart.loopStart = `${offset}:0:0`;
+  playbackPart.loopEnd = `${offset + playlist.length}:0:0`;
   playbackPart.start(0);
   Tone.Transport.start();
   playing = true;
@@ -1407,12 +1501,28 @@ async function startPlayback(song, bars) {
 }
 
 // ===== File loading =====
+function extractAllIrealURLs(text) {
+  const urls = [];
+  const re = /irealb:\/\/[^"'<>\s]+/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    // A single iRealPro "playlist" link stores every song in one URL,
+    // separated by "===". Split them back into individual songs.
+    const body = m[0].replace(/^irealb:\/\//, '');
+    for (const part of body.split('===')) {
+      if (part.trim().length) urls.push('irealb://' + part);
+    }
+  }
+  return urls;
+}
+function titleFromIrealURL(url) {
+  const decoded = decodeURIComponent(url.replace(/^irealb:\/\//, ''));
+  return decoded.split('=')[0];
+}
 async function loadFromHTMLText(text) {
-  // Find irealb:// URL
-  const m = text.match(/irealb:\/\/[^"'<>\s]+/);
-  if (!m) { alert('No iRealPro song URL found in file.'); return; }
-  const url = m[0];
-  return loadFromURL(url);
+  const urls = extractAllIrealURLs(text);
+  if (urls.length === 0) { alert('No iRealPro song URL found in file.'); return; }
+  return loadFromURL(urls[0]);
 }
 // Expand iReal Pro repeat markers ({ ... }) into two literal copies of the
 // bars so the chord sequence shows twice and the quarter-note walker can
@@ -1588,15 +1698,38 @@ document.querySelectorAll('#drumSeg button').forEach(b => {
 // filenames (HTML exports from iReal Pro). To add a song: drop the HTML file
 // in songs/ and add its filename to songs/index.json.
 
-async function loadSongByFilename(filename) {
+// A manifest entry is either:
+//   - a string filename (single-song HTML, loads the first song in the file), or
+//   - { "title": "Song Name", "file": "pack.html" } — picks the song whose
+//     iRealPro title exactly matches `title` from a file that may contain
+//     many songs (e.g. an iRealPro playlist export).
+function entryTitle(entry) {
+  if (typeof entry === 'string') return entry.replace(/\.html?$/i, '');
+  return entry.title || entry.file;
+}
+function entryFile(entry) {
+  return typeof entry === 'string' ? entry : entry.file;
+}
+
+async function loadSongEntry(entry) {
+  const file = entryFile(entry);
   try {
-    const res = await fetch('songs/' + encodeURIComponent(filename));
+    const res = await fetch('songs/' + encodeURIComponent(file));
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const text = await res.text();
-    loadFromHTMLText(text);
+    const urls = extractAllIrealURLs(text);
+    if (urls.length === 0) throw new Error('no iRealPro URL in file');
+    let url;
+    if (typeof entry === 'string') {
+      url = urls[0];
+    } else {
+      url = urls.find(u => titleFromIrealURL(u) === entry.title);
+      if (!url) throw new Error('song not found: ' + entry.title);
+    }
+    loadFromURL(url);
   } catch (e) {
     document.getElementById('status').textContent =
-      'Failed to load ' + filename + ': ' + e.message;
+      'Failed to load ' + entryTitle(entry) + ': ' + e.message;
   }
 }
 
@@ -1616,17 +1749,18 @@ async function initSongLibrary() {
     return;
   }
   sel.innerHTML = '';
-  songs.forEach(filename => {
+  songs.forEach((entry, i) => {
     const opt = document.createElement('option');
-    opt.value = filename;
-    opt.textContent = filename.replace(/\.html?$/i, '');
+    opt.value = String(i);
+    opt.textContent = entryTitle(entry);
     sel.appendChild(opt);
   });
   sel.addEventListener('change', () => {
     if (playing) stopPlayback();
-    loadSongByFilename(sel.value);
+    const idx = parseInt(sel.value, 10);
+    loadSongEntry(songs[idx]);
   });
-  await loadSongByFilename(songs[0]);
+  await loadSongEntry(songs[0]);
 }
 
 initSongLibrary();

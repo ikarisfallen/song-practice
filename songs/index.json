@@ -1,8 +1,23 @@
 {
   "songs": [
-    "Autumn Leaves.html",
     "If I Were A Bell.html",
-    "Just Friends.html",
-    "Giant Steps.html"
+    "Giant Steps.html",
+    { "title": "There Is No Greater Love", "file": "Songs.html" },
+    { "title": "Four",             "file": "Songs.html" },
+    { "title": "I'll Remember April",             "file": "Songs.html" },
+    { "title": "Billie's Bounce",             "file": "Songs.html" },
+    { "title": "Just Friends",             "file": "Songs.html" },
+    { "title": "All Of Me",             "file": "Songs.html" },
+    { "title": "Autumn Leaves",             "file": "Songs.html" },
+    { "title": "Bye Bye Blackbird",             "file": "Songs.html" },
+    { "title": "Misty",             "file": "Songs.html" },
+    { "title": "There Will Never Be Another You",             "file": "Songs.html" },
+    { "title": "On Green Dolphin Street",             "file": "Songs.html" },
+    { "title": "Oleo",             "file": "Songs.html" },
+    { "title": "Fly Me To The Moon",             "file": "Songs.html" },
+    { "title": "Alice In Wonderland",             "file": "Songs.html" },
+    { "title": "All Blues",             "file": "Songs.html" },
+    { "title": "But Not For Me",             "file": "Songs.html" },
+    { "title": "Bluesette",             "file": "Songs.html" }
   ]
 }
