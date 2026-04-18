@@ -417,12 +417,25 @@ function chordToCanonical(ch) {
 // the source bar's chords so patterns still register correctly.
 function buildChordEventList(bars) {
   const out = [];
+  // Walk backwards through repeat-prev bars until we find real chords. Handles
+  // iRealPro's `Kcl`/`x` chains like "G7 | Kcl | x | x" where every bar after
+  // the first points at a repeat-prev bar that itself has no chord list.
+  const chordsForBar = (bi) => {
+    let cursor = bi;
+    while (cursor >= 0) {
+      const b = bars[cursor];
+      const cs = (b.chords || []).filter(c => !c.slash && !c.nc);
+      if (cs.length) return cs;
+      if (!b.repeatPrev || cursor - b.repeatPrev < 0) return [];
+      cursor -= b.repeatPrev;
+    }
+    return [];
+  };
   for (let bi = 0; bi < bars.length; bi++) {
     const bar = bars[bi];
     let chords = (bar.chords || []).filter(c => !c.slash && !c.nc);
-    if (chords.length === 0 && bar.repeatPrev && bi >= bar.repeatPrev) {
-      const src = bars[bi - bar.repeatPrev];
-      if (src && src.chords) chords = src.chords.filter(c => !c.slash && !c.nc);
+    if (chords.length === 0 && bar.repeatPrev) {
+      chords = chordsForBar(bi);
     }
     const chordsInBar = chords.length;
     chords.forEach((ch, ci) => {
@@ -565,27 +578,48 @@ function detectKeyPatterns(chordEvents) {
     });
   }
 
-  // Phase 3: greedily absorb unused tonic (I / i) chords on either side of
-  // each pattern — e.g. an FMaj7 sitting next to an "FMaj" ii-V belongs in
-  // the same scale line.
+  // Phase 3: greedily absorb adjacent UNUSED chords that are diatonic to the
+  // pattern's key — e.g. in C major, Dm7→G7 (a 25) extends through an
+  // unused Em7 (iii) and Am7 (vi) since all four sit in C Ionian.
+  // Chords already claimed by another pattern are left alone so a following
+  // Am7♭5→D7→Gm isn't pulled into an adjacent B♭-major group.
+  const isDiatonic = (ev, keyPc, keyMode) => {
+    const deg = (((ev.root.pitchClass - keyPc) % 12) + 12) % 12;
+    const t = ev.type;
+    if (keyMode === 'major') {
+      if (deg === 0)  return t === 'major';
+      if (deg === 2)  return t === 'minor';
+      if (deg === 4)  return t === 'minor';
+      if (deg === 5)  return t === 'major';
+      if (deg === 7)  return t === 'dominant';
+      if (deg === 9)  return t === 'minor';
+      if (deg === 11) return t === 'halfdim';
+    } else {
+      // Jazz minor "kit": natural + harmonic + melodic functions.
+      if (deg === 0)  return t === 'minor';
+      if (deg === 2)  return t === 'halfdim';
+      if (deg === 3)  return t === 'major';
+      if (deg === 5)  return t === 'minor';
+      if (deg === 7)  return t === 'dominant';
+      if (deg === 8)  return t === 'major';
+      if (deg === 10) return t === 'dominant' || t === 'major';
+    }
+    return false;
+  };
   let changed = true;
   while (changed) {
     changed = false;
     for (const pat of patterns) {
-      const tonicType = pat.keyMode === 'major' ? 'major' : 'minor';
-      const tonicPc = pat.keyRoot.pitchClass;
       const before = pat.firstIdx - 1;
       if (before >= 0 && !used[before] &&
-          chordEvents[before].type === tonicType &&
-          chordEvents[before].root.pitchClass === tonicPc) {
+          isDiatonic(chordEvents[before], pat.keyRoot.pitchClass, pat.keyMode)) {
         pat.firstIdx = before;
         used[before] = true;
         changed = true;
       }
       const after = pat.lastIdx + 1;
       if (after < chordEvents.length && !used[after] &&
-          chordEvents[after].type === tonicType &&
-          chordEvents[after].root.pitchClass === tonicPc) {
+          isDiatonic(chordEvents[after], pat.keyRoot.pitchClass, pat.keyMode)) {
         pat.lastIdx = after;
         used[after] = true;
         changed = true;
@@ -809,7 +843,10 @@ function renderChart(song, barsIn, timesigStr) {
   // letter index: 0=F,1=C,2=G,3=D,4=A,5=E,6=B (same as ExerciseBuilder.qml noteName)
   // level: -2=bb, -1=b, 0=natural, 1=#, 2=##
   // In C major (no key sig) the default level for every letter is 0.
-  let prevMeasureAlterations = {};
+  // Track only the LAST note of the previous bar — courtesy accidentals fire
+  // only when that last note was altered and the first note of the next bar
+  // is a natural at the same staff position.
+  let prevLastNote = null; // { posKey, level } | null
 
   const mpl = measuresPerLine;
   const measureWidth = 240;
@@ -921,11 +958,12 @@ function renderChart(song, barsIn, timesigStr) {
       // or space was altered in the previous bar — not just the same letter
       // in a distant octave.
       const currMeasureSeen = {};       // "letter:octave" → level seen so far
-      const currMeasureAlterations = {}; // "letter:octave" → level (if != default)
       const ACC_GLYPH = { '-2': 'bb', '-1': 'b', '0': 'n', '1': '#', '2': '##' };
       // A new section (rehearsal letter) is a hard reset for the reader —
       // don't carry courtesy accidentals across it.
-      if (bar.section) prevMeasureAlterations = {};
+      if (bar.section) prevLastNote = null;
+      let isFirstNoteOfBar = true;
+      let lastNoteOfBar = null;
 
       for (let b = 0; b < ts.num; b++) {
         const bp = beatPitches[b];
@@ -940,38 +978,36 @@ function renderChart(song, barsIn, timesigStr) {
           const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: 'q', stem_direction: stemDir });
 
           // Decide whether to show an accidental on this note.
-          // Key default level for every letter = 0 (C major / no key signature).
           const keyDefault = 0;
           let showLevel = null;
           if (!(posKey in currMeasureSeen)) {
-            // First occurrence of this exact staff position in the measure
             if (level !== keyDefault) {
-              showLevel = level; // sharp/flat/etc must be drawn
-            } else if (posKey in prevMeasureAlterations &&
-                       prevMeasureAlterations[posKey] !== keyDefault) {
-              // Same staff position was altered in the previous measure →
-              // draw a courtesy natural so the reader doesn't carry the
-              // accidental across the bar line visually.
+              showLevel = level; // sharp/flat must always be drawn the first time
+            } else if (isFirstNoteOfBar && prevLastNote &&
+                       prevLastNote.posKey === posKey &&
+                       prevLastNote.level !== keyDefault) {
+              // Previous bar's last note was altered at this same staff
+              // position and this first note is natural → courtesy natural.
               showLevel = 0;
             }
             currMeasureSeen[posKey] = level;
           } else if (currMeasureSeen[posKey] !== level) {
-            // Accidental changed mid-measure on the same position → redraw
             showLevel = level;
             currMeasureSeen[posKey] = level;
           }
           if (showLevel !== null) {
             n.addModifier(new VF.Accidental(ACC_GLYPH[String(showLevel)]), 0);
           }
-          if (level !== keyDefault) currMeasureAlterations[posKey] = level;
+          lastNoteOfBar = { posKey, level };
+          isFirstNoteOfBar = false;
 
           notes.push(n);
         } else {
           notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
         }
       }
-      // Carry this measure's alterations to the next measure
-      prevMeasureAlterations = currMeasureAlterations;
+      // Carry the last note of this bar to the next bar for the courtesy check.
+      prevLastNote = lastNoteOfBar;
       const voice = new VF.Voice({ num_beats: ts.num, beat_value: ts.denom, resolution: VF.RESOLUTION });
       voice.setStrict(false);
       voice.addTickables(notes);
@@ -982,12 +1018,18 @@ function renderChart(song, barsIn, timesigStr) {
 
       // Manual chord symbol labels above the staff, evenly spaced over the note area.
       const svg = rowEl.querySelector('svg');
-      // For Kcl-style "repeat prev measure" bars, inherit the previous bar's chord
-      // symbols so the label matches the generated notes.
+      // For Kcl/x "repeat prev measure" chains, walk backwards until we find a
+      // bar that actually has chords so the label matches the generated notes.
       let displayChords = (bar.chords || []).filter(c => !c.slash);
-      if (bar.repeatPrev && barIdx >= bar.repeatPrev) {
-        const src = bars[barIdx - bar.repeatPrev];
-        if (src && src.chords) displayChords = src.chords.filter(c => !c.slash);
+      if (!displayChords.length && bar.repeatPrev) {
+        let cursor = barIdx;
+        while (cursor >= 0) {
+          const b = bars[cursor];
+          const cs = (b.chords || []).filter(c => !c.slash);
+          if (cs.length) { displayChords = cs; break; }
+          if (!b.repeatPrev || cursor - b.repeatPrev < 0) break;
+          cursor -= b.repeatPrev;
+        }
       }
       const labelAreaX0 = noteStart;
       const labelAreaW = noteEnd - noteStart;
@@ -1268,6 +1310,7 @@ function midiToName(m) {
 
 // ===== Tone.js playback =====
 let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut;
+let realHihat, brushSweep, brushTap;
 let drumMode = 'hat'; // 'hat' | 'ride' | 'click'
 let countInBars = 0;  // 0, 1, or 2 measures of click before the song starts
 let playbackPart;
@@ -1295,9 +1338,7 @@ async function initAudio() {
     baseUrl: 'https://tonejs.github.io/audio/salamander/',
     volume: -6
   }).connect(reverb);
-  document.getElementById('status').textContent = 'Loading piano samples…';
-  await Tone.loaded();
-  document.getElementById('status').textContent = 'Ready';
+  document.getElementById('status').textContent = 'Loading samples…';
 
   // Shared drum bus so a single slider controls all drum volumes
   const initVol = parseInt(document.getElementById('drumVol').value, 10) / 100;
@@ -1344,6 +1385,34 @@ async function initAudio() {
     envelope: { attack: 0.001, decay: 0.35, sustain: 0.05, release: 0.6 },
     volume: -30
   }).connect(rideHP);
+
+  // Real drum samples from the Tone.js acoustic drum kit (CORS-friendly).
+  // Used by the "Real" drum mode, which picks a pattern based on tempo tier.
+  const drumBase = 'https://tonejs.github.io/audio/drum-samples/acoustic-kit/';
+  realHihat = new Tone.Sampler({
+    urls: { C4: 'hihat.mp3' },
+    baseUrl: drumBase,
+    volume: -2
+  }).connect(drumsOut);
+
+  // Brush layer: synthesized with pink noise (the continuous sweep) and white
+  // noise (the sharper tap), routed through filters so they sit in the right
+  // frequency band on top of the bus.
+  const brushSweepFilter = new Tone.Filter({ type: 'bandpass', frequency: 2600, Q: 0.8 }).connect(drumsOut);
+  brushSweep = new Tone.NoiseSynth({
+    noise: { type: 'pink' },
+    envelope: { attack: 0.06, decay: 0.35, sustain: 0, release: 0.25 },
+    volume: -8
+  }).connect(brushSweepFilter);
+  const brushTapFilter = new Tone.Filter({ type: 'highpass', frequency: 3500, Q: 0.7 }).connect(drumsOut);
+  brushTap = new Tone.NoiseSynth({
+    noise: { type: 'white' },
+    envelope: { attack: 0.001, decay: 0.12, sustain: 0, release: 0.08 },
+    volume: -6
+  }).connect(brushTapFilter);
+
+  await Tone.loaded();
+  document.getElementById('status').textContent = 'Ready';
 }
 
 function stopPlayback() {
@@ -1390,11 +1459,16 @@ async function startPlayback(song, bars) {
   Tone.Transport.swing = isSwing ? 0.55 : 0;
   Tone.Transport.swingSubdivision = '8n';
 
+  // Honor the song's time signature so bar:beat:sixteenth positions in the
+  // scheduled events line up correctly (especially for 3/4 waltzes).
+  const ts = parseTimesig((window.currentSong && window.currentSong.timesig) || '44');
+  Tone.Transport.timeSignature = ts.num;
+
   const playlist = expandForPlayback(bars);
   currentPlaylist = playlist;
   if (!playlist.length) return;
 
-  const beatsPerBar = 4;
+  const beatsPerBar = ts.num;
   const events = [];
   let tick = 0;
   let lastResolved = null;
@@ -1432,28 +1506,79 @@ async function startPlayback(song, bars) {
       });
     });
 
-    // Drums
+    // Drums — patterns adapt to the current time signature (4/4, 3/4, etc.)
     if (drumMode === 'hat') {
-      // hi-hat on beats 2 and 4
-      events.push({ time: `${absBar}:1:0`, type: 'hat' });
-      events.push({ time: `${absBar}:3:0`, type: 'hat' });
+      if (beatsPerBar === 4) {
+        // Classic hi-hat on 2 and 4
+        events.push({ time: `${absBar}:1:0`, type: 'hat' });
+        events.push({ time: `${absBar}:3:0`, type: 'hat' });
+      } else if (beatsPerBar === 3) {
+        // Waltz: hi-hat on beats 2 and 3
+        events.push({ time: `${absBar}:1:0`, type: 'hat' });
+        events.push({ time: `${absBar}:2:0`, type: 'hat' });
+      } else {
+        // Generic: on every beat except 1
+        for (let b = 1; b < beatsPerBar; b++) {
+          events.push({ time: `${absBar}:${b}:0`, type: 'hat' });
+        }
+      }
     } else if (drumMode === 'click') {
-      // metronome on every quarter note; accent beat 1
+      // Metronome on every quarter note; accent beat 1
       for (let beat = 0; beat < beatsPerBar; beat++) {
         events.push({ time: `${absBar}:${beat}:0`, type: 'click', accent: beat === 0 });
       }
     } else if (drumMode === 'ride') {
-      // classic jazz spang-a-lang: quarters on 1..4 plus skip notes on &2 and &4
-      // (Transport.swing pushes the "and" eighths into the triplet feel)
-      events.push({ time: `${absBar}:0:0`, type: 'ride' });
-      events.push({ time: `${absBar}:1:0`, type: 'ride' });
-      events.push({ time: `${absBar}:1:2`, type: 'ride', accent: true });
-      events.push({ time: `${absBar}:2:0`, type: 'ride' });
-      events.push({ time: `${absBar}:3:0`, type: 'ride' });
-      events.push({ time: `${absBar}:3:2`, type: 'ride', accent: true });
-      // foot hi-hat (chick) on 2 and 4
-      events.push({ time: `${absBar}:1:0`, type: 'hatFoot' });
-      events.push({ time: `${absBar}:3:0`, type: 'hatFoot' });
+      // "Real" mode — pick a groove based on the tempo tier.
+      //   Ballad (≤ 100): brush sweep + taps on 2 & 4
+      //   Medium (≤ 150): crisp hi-hat ride (spang-a-lang with real hihat sample)
+      //   Up (> 150):     quick brush shuffle (swung 8ths on brush tap)
+      const tempoTier = currentTempo < 100 ? 'ballad' : (currentTempo < 150 ? 'medium' : 'up');
+
+      if (tempoTier === 'ballad') {
+        // Slow jazz brushes: sweep the snare on beat 1 (and 3 in 4/4), tap
+        // on the backbeats.
+        if (beatsPerBar === 4) {
+          events.push({ time: `${absBar}:0:0`, type: 'brushSweep' });
+          events.push({ time: `${absBar}:2:0`, type: 'brushSweep' });
+          events.push({ time: `${absBar}:1:0`, type: 'brushTap' });
+          events.push({ time: `${absBar}:3:0`, type: 'brushTap' });
+        } else if (beatsPerBar === 3) {
+          events.push({ time: `${absBar}:0:0`, type: 'brushSweep' });
+          events.push({ time: `${absBar}:1:0`, type: 'brushTap' });
+          events.push({ time: `${absBar}:2:0`, type: 'brushTap' });
+        } else {
+          events.push({ time: `${absBar}:0:0`, type: 'brushSweep' });
+          for (let b = 1; b < beatsPerBar; b++) {
+            events.push({ time: `${absBar}:${b}:0`, type: 'brushTap' });
+          }
+        }
+      } else if (tempoTier === 'medium') {
+        // Crisp hi-hat spang-a-lang using the acoustic-kit hihat sample.
+        if (beatsPerBar === 4) {
+          events.push({ time: `${absBar}:0:0`, type: 'realHihat' });
+          events.push({ time: `${absBar}:1:0`, type: 'realHihat' });
+          events.push({ time: `${absBar}:1:2`, type: 'realHihat', accent: true });
+          events.push({ time: `${absBar}:2:0`, type: 'realHihat' });
+          events.push({ time: `${absBar}:3:0`, type: 'realHihat' });
+          events.push({ time: `${absBar}:3:2`, type: 'realHihat', accent: true });
+        } else if (beatsPerBar === 3) {
+          events.push({ time: `${absBar}:0:0`, type: 'realHihat' });
+          events.push({ time: `${absBar}:1:0`, type: 'realHihat' });
+          events.push({ time: `${absBar}:2:0`, type: 'realHihat' });
+          events.push({ time: `${absBar}:2:2`, type: 'realHihat', accent: true });
+        } else {
+          for (let b = 0; b < beatsPerBar; b++) {
+            events.push({ time: `${absBar}:${b}:0`, type: 'realHihat' });
+          }
+        }
+      } else {
+        // Up tempo brush shuffle: swung 8ths. The "and" hit on each beat
+        // gets Transport.swing treatment for triplet feel.
+        for (let b = 0; b < beatsPerBar; b++) {
+          events.push({ time: `${absBar}:${b}:0`, type: 'brushTap', accent: b === 0 });
+          events.push({ time: `${absBar}:${b}:2`, type: 'brushTap' });
+        }
+      }
     }
   }
 
@@ -1473,17 +1598,19 @@ async function startPlayback(song, bars) {
     if (ev.type === 'hat') hat.triggerAttackRelease('16n', time, 0.6);
     if (ev.type === 'hatFoot') hat.triggerAttackRelease('32n', time, 0.25);
     if (ev.type === 'click') click.triggerAttackRelease('32n', time, ev.accent ? 0.95 : 0.55);
-    if (ev.type === 'ride') {
-      // "spang" (downbeat) = body + bell + shimmer; "a" (skip) = body + light shimmer, softer
-      const skip = !!ev.accent; // skip notes tagged with accent:true
-      const bodyVel = skip ? 0.45 : 0.7;
-      const bellVel = skip ? 0 : 0.6;
-      const noiseVel = skip ? 0.25 : 0.4;
-      rideBody.triggerAttackRelease('C3', '2n', time, bodyVel);
-      if (bellVel) rideBell.triggerAttackRelease('C5', '16n', time, bellVel);
-      rideNoise.triggerAttackRelease('16n', time, noiseVel);
+    if (ev.type === 'realHihat') {
+      // Crisp hi-hat sample — accent (skip notes) slightly softer for the
+      // "spang-a-lang" feel where the "a" is lighter than the downbeat.
+      const vel = ev.accent ? 0.55 : 0.85;
+      realHihat.triggerAttackRelease('C4', '8n', time, vel);
     }
-    if (ev.type === 'ride') ride.triggerAttackRelease('8n', time, 0.4);
+    if (ev.type === 'brushSweep') {
+      brushSweep.triggerAttackRelease('4n', time, 0.7 + Math.random() * 0.15);
+    }
+    if (ev.type === 'brushTap') {
+      const vel = ev.accent ? 0.8 : 0.55 + Math.random() * 0.15;
+      brushTap.triggerAttackRelease('16n', time, vel);
+    }
   }, events.map(e => [e.time, e]));
 
   // Loop the song indefinitely. Start loop after the count-in bars so the
@@ -1575,11 +1702,21 @@ document.getElementById('playBtn').addEventListener('click', async () => {
 });
 let currentTempo = 120;
 document.querySelectorAll('#tempoSeg button').forEach(b => {
-  b.addEventListener('click', () => {
+  b.addEventListener('click', async () => {
     document.querySelectorAll('#tempoSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
+    const prevTempo = currentTempo;
     currentTempo = parseInt(b.dataset.bpm, 10) || 120;
     if (Tone.Transport) Tone.Transport.bpm.value = currentTempo;
+    // The "Real" drum mode picks its pattern (brushes / hi-hat / shuffle)
+    // based on tempo tier, so we need to rebuild the part when the tier
+    // actually changes during playback.
+    const tier = (t) => t < 100 ? 'ballad' : (t < 150 ? 'medium' : 'up');
+    if (playing && window.currentSong && drumMode === 'ride' &&
+        tier(prevTempo) !== tier(currentTempo)) {
+      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+      await startPlayback(window.currentSong.song, expanded);
+    }
   });
 });
 // ===== Wake Lock (prevent phone sleep while practicing) =====
