@@ -550,9 +550,6 @@ function renderChart(song, barsIn, timesigStr) {
   const chartEl = document.getElementById('chart');
   chartEl.innerHTML = '';
   barElements.length = 0;
-  document.getElementById('songComposer').textContent = song.composer || '';
-  document.getElementById('songStyle').textContent =
-    (song.styleFull || song.style || '') + (song.key ? ' · ' + song.key : '') + (song.bpm ? ' · ' + song.bpm + ' bpm' : '');
 
   if (!window.Vex || !window.Vex.Flow) {
     chartEl.textContent = 'VexFlow failed to load.';
