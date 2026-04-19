@@ -5,10 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=33" />
+<link rel="stylesheet" href="style.css?v=35" />
 </head>
 <body>
 <div id="app">
+  <aside id="sidebar" hidden>
+    <div id="songListPanel" class="song-list-panel">
+      <ul id="songList" class="song-list" role="listbox" aria-label="Songs"></ul>
+    </div>
+  </aside>
+  <div id="mainArea" class="main-area">
   <header>
     <div class="top-row">
       <button id="playBtn" class="top-btn play" aria-label="Play"><span class="play-glyph">▶</span><span class="loop-indicator" aria-hidden="true">↻</span></button>
@@ -111,9 +117,10 @@
   <footer>
     <div class="status" id="status">Ready</div>
   </footer>
+  </div><!-- /#mainArea -->
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=69"></script>
+<script src="app.js?v=70"></script>
 </body>
 </html>

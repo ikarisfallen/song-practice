@@ -20,6 +20,90 @@ html, body {
   height: 100dvh;
   overflow: hidden;
 }
+#sidebar { display: none; }
+.main-area {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ===== Landscape / wide-screen layout =====
+   When the viewport is wider than it is tall and has room for a sidebar,
+   pull the transport buttons, options controls, song list, and note-info
+   panel into a persistent left sidebar. The chart gets the remaining
+   horizontal space. The mobile header + fingerboard-section stay in the
+   DOM but their key children are reparented into the sidebar by JS; here
+   we just hide the now-empty containers and the toggle buttons. */
+body.layout-landscape #app { flex-direction: row; }
+body.layout-landscape #sidebar {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 450px;
+  background: #14202a;
+  border-right: 1px solid #2a3a48;
+  padding: 10px;
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
+}
+body.layout-landscape .main-area header,
+body.layout-landscape .main-area .fingerboard-section {
+  display: none;
+}
+body.layout-landscape #sidebar .top-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+/* Song picker / note-info toggle / options toggle are redundant in
+   landscape — their targets are already visible in the sidebar. */
+body.layout-landscape #sidebar .song-picker,
+body.layout-landscape #sidebar #fbToggle,
+body.layout-landscape #sidebar #optionsToggle {
+  display: none;
+}
+body.layout-landscape #sidebar #optionsPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body.layout-landscape #sidebar #optionsPanel[hidden] {
+  /* In landscape, the options panel is always visible — override the
+     `hidden` attribute that the toggle button might have left behind. */
+  display: flex !important;
+}
+body.layout-landscape #sidebar #fingerboardPanel {
+  flex-shrink: 0;
+  margin-top: 0;
+}
+body.layout-landscape #sidebar #fingerboardPanel[hidden] {
+  display: flex !important;
+}
+body.layout-landscape #sidebar #songListPanel {
+  flex: 1 1 auto;
+  min-height: 80px;
+  overflow-y: auto;
+  border: 1px solid #334654;
+  border-radius: 6px;
+  background: #1a2632;
+}
+#songListPanel { display: none; } /* hidden in portrait */
+body.layout-landscape #songListPanel { display: block; }
+.song-list { list-style: none; margin: 0; padding: 0; }
+.song-list li {
+  padding: 8px 12px;
+  cursor: pointer;
+  color: #cde;
+  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  border-bottom: 1px solid #22313d;
+}
+.song-list li:last-child { border-bottom: 0; }
+.song-list li:hover { background: #22313d; }
+.song-list li.active { background: #3da9fc; color: #052033; font-weight: 600; }
 
 header {
   position: sticky; top: 0; z-index: 10;

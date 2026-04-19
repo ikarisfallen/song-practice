@@ -3421,23 +3421,107 @@ async function initSongLibrary() {
       'Could not load songs/index.json: ' + e.message;
     return;
   }
+
+  // Build both controls — the <select> (portrait header) and the <ul>
+  // (landscape sidebar). They mirror the same songs array; switching one
+  // updates the other via selectSongByIndex.
   sel.innerHTML = '';
+  const songListEl = document.getElementById('songList');
+  if (songListEl) songListEl.innerHTML = '';
   songs.forEach((entry, i) => {
     const opt = document.createElement('option');
     opt.value = String(i);
     opt.textContent = entryTitle(entry);
     sel.appendChild(opt);
+    if (songListEl) {
+      const li = document.createElement('li');
+      li.textContent = entryTitle(entry);
+      li.dataset.idx = String(i);
+      li.setAttribute('role', 'option');
+      li.addEventListener('click', () => selectSongByIndex(i, songs));
+      songListEl.appendChild(li);
+    }
   });
+
   sel.addEventListener('change', () => {
-    if (playState !== 'stopped') stopPlayback();
-    // Loop brackets from the old song don't make sense for a new one.
-    loopIn = null;
-    loopOut = null;
-    updateLoopControls();
     const idx = parseInt(sel.value, 10);
-    loadSongEntry(songs[idx]);
+    selectSongByIndex(idx, songs);
   });
+
   await loadSongEntry(songs[0]);
+  syncSongSelectionUI(0);
 }
+
+// Shared song-change handler — used by both the <select> and the sidebar
+// list item click. Keeps both UIs in sync and applies all the side-effects
+// the old <select> change handler used to.
+function selectSongByIndex(idx, songs) {
+  if (playState !== 'stopped') stopPlayback();
+  loopIn = null;
+  loopOut = null;
+  updateLoopControls();
+  const sel = document.getElementById('songSelect');
+  if (sel) sel.value = String(idx);
+  syncSongSelectionUI(idx);
+  loadSongEntry(songs[idx]);
+}
+
+function syncSongSelectionUI(idx) {
+  document.querySelectorAll('#songList li').forEach((li, i) => {
+    li.classList.toggle('active', i === idx);
+  });
+}
+
+// ===== Responsive layout: left sidebar on wide screens =====
+// On viewports wider than tall (and with enough horizontal room), pull the
+// transport buttons, options controls, song list, and note-info panel into
+// a persistent left sidebar and hide the mobile header / fingerboard
+// section. The DOM elements are re-parented between the sidebar and the
+// main area so we don't have to duplicate HTML or event wiring.
+function applyLayoutMode() {
+  const landscape = window.innerWidth > window.innerHeight && window.innerWidth >= 800;
+  const body = document.body;
+  const isLandscape = body.classList.contains('layout-landscape');
+  if (landscape === isLandscape) return;
+
+  const sidebar = document.getElementById('sidebar');
+  const header = document.querySelector('header');
+  const fbSection = document.querySelector('.fingerboard-section');
+  const topRow = document.querySelector('.top-row');
+  const optionsPanel = document.getElementById('optionsPanel');
+  const fbPanel = document.getElementById('fingerboardPanel');
+  const songListPanel = document.getElementById('songListPanel');
+
+  if (landscape) {
+    body.classList.add('layout-landscape');
+    sidebar.hidden = false;
+    // Order (top → bottom): transport buttons, options, song list (fills),
+    // note info panel.
+    sidebar.appendChild(topRow);
+    sidebar.appendChild(optionsPanel);
+    sidebar.appendChild(songListPanel);
+    sidebar.appendChild(fbPanel);
+    // Always open in landscape — CSS uses `display: flex !important` to
+    // defeat the `hidden` attribute that the toggles leave behind.
+  } else {
+    body.classList.remove('layout-landscape');
+    sidebar.hidden = true;
+    // Restore original mobile positions.
+    header.insertBefore(topRow, header.firstChild);
+    header.appendChild(optionsPanel);
+    fbSection.appendChild(fbPanel);
+    // songListPanel stays in the sidebar element (it's hidden via CSS
+    // when not in landscape mode).
+    sidebar.appendChild(songListPanel);
+    // Restore the hidden state that the toggle buttons expect.
+    const optExp = document.getElementById('optionsToggle').getAttribute('aria-expanded') === 'true';
+    optionsPanel.hidden = !optExp;
+    const fbExp = document.getElementById('fbToggle').getAttribute('aria-expanded') === 'true';
+    fbPanel.hidden = !fbExp;
+  }
+}
+
+window.addEventListener('resize', applyLayoutMode);
+applyLayoutMode();
 
 initSongLibrary();
