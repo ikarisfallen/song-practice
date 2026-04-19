@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=14" />
+<link rel="stylesheet" href="style.css?v=21" />
 </head>
 <body>
 <div id="app">
@@ -17,7 +17,7 @@
       </div>
       <select id="songSelect" class="song-select" aria-label="Song"></select>
       <button id="optionsToggle" class="options-toggle" aria-label="Toggle options" aria-expanded="false">⚙</button>
-      <button id="fbToggle" class="options-toggle fb-header-toggle" aria-label="Toggle fingerboard" aria-expanded="false">♪</button>
+      <button id="fbToggle" class="options-toggle fb-header-toggle" aria-label="Toggle note info" aria-expanded="false">♪</button>
     </div>
     <div id="optionsPanel" class="options-panel" hidden>
       <div class="drum-row">
@@ -80,8 +80,11 @@
   <div class="fingerboard-section">
     <div id="fingerboardPanel" class="fingerboard-panel" hidden>
       <div class="fb-left">
-        <div class="fb-chord-name" id="fbChordName"></div>
-        <div class="fb-chord-notes" id="fbChordNotes"></div>
+        <div class="fb-chord-line">
+          <span class="fb-chord-name" id="fbChordName"></span>
+          <span class="fb-chord-notes" id="fbChordNotes"></span>
+        </div>
+        <div class="fb-notes-measure" id="fbNotesMeasure"></div>
         <div class="fb-scale-name" id="fbScale"></div>
       </div>
       <div class="fb-grid" id="fbGrid"></div>
@@ -94,6 +97,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=21"></script>
+<script src="app.js?v=36"></script>
 </body>
 </html>

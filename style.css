@@ -183,12 +183,23 @@ main {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  justify-content: center;
+  gap: 6px;
   font-family: serif;
 }
-.fb-chord-name { font-size: 18px; font-weight: bold; }
-.fb-chord-notes { font-size: 13px; line-height: 1.2; margin-top: 2px; }
-.fb-scale-name { font-size: 13px; font-style: italic; color: #444; margin-top: auto; }
-.fb-grid { flex: 0 0 200px; align-self: flex-start; }
+.fb-chord-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.fb-chord-name { font-size: 20px; font-weight: normal; }
+.fb-chord-notes { font-size: 15px; color: #333; }
+/* Cap the measure's width so its rendered height (driven by the viewBox
+   aspect ratio) stays shorter than the fingerboard on the right. That gives
+   the left column spare vertical space for justify-content:center to
+   actually push the chord/scale/measure block to the middle of the panel.
+   With the SVG's tighter 80×216 viewBox, 300px wide yields ~111px tall,
+   which fits in the ~114px budget with a few pixels of centering slack. */
+.fb-notes-measure { flex: 0 0 auto; max-width: 300px; width: 100%; }
+.fb-notes-measure svg { width: 100%; height: auto; display: block; }
+.fb-scale-name { font-size: 18px; font-weight: bold; }
+.fb-grid { flex: 0 0 150px; align-self: flex-start; }
 .fb-grid svg { width: 100%; height: auto; display: block; }
 
 .bar {
