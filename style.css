@@ -314,6 +314,14 @@ main {
 .staff-row svg .vf-stavebarline rect {
   fill: #000;
 }
+/* Current-beat note highlight — paints the stavenote (head, stem, and
+   any ledger lines / accidentals VexFlow drew inside its group) blue
+   while it's playing. */
+.staff-row svg .vf-stavenote.lit path,
+.staff-row svg .vf-stavenote.lit rect {
+  fill: #2e78ff !important;
+  stroke: #2e78ff !important;
+}
 .hi-overlay {
   /* No border — just a translucent blue wash that covers the measure's
      staff area plus the scale-label strip beneath it. */
@@ -346,10 +354,27 @@ main {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center;
   gap: 6px;
   font-family: serif;
 }
+/* Info Overlay switch lives at the bottom-left of the note-info panel.
+   margin-top:auto inside the fb-left flex column pushes it down so the
+   chord/notes/scale stack sits flush at the top. */
+.info-overlay-switch {
+  margin-top: auto;
+  font-size: 12px;
+  color: #222;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-style: normal;
+  padding-top: 4px;
+}
+.info-overlay-switch .switch { background: #9a9a9a; }
+.info-overlay-switch .switch-input:checked + .switch { background: #2e78ff; }
 .fb-chord-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
 .fb-chord-name { font-size: 20px; font-weight: normal; }
 .fb-chord-notes { font-size: 15px; color: #333; }

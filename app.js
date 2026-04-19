@@ -1402,6 +1402,7 @@ function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns)
       const bp = quarterNotes[ce.barIdx][b];
       beatInfo[ce.barIdx][b] = {
         pitch: bp ? bp.pitch : null,
+        tpc: bp ? bp.tpc : null,
         scalePcs,
         chordTonesByPc: tones.byPc,
         chordSymbol,
@@ -1945,6 +1946,10 @@ function renderChart(song, barsIn, timesigStr) {
       // Pitch-but-no-duration slots render as quarters (the default for all
       // the other generators). Null slots become quarter rests.
       const DUR_TO_BEATS = { 'w': 4, 'h.': 3, 'h': 2, 'q': 1 };
+      // For each beat in this bar, which entry of `notes[]` covers it?
+      // Cantus firmus writes one long note across multiple beats, so the
+      // same slot index can be referenced by several beats. Rests get -1.
+      const beatToNoteSlot = new Array(ts.num).fill(-1);
       let b = 0;
       while (b < ts.num) {
         const bp = beatPitches[b];
@@ -1984,7 +1989,11 @@ function renderChart(song, barsIn, timesigStr) {
           lastNoteOfBar = { posKey, level };
           isFirstNoteOfBar = false;
 
+          const slotIdx = notes.length;
           notes.push(n);
+          for (let bb = b; bb < b + consume && bb < ts.num; bb++) {
+            beatToNoteSlot[bb] = slotIdx;
+          }
           b += consume;
         } else {
           notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
@@ -1999,7 +2008,13 @@ function renderChart(song, barsIn, timesigStr) {
       const noteStart = stave.getNoteStartX();
       const noteEnd = stave.getNoteEndX();
       new VF.Formatter().joinVoices([voice]).format([voice], noteEnd - noteStart - 10);
+      // Count the stavenote elements that already existed in this row's
+      // SVG before the voice draws (previous bars in the row). After draw
+      // we can slice off the newly-added ones.
+      const beforeCount = rowEl.querySelectorAll('.vf-stavenote').length;
       voice.draw(context, stave);
+      const allStaveNotes = rowEl.querySelectorAll('.vf-stavenote');
+      const barNoteEls = Array.from(allStaveNotes).slice(beforeCount);
 
       // Manual chord symbol labels above the staff, evenly spaced over the note area.
       const svg = rowEl.querySelector('svg');
@@ -2051,7 +2066,16 @@ function renderChart(song, barsIn, timesigStr) {
       // Highlight height runs from just above the staff all the way down
       // past the scale label and underline, so the current-measure blue
       // wash visibly covers both the staff and the key label under it.
-      barElements[barIdx] = { rowEl, x, y: staffY, w: width, h: patternLineY + 3 - (staffY - 4) };
+      // noteStartX/noteEndX are captured so the Info Overlay can position
+      // its circle at the right beat column inside the measure.
+      barElements[barIdx] = {
+        rowEl, x, y: staffY, w: width,
+        h: patternLineY + 3 - (staffY - 4),
+        noteStartX: stave.getNoteStartX(),
+        noteEndX: stave.getNoteEndX(),
+        noteEls: barNoteEls,
+        beatToNoteSlot
+      };
 
       x += width;
     });
@@ -2530,6 +2554,8 @@ function stopPlayback() {
   btn.querySelector('.play-glyph').textContent = '▶';
   btn.classList.remove('playing');
   clearHighlight();
+  clearInfoOverlay();
+  clearNoteHighlight();
   updateLoopControls();
 }
 
@@ -2589,6 +2615,113 @@ function resumePlayback() {
 function clearHighlight() {
   document.querySelectorAll('svg .hi-overlay').forEach(el => el.remove());
 }
+
+// ===== Current-note highlight in the score =====
+// Paint the currently-playing note's stavenote group blue so the reader
+// can track it, same way the scale diagram in the note-info panel lights
+// up its current note. The CSS rule for `.vf-stavenote.lit` forces fill
+// and stroke to the playback-highlight blue.
+let lastLitNoteEl = null;
+function clearNoteHighlight() {
+  if (lastLitNoteEl) lastLitNoteEl.classList.remove('lit');
+  lastLitNoteEl = null;
+}
+function updateNoteHighlight(barIdx, beat) {
+  if (lastLitNoteEl) lastLitNoteEl.classList.remove('lit');
+  lastLitNoteEl = null;
+  const info = barElements[barIdx];
+  if (!info || !info.noteEls || !info.beatToNoteSlot) return;
+  const slot = info.beatToNoteSlot[beat];
+  if (slot < 0) return;
+  const el = info.noteEls[slot];
+  if (!el) return;
+  el.classList.add('lit');
+  lastLitNoteEl = el;
+}
+
+// ===== Info Overlay =====
+// Optional small blue dot drawn adjacent to each note as it plays, so the
+// user can sight-follow the beat without losing the staff notation. The
+// dot is placed above or below the note head — whichever side has less
+// competing text (chord symbols live above the staff, scale labels
+// below).
+let infoOverlayOn = false;
+let infoOverlayEl = null;
+function clearInfoOverlay() {
+  if (infoOverlayEl && infoOverlayEl.parentNode) {
+    infoOverlayEl.parentNode.removeChild(infoOverlayEl);
+  }
+  infoOverlayEl = null;
+}
+function updateInfoOverlay(barIdx, beat, pitch, tpc) {
+  clearInfoOverlay();
+  if (!infoOverlayOn) return;
+  if (pitch == null || tpc == null) return;
+  const info = barElements[barIdx];
+  if (!info) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
+  const ts = parseTimesig((window.currentSong && window.currentSong.timesig) || '44');
+  const beatsPerBar = ts.num;
+  // Derive the note's vertical position from its written letter + octave.
+  const { letterIdx, octave } = midiTpcToVexKey(pitch, tpc);
+  const LETTER_IDX_TO_STEP = [3, 0, 4, 1, 5, 2, 6]; // F,C,G,D,A,E,B → step 0-6
+  const step = LETTER_IDX_TO_STEP[letterIdx];
+  const totalStep = (octave - 3) * 7 + (step - 1); // 0 = D3 middle line
+  // Middle line y = staffY + space_above_staff_ln(4) * 10 + half-staff(20).
+  const middleY = info.y + 60;
+  const noteY = middleY - totalStep * 5;
+  // Pick the side that avoids the busier text edge of the measure —
+  // upper notes bump the chord-symbol area above, so drop the dot below.
+  // Lower notes bump the scale label below, so push the dot above.
+  const r = 17;                 // 75% of the previous r=22
+  const offset = 44;            // pushed further away from the note head
+  const cy = noteY < middleY ? noteY + offset : noteY - offset;
+  // Beat position within the measure's note area.
+  const cx = info.noteStartX + (beat + 0.5) * (info.noteEndX - info.noteStartX) / beatsPerBar;
+
+  // Note-name label, e.g. "A♭" / "F♯" — derived from the TPC so the
+  // spelling matches the scale the note belongs to. normalizeEnharmonic
+  // inside tpcToLetterAcc folds C♭/F♭/E♯/B♯ into their friendlier names.
+  const { letter, acc } = tpcToLetterAcc(tpc);
+  const accGlyph = acc === 'b' ? '♭'
+                 : acc === 'bb' ? '♭♭'
+                 : acc === '#' ? '♯'
+                 : acc === '##' ? '♯♯'
+                 : '';
+  const displayText = letter + accGlyph;
+
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('class', 'info-overlay-dot');
+  const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  circle.setAttribute('cx', cx);
+  circle.setAttribute('cy', cy);
+  circle.setAttribute('r', r);
+  circle.setAttribute('fill', '#2e78ff');
+  circle.setAttribute('stroke', 'none');
+  g.appendChild(circle);
+  const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  text.setAttribute('x', cx);
+  text.setAttribute('y', cy + 5);
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('font-family', 'sans-serif');
+  text.setAttribute('font-size', 15);
+  text.setAttribute('font-weight', 'bold');
+  text.setAttribute('fill', '#fff');
+  text.setAttribute('stroke', 'none');
+  text.textContent = displayText;
+  g.appendChild(text);
+  svg.appendChild(g);
+  infoOverlayEl = g;
+}
+(function bindInfoOverlaySwitch() {
+  const sw = document.getElementById('infoOverlayToggle');
+  if (!sw) return;
+  sw.addEventListener('change', (e) => {
+    infoOverlayOn = e.target.checked;
+    if (!infoOverlayOn) clearInfoOverlay();
+  });
+})();
 
 // Draw a practice-loop bracket on the specified bar. `side` is "in" (hollow
 // bracket on the left edge) or "out" (thicker bracket on the right edge).
@@ -2837,7 +2970,7 @@ async function startPlayback(song, bars, startBarIdx = 0) {
         .filter(p => p != null);
       for (let b = 0; b < beatsPerBar; b++) {
         const info = lastBeatInfo[entry.idx][b];
-        if (info) events.push({ time: `${absBar}:${b}:0`, type: 'beat', info, measurePitches });
+        if (info) events.push({ time: `${absBar}:${b}:0`, type: 'beat', idx: entry.idx, beat: b, info, measurePitches });
       }
     }
 
@@ -2951,19 +3084,25 @@ async function startPlayback(song, bars, startBarIdx = 0) {
       return;
     }
     if (ev.type === 'beat') {
-      Tone.Draw.schedule(() => updateFingerboard({
-        litMidis: ev.info.pitch != null ? [ev.info.pitch] : [],
-        scalePcs: ev.info.scalePcs,
-        chordTonesByPc: ev.info.chordTonesByPc,
-        chordSymbol: ev.info.chordSymbol,
-        chordNotesLabel: ev.info.chordNotesLabel,
-        scaleLabel: ev.info.scaleLabel,
-        useFlats: ev.info.useFlats,
-        scaleRoot: ev.info.scaleRoot,
-        scaleIntervals: ev.info.scaleIntervals,
-        chordRoot: ev.info.chordRoot,
-        measurePitches: ev.measurePitches
-      }), time);
+      Tone.Draw.schedule(() => {
+        updateFingerboard({
+          litMidis: ev.info.pitch != null ? [ev.info.pitch] : [],
+          scalePcs: ev.info.scalePcs,
+          chordTonesByPc: ev.info.chordTonesByPc,
+          chordSymbol: ev.info.chordSymbol,
+          chordNotesLabel: ev.info.chordNotesLabel,
+          scaleLabel: ev.info.scaleLabel,
+          useFlats: ev.info.useFlats,
+          scaleRoot: ev.info.scaleRoot,
+          scaleIntervals: ev.info.scaleIntervals,
+          chordRoot: ev.info.chordRoot,
+          measurePitches: ev.measurePitches
+        });
+        updateNoteHighlight(ev.idx, ev.beat);
+        if (infoOverlayOn) {
+          updateInfoOverlay(ev.idx, ev.beat, ev.info.pitch, ev.info.tpc);
+        }
+      }, time);
       return;
     }
     if (ev.type === 'comp') {
