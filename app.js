@@ -927,11 +927,11 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
       } else if (virtualBasePitch >= 0) {
         baseIdx = findClosestIndex(tones, virtualBasePitch);
         // If the virtual next base lands on the same pitch we just played
-        // as a base (can happen when the new chord's scale rounds us back
-        // to the previous base — e.g. Bb6 → C7 where Eb snaps to D), step
-        // one more scale degree in the current direction so the pattern
-        // actually advances instead of repeating the previous pair.
-        if (tones[baseIdx].pitch === lastBasePitch) {
+        // (either the last base OR the last 3rd — i.e. the literal last
+        // note of the previous bar), step one more scale degree in the
+        // current direction so we don't sound the same pitch twice in a
+        // row across the barline.
+        if (tones[baseIdx].pitch === lastPitch || tones[baseIdx].pitch === lastBasePitch) {
           const adv = baseIdx + direction;
           if (adv >= 0 && adv < tones.length) baseIdx = adv;
         }
