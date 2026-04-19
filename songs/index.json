@@ -18,6 +18,10 @@
     { "title": "Alice In Wonderland",             "file": "Songs.html" },
     { "title": "All Blues",             "file": "Songs.html" },
     { "title": "But Not For Me",             "file": "Songs.html" },
-    { "title": "Bluesette",             "file": "Songs.html" }
+    { "title": "Bluesette",             "file": "Songs.html" },
+    { "title": "East Of The Sun",             "file": "Songs2.html" },
+    { "title": "It's Only A Paper Moon",             "file": "Songs2.html" },
+    { "title": "How Deep Is The Ocean",             "file": "Songs2.html" },
+    { "title": "Softly, As In A Morning Sunrise",             "file": "Songs2.html" }
   ]
 }
