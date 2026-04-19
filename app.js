@@ -534,7 +534,13 @@ function detectKeyPatterns(chordEvents) {
   scanPair('dominant', 'major', '51', 'major');
   scanPair('dominant', 'minor', '51', 'minor');
 
-  // Phase 2: extend with 6 before ii and 4 after I
+  // Phase 2: extend with 6 before ii and 4 after I.
+  // Process raw patterns in chart order (by firstIdx) rather than scan order
+  // (251-major, 251-minor, 25, 51). Otherwise a later BbMaj 251 whose "6
+  // before ii" extension can reach backward into the previous Gm pattern's
+  // repeated-I bar (Gm6 is P4 below Cm7) would steal it before Gm's own
+  // "Repeated I" gets to claim it.
+  raw.sort((a, b) => a.firstIdx - b.firstIdx);
   const patterns = [];
   for (const pat of raw) {
     let startIdx = pat.firstIdx;
@@ -560,14 +566,17 @@ function detectKeyPatterns(chordEvents) {
         used[after] = true;
       }
     }
-    // Repeated I for 251
-    if (pat.type === '251' && pat.iIdx >= 0 && endIdx === pat.lastIdx) {
-      const next = pat.iIdx + 1;
-      if (next < chordEvents.length && !used[next] &&
-          chordEvents[next].root.pitchClass === chordEvents[pat.iIdx].root.pitchClass &&
-          chordEvents[next].type === chordEvents[pat.iIdx].type) {
+    // Repeated I: absorb identical-chord Kcl/repeat-bar duplicates right after
+    // the I so they're claimed before phase 3's diatonic extension runs — which
+    // would otherwise pull them into a neighboring pattern's bVII/etc.
+    if (pat.iIdx >= 0 && endIdx === pat.lastIdx) {
+      let next = pat.iIdx + 1;
+      while (next < chordEvents.length && !used[next] &&
+             chordEvents[next].root.pitchClass === chordEvents[pat.iIdx].root.pitchClass &&
+             chordEvents[next].type === chordEvents[pat.iIdx].type) {
         endIdx = next;
         used[next] = true;
+        next++;
       }
     }
     patterns.push({
@@ -583,7 +592,15 @@ function detectKeyPatterns(chordEvents) {
   // unused Em7 (iii) and Am7 (vi) since all four sit in C Ionian.
   // Chords already claimed by another pattern are left alone so a following
   // Am7♭5→D7→Gm isn't pulled into an adjacent B♭-major group.
+  //
+  // Also: a chord that IS the tonic of some other detected pattern is left
+  // alone. e.g. a lone Gm6 between a Gm-key region and a Bb-major region
+  // shouldn't be swallowed by BbMaj as its vi — it's really the i of Gm.
+  const otherTonicPcs = new Set();
+  for (const p of patterns) otherTonicPcs.add(p.keyRoot.pitchClass);
   const isDiatonic = (ev, keyPc, keyMode) => {
+    // Don't absorb a chord that is some other pattern's tonic.
+    if (ev.root.pitchClass !== keyPc && otherTonicPcs.has(ev.root.pitchClass)) return false;
     const deg = (((ev.root.pitchClass - keyPc) % 12) + 12) % 12;
     const t = ev.type;
     if (keyMode === 'major') {
@@ -661,7 +678,15 @@ function generateQuarterNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat) return scaleForKey(pat.keyRoot, pat.keyMode);
+    // Major-key patterns: use the key's Ionian for every chord. All diatonic
+    // modes share the same pitch classes, so each chord's notes stay inside
+    // the parent major (e.g. Eb^7 as IV of Bb uses A, not Ab).
+    if (pat && pat.keyMode === 'major') {
+      return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    }
+    // Minor-key patterns and standalone chords: use the chord's OWN scale,
+    // because the three chords of a minor ii°-V-i use genuinely different
+    // pitch classes (Am7b5 Locrian has F natural, D7 Mixolydian has F#, etc.)
     return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
   });
 
@@ -723,7 +748,7 @@ function generateQuarterNotes(bars, ts) {
     }
   });
 
-  return { results, chordEvents, patterns };
+  return { results, chordEvents, patterns, effective };
 }
 
 // TPC → letter + accidental (e.g. TPC 7 → { letter:'C', acc:'b' })
@@ -749,6 +774,247 @@ function midiTpcToVexKey(soundingMidi, tpc) {
   const key = letter.toLowerCase() + acc + '/' + octave;
   const LETTER_IDX = { F: 0, C: 1, G: 2, D: 3, A: 4, E: 5, B: 6 };
   return { key, acc, letterIdx: LETTER_IDX[letter], level: altAdjust, octave };
+}
+
+// ===== Cello fingerboard =====
+// 5-string cello tuned F C G D A. Each string has 7 positions (0-6 semitones
+// from the open string). The panel renders an SVG diagram where circles appear
+// only for notes that are either currently being played or part of the current
+// scale. Chord tones get a degree label ("1"/"3"/"5"/"7") inside the circle.
+const FB_STRING_BASES = [29, 36, 43, 50, 57]; // F1, C2, G2, D3, A3 (sounding MIDI)
+const FB_STRING_NAMES = ['F', 'C', 'G', 'D', 'A'];
+const FB_FRETS = 7;
+
+function buildFingerboardSVG() {
+  // Columns packed tight: 18px circle with a few px of air between adjacent
+  // strings. Total width = 5*22 + 4*4 = 126.
+  const colW = 22;
+  const gap = 4;
+  const cols = FB_STRING_BASES.length;
+  const rowH = 22;
+  const totalW = cols * colW + (cols - 1) * gap;
+  const totalH = FB_FRETS * rowH + 4;
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalW} ${totalH}" preserveAspectRatio="xMidYMid meet">`;
+  const gridTop = 0;
+  // Horizontal fret lines spanning all columns (nut is thicker)
+  const fretYs = [1, 2, 3, 4, 5, 6].map(i => gridTop + i * rowH + 1);
+  const gridLeft = -3;
+  const gridRight = totalW + 3;
+  fretYs.forEach((y, i) => {
+    const t = i === 0 ? 2 : 1;
+    svg += `<rect x="${gridLeft}" y="${y}" width="${gridRight - gridLeft}" height="${t}" fill="#000" stroke="none"/>`;
+  });
+  // Per-string vertical line and circle placeholders
+  for (let c = 0; c < cols; c++) {
+    const cx = c * (colW + gap) + colW / 2;
+    const firstCy = gridTop + rowH - 9; // circle center for row 0
+    const lastCy = gridTop + 6 * rowH + (rowH - 9);
+    // String line (3px black, behind circles)
+    svg += `<rect x="${cx - 1.5}" y="${firstCy}" width="3" height="${lastCy - firstCy}" fill="#000" stroke="none"/>`;
+    for (let r = 0; r < FB_FRETS; r++) {
+      const cy = gridTop + r * rowH + (rowH - 9);
+      const midi = FB_STRING_BASES[c] + r;
+      svg += `<g class="fb-cell" data-midi="${midi}" data-pc="${((midi % 12) + 12) % 12}">` +
+             `<circle cx="${cx}" cy="${cy}" r="9" fill="#000" stroke="#000" stroke-width="1" class="fb-circle" style="display:none"/>` +
+             `<text x="${cx}" y="${cy + 3}" text-anchor="middle" font-family="sans-serif" font-size="8" font-weight="bold" fill="#fff" stroke="none" class="fb-degree"></text>` +
+             `</g>`;
+    }
+  }
+  svg += `</svg>`;
+  return svg;
+}
+
+const PC_NAMES_SHARP = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const PC_NAMES_FLAT  = ['C','D♭','D','E♭','E','F','G♭','G','A♭','A','B♭','B'];
+
+function pcNameForChord(pc, chordRest) {
+  // Prefer flats for chords with 'b' in rest, sharps for '#'
+  const r = chordRest || '';
+  if (r.indexOf('b') >= 0 && r.indexOf('#') < 0) return PC_NAMES_FLAT[pc];
+  if (r.indexOf('#') >= 0 && r.indexOf('b') < 0) return PC_NAMES_SHARP[pc];
+  return PC_NAMES_FLAT[pc];
+}
+
+function degreeFromInterval(iv, chordRest) {
+  const rest = chordRest || '';
+  if (iv === 0) return '1';
+  if (iv === 3 || iv === 4) return '3';
+  if (iv === 5) return '4';
+  if (iv === 6 || iv === 7 || iv === 8) return '5';
+  if (iv === 9) {
+    // In dim7 chords the "9" (bb7) represents the 7th; in 6/m6 chords it's the 6th.
+    if (/(^|[^a-z])o|dim|°/.test(rest)) return '7';
+    return '6';
+  }
+  if (iv === 10 || iv === 11) return '7';
+  return '';
+}
+
+function chordTonesMap(ch) {
+  if (!ch || ch.nc || ch.slash) return { byPc: {}, names: [] };
+  const rootPc = pcFromChord(ch);
+  const ivs = intervalsFor(ch.rest || '').filter(i => i < 12);
+  const byPc = {};
+  const names = [];
+  ivs.forEach(i => {
+    const pc = (rootPc + i) % 12;
+    const deg = degreeFromInterval(i, ch.rest || '');
+    if (deg && !(pc in byPc)) byPc[pc] = deg;
+    names.push(pcNameForChord(pc, ch.rest));
+  });
+  return { byPc, names };
+}
+
+// Mode offset table: subtract from mode root to get the parent major root.
+// E.g., G Mixolydian is the 5th mode of C major; offset 7, so C = G − 7.
+const MODE_PARENT_OFFSET = {
+  '0,2,4,5,7,9,11': 0,   // Ionian (itself)
+  '0,2,3,5,7,9,10': 2,   // Dorian
+  '0,2,4,5,7,9,10': 7,   // Mixolydian
+  '0,1,3,5,6,8,10': 11   // Locrian
+};
+
+// Parent-major root PC for the effective scale (used to pick flat/sharp
+// spelling on the fingerboard).
+function parentMajorPc(eff) {
+  const sig = eff.scale.map(x => x.s).join(',');
+  if (sig === '0,2,3,5,7,9,11') {
+    // Melodic minor → relative major = root + 3
+    return (eff.root.pitchClass + 3) % 12;
+  }
+  const offset = MODE_PARENT_OFFSET[sig];
+  if (offset !== undefined) {
+    return (((eff.root.pitchClass - offset) % 12) + 12) % 12;
+  }
+  return eff.root.pitchClass;
+}
+
+// Keys that write with flats (F, B♭, E♭, A♭, D♭, G♭).
+const FLAT_PARENT_PCS = new Set([5, 10, 3, 8, 1, 6]);
+
+// Relate-scale label: the parent major (or minor key name) for the effective
+// scale at this chord. Matches the style used for the score's bracket labels.
+function relatedScaleLabel(eff, patternKeyName) {
+  if (patternKeyName) return patternKeyName;
+  const sig = eff.scale.map(x => x.s).join(',');
+  const rootPc = eff.root.pitchClass;
+  const parent = parentMajorPc(eff);
+  const useFlats = FLAT_PARENT_PCS.has(parent);
+  const names = useFlats ? PC_NAMES_FLAT : PC_NAMES_SHARP;
+  if (sig === '0,2,3,5,7,9,11') {
+    return names[rootPc] + 'm (' + names[parent] + 'Maj)';
+  }
+  if (MODE_PARENT_OFFSET[sig] !== undefined) {
+    return names[parent] + 'Maj';
+  }
+  return names[rootPc];
+}
+
+function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns) {
+  const beatInfo = bars.map(() => new Array(ts.num).fill(null));
+  // Which pattern (if any) claims each chord event
+  const patternByIdx = {};
+  patterns.forEach(p => {
+    for (let i = p.firstIdx; i <= p.lastIdx; i++) patternByIdx[i] = p;
+  });
+  chordEvents.forEach((ce, i) => {
+    const eff = effective[i];
+    const pat = patternByIdx[i];
+    const scalePcs = new Set(eff.scale.map(x => ((eff.root.pitchClass + x.s) % 12 + 12) % 12));
+    const tones = chordTonesMap(ce.chord);
+    const chordSymbol = chordText(ce.chord);
+    const scaleLabel = relatedScaleLabel(eff, pat && pat.keyName);
+    const chordNotesLabel = tones.names.join(' ');
+    // Flats/sharps follow the SONG context (pattern key) when in a pattern,
+    // so all chords of a Gm (B♭Maj) 251 read with flats even though D
+    // Mixolydian on its own would prefer sharps.
+    const contextPc = pat
+      ? (pat.keyMode === 'major' ? pat.keyRoot.pitchClass : (pat.keyRoot.pitchClass + 3) % 12)
+      : parentMajorPc(eff);
+    const useFlats = FLAT_PARENT_PCS.has(contextPc);
+    const beatsPerChord = Math.max(1, Math.floor(ts.num / ce.chordsInBar));
+    const startBeat = ce.chordIdxInBar * beatsPerChord;
+    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1) ? ts.num : startBeat + beatsPerChord;
+    for (let b = startBeat; b < endBeat; b++) {
+      const bp = quarterNotes[ce.barIdx][b];
+      beatInfo[ce.barIdx][b] = {
+        pitch: bp ? bp.pitch : null,
+        scalePcs,
+        chordTonesByPc: tones.byPc,
+        chordSymbol,
+        chordNotesLabel,
+        scaleLabel,
+        useFlats
+      };
+    }
+  });
+  return beatInfo;
+}
+
+function initFingerboard() {
+  const host = document.getElementById('fbGrid');
+  if (host) host.innerHTML = buildFingerboardSVG();
+  const toggle = document.getElementById('fbToggle');
+  const panel = document.getElementById('fingerboardPanel');
+  if (toggle && panel) {
+    toggle.addEventListener('click', () => {
+      const hidden = panel.hasAttribute('hidden');
+      if (hidden) {
+        panel.removeAttribute('hidden');
+        toggle.setAttribute('aria-expanded', 'true');
+      } else {
+        panel.setAttribute('hidden', '');
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    });
+  }
+}
+initFingerboard();
+let lastBeatInfo = null; // per-bar per-beat fingerboard info; populated by renderChart
+
+// Update the fingerboard SVG to reflect the current beat.
+// state = { litMidis: number[], scalePcs: Set<number>, chordTonesByPc: {pc:degree}, scaleLabel, chordNotesLabel }
+function updateFingerboard(state) {
+  const host = document.getElementById('fbGrid');
+  if (!host) return;
+  const chordNameEl = document.getElementById('fbChordName');
+  const chordNotesEl = document.getElementById('fbChordNotes');
+  const scaleEl = document.getElementById('fbScale');
+  if (chordNameEl) chordNameEl.textContent = state.chordSymbol || '';
+  if (chordNotesEl) {
+    // Chord tones stacked vertically, one per line.
+    const notes = (state.chordNotesLabel || '').split(/\s+/).filter(Boolean);
+    chordNotesEl.innerHTML = notes.map(n => '<div>' + n + '</div>').join('');
+  }
+  if (scaleEl) scaleEl.textContent = state.scaleLabel || '';
+  const cells = host.querySelectorAll('.fb-cell');
+  const lit = new Set(state.litMidis || []);
+  const scale = state.scalePcs instanceof Set ? state.scalePcs : new Set(state.scalePcs || []);
+  const names = state.useFlats ? PC_NAMES_FLAT : PC_NAMES_SHARP;
+  cells.forEach(cell => {
+    const midi = parseInt(cell.dataset.midi, 10);
+    const pc = parseInt(cell.dataset.pc, 10);
+    const circle = cell.querySelector('.fb-circle');
+    const text = cell.querySelector('.fb-degree');
+    const isLit = lit.has(midi);
+    const inScale = scale.has(pc);
+    if (isLit || inScale) {
+      circle.style.display = '';
+      if (isLit) {
+        circle.setAttribute('fill', '#2e78ff');
+        circle.setAttribute('stroke', '#1a4bb8');
+      } else {
+        circle.setAttribute('fill', '#000');
+        circle.setAttribute('stroke', '#000');
+      }
+      text.textContent = names[pc];
+      text.style.display = '';
+    } else {
+      circle.style.display = 'none';
+      text.style.display = 'none';
+    }
+  });
 }
 
 // ===== Render (sheet music via VexFlow) =====
@@ -821,7 +1087,9 @@ function renderChart(song, barsIn, timesigStr) {
 
   // Expand by song repeats and generate quarter notes across the whole thing
   const bars = expandBarsByRepeats(barsIn, songRepeats);
-  const { results: quarterNotes, chordEvents, patterns } = generateQuarterNotes(bars, ts);
+  const { results: quarterNotes, chordEvents, patterns, effective } = generateQuarterNotes(bars, ts);
+  // Per-bar/per-beat info for the fingerboard panel, keyed by expanded-bar idx.
+  lastBeatInfo = buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns);
 
   // Each unique key-pattern name gets a stable color from a rotating palette.
   // Same key across the score → same color.
@@ -1061,8 +1329,9 @@ function renderChart(song, barsIn, timesigStr) {
         noteEndX: stave.getNoteEndX()
       });
 
-      // Record bounds for highlighting
-      barElements[barIdx] = { rowEl, x, y: staffY, w: width, h: 80 };
+      // Record bounds for highlighting. Extend the highlight down past the
+      // lowest F on the staff to just above the scale-line text.
+      barElements[barIdx] = { rowEl, x, y: staffY, w: width, h: patternLineY - (staffY - 4) - 2 };
 
       x += width;
     });
@@ -1318,7 +1587,8 @@ let currentRealLoop = null;
 let drumMode = 'hat'; // 'hat' | 'ride' | 'click'
 let countInBars = 0;  // 0, 1, or 2 measures of click before the song starts
 let playbackPart;
-let playing = false;
+let playState = 'stopped'; // 'stopped' | 'playing' | 'paused'
+let pauseContext = null;   // { offset, beatsPerBar } captured at startPlayback; used by resume
 let currentPlaylist = []; // sequence of { bar, idx } one entry = one bar
 let currentBeatHighlight = null;
 
@@ -1457,11 +1727,64 @@ function stopPlayback() {
   }
   Tone.Transport.stop();
   Tone.Transport.cancel();
-  playing = false;
+  Tone.Transport.position = 0;
+  playState = 'stopped';
+  pauseContext = null;
   const btn = document.getElementById('playBtn');
   btn.textContent = '▶';
   btn.classList.remove('playing');
   clearHighlight();
+}
+
+function pausePlayback() {
+  if (playState !== 'playing') return;
+  // Tone.Player has no pause, so stop it; we'll restart it at the right
+  // buffer offset on resume. The Part and all scheduled events naturally
+  // pause with the Transport.
+  if (currentRealLoop) {
+    try { currentRealLoop.player.stop(); } catch (e) {}
+  }
+  Tone.Transport.pause();
+  playState = 'paused';
+  const btn = document.getElementById('playBtn');
+  btn.textContent = '▶';
+  btn.classList.remove('playing');
+  document.getElementById('status').textContent = 'Paused';
+}
+
+function resumePlayback() {
+  if (playState !== 'paused') return;
+  // If we have an active drum loop, re-align it to Transport position.
+  // Count-in bars are the part of Transport before the song proper starts.
+  if (currentRealLoop && pauseContext) {
+    const entry = currentRealLoop;
+    const { offset, beatsPerBar } = pauseContext;
+    if (entry.player.loaded && entry.player.buffer) {
+      const transportSec = Tone.Transport.seconds;
+      const countInSec = (offset * beatsPerBar * 60) / currentTempo;
+      if (transportSec >= countInSec) {
+        // Already past count-in: start the loop immediately at the right
+        // offset into the buffer so it picks up mid-loop where we left off.
+        const rate = entry.player.playbackRate;
+        const loopLenSec = entry.player.buffer.duration / rate;
+        const songSec = transportSec - countInSec;
+        const bufOffsetSec = (songSec % loopLenSec) * rate;
+        try { entry.player.start(undefined, bufOffsetSec); } catch (e) {}
+      } else {
+        // Still in count-in: schedule the loop to start at song bar 0
+        // (same as the initial launch).
+        Tone.Transport.scheduleOnce(t => {
+          try { entry.player.start(t); } catch (e) {}
+        }, `${offset}:0:0`);
+      }
+    }
+  }
+  Tone.Transport.start();
+  playState = 'playing';
+  const btn = document.getElementById('playBtn');
+  btn.textContent = '⏸';
+  btn.classList.add('playing');
+  document.getElementById('status').textContent = 'Playing';
 }
 
 function clearHighlight() {
@@ -1481,8 +1804,15 @@ function highlightBar(idx) {
   rect.setAttribute('height', info.h);
   rect.setAttribute('rx', 2);
   svg.appendChild(rect);
+  // Check visibility against the scrollable .chart container rather than the
+  // viewport — when the fingerboard panel is open it eats the bottom of the
+  // viewport, so a row that's "on screen" by window.innerHeight can actually
+  // be hidden under the panel.
   const bcr = info.rowEl.getBoundingClientRect();
-  if (bcr.top < 110 || bcr.bottom > window.innerHeight - 40) {
+  const chartEl = document.getElementById('chart');
+  const crect = chartEl ? chartEl.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+  const margin = 10;
+  if (bcr.top < crect.top + margin || bcr.bottom > crect.bottom - margin) {
     info.rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 }
@@ -1537,6 +1867,15 @@ async function startPlayback(song, bars) {
     // events don't wrap to the wrong positions on the first pass.
     const absBar = barNum;
     events.push({ time: absBar + ':0:0', type: 'barStart', idx: entry.idx });
+
+    // Schedule a fingerboard-update event per beat so the panel follows the
+    // current quarter note + scale as the song plays.
+    if (lastBeatInfo && lastBeatInfo[entry.idx]) {
+      for (let b = 0; b < beatsPerBar; b++) {
+        const info = lastBeatInfo[entry.idx][b];
+        if (info) events.push({ time: `${absBar}:${b}:0`, type: 'beat', info });
+      }
+    }
 
     // One stab per chord symbol, placed at the same beat as the chord
     // sits visually in the measure.
@@ -1643,6 +1982,18 @@ async function startPlayback(song, bars) {
       Tone.Draw.schedule(() => highlightBar(ev.idx), time);
       return;
     }
+    if (ev.type === 'beat') {
+      Tone.Draw.schedule(() => updateFingerboard({
+        litMidis: ev.info.pitch != null ? [ev.info.pitch] : [],
+        scalePcs: ev.info.scalePcs,
+        chordTonesByPc: ev.info.chordTonesByPc,
+        chordSymbol: ev.info.chordSymbol,
+        chordNotesLabel: ev.info.chordNotesLabel,
+        scaleLabel: ev.info.scaleLabel,
+        useFlats: ev.info.useFlats
+      }), time);
+      return;
+    }
     if (ev.type === 'comp') {
       const notes = jazzVoicing(ev.ch);
       if (notes && notes.length) {
@@ -1705,9 +2056,10 @@ async function startPlayback(song, bars) {
   // even if a previous session left the position somewhere else.
   Tone.Transport.position = 0;
   Tone.Transport.start();
-  playing = true;
+  playState = 'playing';
+  pauseContext = { offset, beatsPerBar };
   const btn = document.getElementById('playBtn');
-  btn.textContent = '■';
+  btn.textContent = '⏸';
   btn.classList.add('playing');
   document.getElementById('status').textContent = `Playing · ${playlist.length} bars`;
 }
@@ -1780,10 +2132,17 @@ function loadFromURL(url) {
 
 // ===== Event bindings =====
 document.getElementById('playBtn').addEventListener('click', async () => {
-  if (playing) { stopPlayback(); return; }
+  if (playState === 'playing') { pausePlayback(); return; }
+  if (playState === 'paused') { resumePlayback(); return; }
   if (!window.currentSong) return;
   const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
   await startPlayback(window.currentSong.song, expanded);
+});
+document.getElementById('rewindBtn').addEventListener('click', () => {
+  // Full reset — always go back to the top. Does not auto-play; user can
+  // tap play again to start from the beginning.
+  stopPlayback();
+  document.getElementById('status').textContent = 'Ready';
 });
 let currentTempo = 120;
 document.querySelectorAll('#tempoSeg button').forEach(b => {
@@ -1797,7 +2156,7 @@ document.querySelectorAll('#tempoSeg button').forEach(b => {
     // based on tempo tier, so we need to rebuild the part when the tier
     // actually changes during playback.
     const tier = (t) => t < 100 ? 'ballad' : (t < 150 ? 'medium' : 'up');
-    if (playing && window.currentSong && drumMode === 'ride' &&
+    if (playState === 'playing' && window.currentSong && drumMode === 'ride' &&
         tier(prevTempo) !== tier(currentTempo)) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded);
@@ -1865,7 +2224,7 @@ document.querySelectorAll('#repeatSeg button').forEach(b => {
     b.classList.add('active');
     songRepeats = parseInt(b.dataset.r, 10) || 1;
     rerenderCurrent();
-    if (playing && window.currentSong) {
+    if (playState === 'playing' && window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded);
     }
@@ -1907,7 +2266,7 @@ document.querySelectorAll('#drumSeg button').forEach(b => {
     document.querySelectorAll('#drumSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     drumMode = b.dataset.mode;
-    if (playing && window.currentSong) {
+    if (playState === 'playing' && window.currentSong) {
       // restart with the new pattern so the change is immediate
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded);
@@ -1978,7 +2337,7 @@ async function initSongLibrary() {
     sel.appendChild(opt);
   });
   sel.addEventListener('change', () => {
-    if (playing) stopPlayback();
+    if (playState !== 'stopped') stopPlayback();
     const idx = parseInt(sel.value, 10);
     loadSongEntry(songs[idx]);
   });
