@@ -1655,16 +1655,17 @@ function renderChart(song, barsIn, timesigStr) {
         if (isFirstRow) stave.addTimeSignature(ts.str);
       }
       // Barlines
-      // Barlines only for special cases (repeats, final, double). Plain
-      // single barlines between measures are omitted so the score reads as
-      // a continuous staff rather than a row of bordered boxes.
+      // Begin barline only for repeat starts — otherwise we'd draw a line
+      // at every measure's left edge AND the previous measure's right edge,
+      // doubling up. Let the right barline (SINGLE by default) serve as the
+      // divider between adjacent measures.
       if (bar.leftBar === 'repeatStart') stave.setBegBarType(VF.Barline.type.REPEAT_BEGIN);
       else stave.setBegBarType(VF.Barline.type.NONE);
 
       if (bar.rightBar === 'repeatEnd') stave.setEndBarType(VF.Barline.type.REPEAT_END);
       else if (bar.rightBar === 'final') stave.setEndBarType(VF.Barline.type.END);
       else if (bar.rightBar === 'double') stave.setEndBarType(VF.Barline.type.DOUBLE);
-      else stave.setEndBarType(VF.Barline.type.NONE);
+      else stave.setEndBarType(VF.Barline.type.SINGLE);
 
       // iRealPro N1/N2 ending brackets aren't meaningful here since repeats
       // are already expanded into literal bars; skip them to avoid stray
