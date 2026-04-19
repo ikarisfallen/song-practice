@@ -6,8 +6,20 @@ html, body {
   color: #e6e3da;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   overscroll-behavior: none;
+  /* Lock the document so mobile browsers can't scroll the header off the
+     top when the URL bar shows/hides. Scrolling happens inside .chart. */
+  overflow: hidden;
 }
-#app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+#app {
+  display: flex;
+  flex-direction: column;
+  /* dvh (dynamic viewport height) tracks the actual visible area on mobile
+     even as the URL bar animates in and out. vh is the fallback for older
+     browsers that don't support dvh. */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
 
 header {
   position: sticky; top: 0; z-index: 10;
@@ -75,7 +87,12 @@ header {
    <select> is overlaid with opacity:0 so tapping anywhere opens the OS's
    native dropdown. */
 .song-picker {
-  flex: 1 1 auto;
+  /* flex-basis 0 is important here: with basis:auto the item would size
+     to its content (the song title), so a long name makes it wider and a
+     short one makes it narrower. basis:0 ignores content for sizing and
+     lets flex-grow fill all the leftover space between the loop buttons
+     and the note-info button, independent of the current label. */
+  flex: 1 1 0;
   min-width: 0;
   height: 40px;
   border-radius: 8px;
