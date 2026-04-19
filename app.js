@@ -412,6 +412,29 @@ function findClosestIndex(tones, target) {
   return best;
 }
 
+// Like findContinuationIndex, but at a chord boundary prefer a move that
+// isn't a "same-letter" chromatic step (F → F♯, B → B♭, etc.). Those reads
+// as a single letter being sharpened/flattened, which feels awkward and
+// visually confusing on the staff. If the natural continuation would be
+// such a move, try the opposite direction first.
+function findSmoothContinuation(tones, lastPitch, lastTpc, dir) {
+  const primary = findContinuationIndex(tones, lastPitch, dir);
+  if (lastTpc == null || lastTpc < 0) return primary;
+  const primTpc = tones[primary.idx].tpc;
+  const lastLetter = (((lastTpc + 1) % 7) + 7) % 7;
+  const primLetter = (((primTpc + 1) % 7) + 7) % 7;
+  const primPitch = tones[primary.idx].pitch;
+  if (primLetter === lastLetter && Math.abs(primPitch - lastPitch) === 1) {
+    const reverse = findContinuationIndex(tones, lastPitch, -dir);
+    const revTpc = tones[reverse.idx].tpc;
+    const revLetter = (((revTpc + 1) % 7) + 7) % 7;
+    if (revLetter !== lastLetter) {
+      return { idx: reverse.idx, dir: -dir };
+    }
+  }
+  return primary;
+}
+
 function findContinuationIndex(tones, lastPitch, dir) {
   if (dir === 1) {
     for (let i = 0; i < tones.length; i++)
@@ -714,6 +737,7 @@ function generateQuarterNotes(bars, ts) {
   let tones = [];
   let toneIdx = 0;
   let lastPitch = -1;
+  let lastTpc = -1;       // letter of the last note, for smooth continuation
   let lastSig = null;
 
   chordEvents.forEach((ce, i) => {
@@ -731,7 +755,7 @@ function generateQuarterNotes(bars, ts) {
         while (sp > EX_HIGH) sp -= 12;
         toneIdx = findClosestIndex(tones, sp);
       } else {
-        const cont = findContinuationIndex(tones, lastPitch, direction);
+        const cont = findSmoothContinuation(tones, lastPitch, lastTpc, direction);
         toneIdx = cont.idx;
         direction = cont.dir;
       }
@@ -757,6 +781,7 @@ function generateQuarterNotes(bars, ts) {
       }
       results[ce.barIdx][b] = { pitch: p, tpc: t };
       lastPitch = p;
+      lastTpc = t;
 
       let ni = toneIdx + direction;
       if (ni < 0) { direction = 1; ni = toneIdx + 1; }
@@ -764,6 +789,194 @@ function generateQuarterNotes(bars, ts) {
       if (ni < 0) ni = 0;
       if (ni >= tones.length) ni = tones.length - 1;
       toneIdx = ni;
+    }
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Cantus Firmus generator: one tone per chord, held for the chord's full
+// duration by repeating the same pitch on every beat. The melody descends
+// slowly — the next note is the lowest diatonic tone within a whole step
+// below the previous one. When no such tone exists, it jumps to the top of
+// the cello range and continues descending from there. Ported from the
+// MuseScore ExerciseBuilder "Cantus Firmus" plugin.
+function generateCantusFirmusQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  let lastPitch = -1;
+
+  chordEvents.forEach((ce, i) => {
+    const eff = effective[i];
+    const tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+    if (tones.length === 0) return;
+
+    let notePitch, noteTpc;
+    if (lastPitch < 0) {
+      // First chord: comfortable starting pitch on the chord's root.
+      let sp = eff.root.pitchClass + 48;
+      while (sp < EX_LOW) sp += 12;
+      while (sp > EX_HIGH) sp -= 12;
+      const idx = findClosestIndex(tones, sp);
+      notePitch = tones[idx].pitch;
+      noteTpc = tones[idx].tpc;
+    } else {
+      // Find the lowest diatonic tone in [lastPitch - 2, lastPitch) — i.e.
+      // at most a whole step below the previous note.
+      let bestIdx = -1;
+      let bestPitch = 9999;
+      for (let t = 0; t < tones.length; t++) {
+        if (tones[t].pitch >= lastPitch - 2 && tones[t].pitch < lastPitch) {
+          if (bestIdx < 0 || tones[t].pitch < bestPitch) {
+            bestIdx = t;
+            bestPitch = tones[t].pitch;
+          }
+        }
+      }
+      if (bestIdx >= 0) {
+        notePitch = tones[bestIdx].pitch;
+        noteTpc = tones[bestIdx].tpc;
+      } else {
+        // No tone within a step below — jump to the highest available tone
+        // (reset to the top of the cello range) and continue descending.
+        notePitch = tones[tones.length - 1].pitch;
+        noteTpc = tones[tones.length - 1].tpc;
+      }
+    }
+
+    // One sustained note per chord — the note value matches the chord's
+    // duration. A single chord in a 4/4 bar = whole note; two chords = two
+    // half notes; 4/4 with 3 chords splits as quarter+half or similar
+    // depending on where the chord boundaries fall.
+    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
+    const startBeat = ce.chordIdxInBar * beatsPerChord;
+    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
+      ? beatsPerBar : startBeat + beatsPerChord;
+    const beatCount = endBeat - startBeat;
+    const duration = beatCount >= 4 ? 'w'
+                   : beatCount === 3 ? 'h.'
+                   : beatCount === 2 ? 'h'
+                   : 'q';
+    // First beat carries the note + duration (score renders one long note).
+    // Subsequent beats repeat the pitch (no duration) so the fingerboard /
+    // scale-view stay lit through the sustained section.
+    results[ce.barIdx][startBeat] = { pitch: notePitch, tpc: noteTpc, duration };
+    for (let b = startBeat + 1; b < endBeat; b++) {
+      results[ce.barIdx][b] = { pitch: notePitch, tpc: noteTpc };
+    }
+    lastPitch = notePitch;
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Broken 3rds generator: alternates a base scale tone with the diatonic
+// 3rd in the current direction, then steps the base up/down by one scale
+// degree and repeats. Ported from the MuseScore ExerciseBuilder
+// "Broken 3rds" option (generateNotes called with brokenThirds=true).
+// Returns the same { results, chordEvents, patterns, effective } shape as
+// generateQuarterNotes so it slots into the renderer and playback directly.
+function generateBroken3rdsQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  let direction = -1;
+  let tones = [];
+  let baseIdx = 0;
+  let phase = 0;          // 0 = base note, 1 = the 3rd
+  let lastPitch = -1;
+  let lastTpc = -1;
+  let lastBasePitch = -1; // pitch of the most recently played phase-0 (base) note
+  let lastSig = null;
+
+  chordEvents.forEach((ce, i) => {
+    const eff = effective[i];
+    const sig = eff.root.pitchClass + '|' + eff.root.tpc + '|' + eff.scale.map(x => x.s).join(',');
+    if (sig !== lastSig) {
+      // Capture the "virtual next base" pitch from the OLD scale before we
+      // rebuild tones — baseIdx always points at where the next phase-0 note
+      // would have landed. Using this instead of lastPitch (the 3rd we just
+      // played) keeps the broken-3rds base-step flow across chord changes.
+      let virtualBasePitch = -1;
+      if (tones.length > 0 && baseIdx >= 0 && baseIdx < tones.length) {
+        virtualBasePitch = tones[baseIdx].pitch;
+      }
+      tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+      lastSig = sig;
+      if (tones.length === 0) return;
+      if (lastPitch < 0) {
+        let sp = eff.root.pitchClass + 48;
+        while (sp < EX_LOW) sp += 12;
+        while (sp > EX_HIGH) sp -= 12;
+        baseIdx = findClosestIndex(tones, sp);
+      } else if (virtualBasePitch >= 0) {
+        baseIdx = findClosestIndex(tones, virtualBasePitch);
+        // If the virtual next base lands on the same pitch we just played
+        // as a base (can happen when the new chord's scale rounds us back
+        // to the previous base — e.g. Bb6 → C7 where Eb snaps to D), step
+        // one more scale degree in the current direction so the pattern
+        // actually advances instead of repeating the previous pair.
+        if (tones[baseIdx].pitch === lastBasePitch) {
+          const adv = baseIdx + direction;
+          if (adv >= 0 && adv < tones.length) baseIdx = adv;
+        }
+      } else {
+        const cont = findSmoothContinuation(tones, lastPitch, lastTpc, direction);
+        baseIdx = cont.idx;
+        direction = cont.dir;
+      }
+      phase = 0; // every chord change starts on a fresh base note
+    }
+    if (tones.length === 0) return;
+
+    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
+    const startBeat = ce.chordIdxInBar * beatsPerChord;
+    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
+      ? beatsPerBar : startBeat + beatsPerChord;
+
+    for (let b = startBeat; b < endBeat; b++) {
+      let noteIdx;
+      if (phase === 0) {
+        noteIdx = baseIdx;
+      } else {
+        let thirdIdx = baseIdx + 2 * direction;
+        if (thirdIdx < 0 || thirdIdx >= tones.length) {
+          direction = -direction;
+          thirdIdx = baseIdx + 2 * direction;
+        }
+        if (thirdIdx < 0) thirdIdx = 0;
+        if (thirdIdx >= tones.length) thirdIdx = tones.length - 1;
+        noteIdx = thirdIdx;
+      }
+      results[ce.barIdx][b] = { pitch: tones[noteIdx].pitch, tpc: tones[noteIdx].tpc };
+      lastPitch = tones[noteIdx].pitch;
+      lastTpc = tones[noteIdx].tpc;
+      if (phase === 0) lastBasePitch = tones[noteIdx].pitch;
+
+      // Flip phase each step; after the 3rd, step the base forward.
+      if (phase === 0) {
+        phase = 1;
+      } else {
+        phase = 0;
+        baseIdx += direction;
+        if (baseIdx < 0) { baseIdx = 0; direction = 1; }
+        if (baseIdx >= tones.length) { baseIdx = tones.length - 1; direction = -1; }
+      }
     }
   });
 
@@ -1557,11 +1770,16 @@ function renderChart(song, barsIn, timesigStr) {
 
   // Expand by song repeats and generate quarter notes across the whole thing.
   // Exercise mode switches which generator we use:
-  //   - "scale"  → walk the current chord's scale (one note per beat)
-  //   - "chord"  → arpeggiate 1-3-5-7 through the chord tones (from the
-  //                MuseScore ExerciseBuilder 1357 plugin)
+  //   - "scale"   → walk the current chord's scale (one note per beat)
+  //   - "chord"   → arpeggiate 1-3-5-7 through the chord tones
+  //   - "broken3" → alternating base / diatonic-3rd pairs, stepping through
+  //                 the scale (MuseScore ExerciseBuilder "Broken 3rds")
+  //   - "cantus"  → one descending scale tone per chord (Cantus Firmus)
   const bars = expandBarsByRepeats(barsIn, songRepeats);
-  const gen = exerciseMode === 'chord' ? generate1357QuarterNotes : generateQuarterNotes;
+  const gen = exerciseMode === 'chord' ? generate1357QuarterNotes
+            : exerciseMode === 'broken3' ? generateBroken3rdsQuarterNotes
+            : exerciseMode === 'cantus' ? generateCantusFirmusQuarterNotes
+            : generateQuarterNotes;
   const { results: quarterNotes, chordEvents, patterns, effective } = gen(bars, ts);
   // Per-bar/per-beat info for the fingerboard panel, keyed by expanded-bar idx.
   lastBeatInfo = buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns);
@@ -1717,9 +1935,18 @@ function renderChart(song, barsIn, timesigStr) {
       let isFirstNoteOfBar = true;
       let lastNoteOfBar = null;
 
-      for (let b = 0; b < ts.num; b++) {
+      // Walk the bar's beat slots. For beats whose pitch object has an
+      // explicit `duration` (Cantus Firmus emits 'w'/'h.'/'h'/'q'), render
+      // one long note and consume the subsequent beats it covers.
+      // Pitch-but-no-duration slots render as quarters (the default for all
+      // the other generators). Null slots become quarter rests.
+      const DUR_TO_BEATS = { 'w': 4, 'h.': 3, 'h': 2, 'q': 1 };
+      let b = 0;
+      while (b < ts.num) {
         const bp = beatPitches[b];
         if (bp) {
+          const dur = bp.duration || 'q';
+          const consume = DUR_TO_BEATS[dur] || 1;
           const { key, letterIdx, level, octave } = midiTpcToVexKey(bp.pitch, bp.tpc);
           const posKey = letterIdx + ':' + octave;
           // Stem direction: on/above middle line of the staff → stem down,
@@ -1727,7 +1954,7 @@ function renderChart(song, barsIn, timesigStr) {
           // we render an octave up (8vb), so written MIDI = sounding + 12.
           // Therefore sounding MIDI >= 38 (D2) → stem down.
           const stemDir = bp.pitch >= 38 ? VF.Stem.DOWN : VF.Stem.UP;
-          const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: 'q', stem_direction: stemDir });
+          const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: dur, stem_direction: stemDir });
 
           // Decide whether to show an accidental on this note.
           const keyDefault = 0;
@@ -1754,8 +1981,10 @@ function renderChart(song, barsIn, timesigStr) {
           isFirstNoteOfBar = false;
 
           notes.push(n);
+          b += consume;
         } else {
           notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
+          b++;
         }
       }
       // Carry the last note of this bar to the next bar for the courtesy check.
@@ -2853,16 +3082,55 @@ function expandIRealRepeats(bars) {
     if (b.rightBar === 'repeatEnd') b.rightBar = 'single';
     return b;
   };
+  const endingMatches = (b, n) => b && (b.ending == n); // == intentional (string vs number)
   while (i < bars.length) {
     if (bars[i].leftBar === 'repeatStart') {
       let j = i;
       while (j < bars.length && bars[j].rightBar !== 'repeatEnd') j++;
       if (j < bars.length) {
-        // Both copies are literal bars now — strip the repeat barlines so
-        // there's no misleading :|| or ||: on the seam.
+        // Look for an N1 bar inside [i, j] — marks the split between
+        // "common" bars and the first-ending bars.
+        let n1Start = -1;
+        for (let k = i; k <= j; k++) {
+          if (endingMatches(bars[k], 1)) { n1Start = k; break; }
+        }
+        // And an N2 bar just after the repeatEnd — the second-ending.
+        let n2Start = -1, n2End = -1;
+        for (let k = j + 1; k < bars.length; k++) {
+          if (endingMatches(bars[k], 2)) {
+            n2Start = k;
+            // N2 runs for the same number of bars as N1 (standard iReal
+            // layout); if there's no N1, extend until the next section
+            // boundary or a strong barline.
+            const n1Length = n1Start >= 0 ? (j - n1Start + 1) : 0;
+            if (n1Length > 0) {
+              n2End = Math.min(n2Start + n1Length - 1, bars.length - 1);
+            } else {
+              n2End = n2Start;
+              while (n2End + 1 < bars.length
+                     && !bars[n2End + 1].section
+                     && !bars[n2End + 1].ending
+                     && bars[n2End + 1].leftBar !== 'repeatStart'
+                     && bars[n2End].rightBar !== 'final'
+                     && bars[n2End].rightBar !== 'double') {
+                n2End++;
+              }
+            }
+            break;
+          }
+        }
+
+        // First pass: common bars plus N1 ending (bars i..j).
         for (let k = i; k <= j; k++) out.push(stripRepeatBarlines(bars[k]));
-        for (let k = i; k <= j; k++) out.push(stripRepeatBarlines(bars[k]));
-        i = j + 1;
+        // Second pass: common bars, then jump to N2 (skipping N1).
+        const commonEnd = n1Start >= 0 ? n1Start - 1 : j;
+        for (let k = i; k <= commonEnd; k++) out.push(stripRepeatBarlines(bars[k]));
+        if (n2Start >= 0) {
+          for (let k = n2Start; k <= n2End; k++) out.push(stripRepeatBarlines(bars[k]));
+          i = n2End + 1;
+        } else {
+          i = j + 1;
+        }
         continue;
       }
     }
@@ -3071,7 +3339,8 @@ document.querySelectorAll('#exerciseSeg button').forEach(b => {
   b.addEventListener('click', async () => {
     document.querySelectorAll('#exerciseSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
-    exerciseMode = b.dataset.ex === 'chord' ? 'chord' : 'scale';
+    const ex = b.dataset.ex;
+    exerciseMode = (ex === 'chord' || ex === 'broken3' || ex === 'cantus') ? ex : 'scale';
     rerenderCurrent();
     if (playState === 'playing' && window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
