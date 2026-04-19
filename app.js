@@ -157,21 +157,24 @@ function buildBars(tokens) {
         if (!cur) pendingEnding = t.m[1]; else cur.ending = t.m[1];
         break;
       case 'segno':
-        if (!cur) startBar();
-        cur.markers.push({ type: 'segno' });
-        break;
       case 'coda':
-        if (!cur) startBar();
-        cur.markers.push({ type: 'coda' });
-        break;
       case 'endMarker':
-        if (!cur) startBar();
-        cur.markers.push({ type: 'endMarker' });
-        break;
       case 'comment': {
-        const txt = t.m[1];
-        if (!cur) startBar();
-        cur.markers.push({ type: 'comment', text: txt });
+        // Attach the marker to the current bar if one is open; otherwise
+        // stamp it onto the last completed bar (avoids inventing an empty
+        // placeholder bar just to hold a stray <Fine>/<D.C.>/coda marker
+        // between a Kcl/barline and a trailing `Z`).
+        const marker = t.type === 'comment'
+          ? { type: 'comment', text: t.m[1] }
+          : { type: t.type };
+        if (cur) {
+          cur.markers.push(marker);
+        } else if (bars.length > 0) {
+          bars[bars.length - 1].markers.push(marker);
+        } else {
+          startBar();
+          cur.markers.push(marker);
+        }
         break;
       }
       case 'space':
@@ -1597,11 +1600,12 @@ function renderChart(song, barsIn, timesigStr) {
   const staffY = 26;
   // VexFlow's bass-clef staff lines end up at y ≈ 66 (top) .. 106 (bottom).
   // The lowest F the generator can produce (written F2 via the 8vb clef) sits
-  // around y = 111, in the space just below the bottom line. Place the
-  // pattern line just below that with the label tucked right under.
-  const patternLineY = 118;
-  const patternTextY = patternLineY + 14;
-  const staffHeight = patternTextY + 10;
+  // around y = 111–116. Push the scale label a bit further below that so
+  // it can't overlap the note head, then the colored line just below the
+  // label as its underline.
+  const patternTextY = 134;         // baseline of the scale label
+  const patternLineY = patternTextY + 6; // underline just below descenders
+  const staffHeight  = patternLineY + 10;
 
   const formSize = barsIn.length; // length of one pass of the form
   let rowStart = 0;
@@ -1811,7 +1815,10 @@ function renderChart(song, barsIn, timesigStr) {
 
       // Record bounds for highlighting. Extend the highlight down past the
       // lowest F on the staff to just above the scale-line text.
-      barElements[barIdx] = { rowEl, x, y: staffY, w: width, h: patternLineY - (staffY - 4) - 2 };
+      // Highlight height runs from just above the staff all the way down
+      // past the scale label and underline, so the current-measure blue
+      // wash visibly covers both the staff and the key label under it.
+      barElements[barIdx] = { rowEl, x, y: staffY, w: width, h: patternLineY + 3 - (staffY - 4) };
 
       x += width;
     });
@@ -1919,6 +1926,37 @@ function renderChart(song, barsIn, timesigStr) {
       // VexFlow sets inline width/height styles — clear them so CSS can scale
       svgEl.style.width = '100%';
       svgEl.style.height = 'auto';
+
+      // Thicken VexFlow's 1-unit staff lines and barlines so they stay
+      // readable when the SVG is scaled down on a phone. We do this in
+      // geometry (rect height / width) rather than CSS stroke, because
+      // the rects have no stroke by default and a stroke on a thin filled
+      // rect doesn't always render reliably across browsers.
+      const LINE_MUL = 2.2;
+      svgEl.querySelectorAll('.vf-stave rect').forEach(r => {
+        const h = parseFloat(r.getAttribute('height') || '1');
+        const y = parseFloat(r.getAttribute('y') || '0');
+        const newH = h * LINE_MUL;
+        r.setAttribute('height', newH);
+        r.setAttribute('y', y - (newH - h) / 2);
+      });
+      svgEl.querySelectorAll('.vf-stavebarline rect').forEach(r => {
+        const w = parseFloat(r.getAttribute('width') || '1');
+        // Only thicken the thin single-barline rects; leave the wider
+        // repeat/end barline rectangles alone.
+        if (w > 2) return;
+        const x = parseFloat(r.getAttribute('x') || '0');
+        const newW = w * LINE_MUL;
+        r.setAttribute('width', newW);
+        r.setAttribute('x', x - (newW - w) / 2);
+      });
+
+      // SVG layering is by document order — later siblings paint on top.
+      // When multiple staves live in one row, stave-2's horizontal lines
+      // are drawn after stave-1's barline and can paint over it at the
+      // intersection. Re-append every barline group to the end of the SVG
+      // so barlines sit on top of all staff lines.
+      svgEl.querySelectorAll('.vf-stavebarline').forEach(g => svgEl.appendChild(g));
     }
 
     // Add a horizontal separator between full-form repeats.
@@ -2480,9 +2518,14 @@ function highlightBar(idx) {
   const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   rect.setAttribute('class', 'hi-overlay');
   rect.setAttribute('x', info.x);
-  rect.setAttribute('y', info.y - 4);
+  // Extend the top of the highlight above the staff so it covers the
+  // chord-symbol labels that sit at y ≈ staffY − 6. Baseline of that label
+  // is 6 px above the staff and it's ~14 px tall, so reaching ~20 px above
+  // info.y gets the whole label strip inside the blue wash.
+  const TOP_EXTEND = 20;
+  rect.setAttribute('y', info.y - TOP_EXTEND);
   rect.setAttribute('width', info.w);
-  rect.setAttribute('height', info.h);
+  rect.setAttribute('height', info.h + TOP_EXTEND - 4);
   rect.setAttribute('rx', 2);
   svg.appendChild(rect);
   // Check visibility against the scrollable .chart container rather than the

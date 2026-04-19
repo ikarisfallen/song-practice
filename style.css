@@ -223,10 +223,18 @@ main {
   height: auto;
 }
 .staff-row svg * { color: #000; }
+/* Make sure VexFlow's staff-line and barline rects render solid black
+   instead of the default #999 grey — the rect heights themselves are
+   thickened in JS after rendering (see renderChart). */
+.staff-row svg .vf-stave rect,
+.staff-row svg .vf-stavebarline rect {
+  fill: #000;
+}
 .hi-overlay {
-  fill: rgba(61, 169, 252, 0.22);
-  stroke: #3da9fc;
-  stroke-width: 2;
+  /* No border — just a translucent blue wash that covers the measure's
+     staff area plus the scale-label strip beneath it. */
+  fill: rgba(61, 169, 252, 0.28);
+  stroke: none;
   pointer-events: none;
 }
 .form-separator {
