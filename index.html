@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=27" />
+<link rel="stylesheet" href="style.css?v=28" />
 </head>
 <body>
 <div id="app">
@@ -20,15 +20,21 @@
         <svg viewBox="0 0 16 22" aria-hidden="true"><path d="M 3 2 L 13 2 L 13 20 L 3 20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="square"/></svg>
       </button>
       <button id="clearLoopBtn" class="top-btn" aria-label="Clear loop" disabled>✕</button>
-      <span id="songName" class="song-name" aria-live="polite"></span>
-      <label class="song-picker top-btn" aria-label="Song library">
-        <svg class="folder-glyph" viewBox="0 0 24 20" aria-hidden="true"><path d="M 2 4 h 7 l 2 2 h 11 v 12 h -20 Z" fill="currentColor"/></svg>
+      <label class="song-picker" aria-label="Song library">
+        <span id="songName" class="song-label" aria-live="polite"></span>
         <select id="songSelect" class="song-select" aria-label="Song"></select>
       </label>
       <button id="fbToggle" class="top-btn" aria-label="Toggle note info" aria-expanded="false">♪</button>
       <button id="optionsToggle" class="top-btn" aria-label="Toggle options" aria-expanded="false">⚙</button>
     </div>
     <div id="optionsPanel" class="options-panel" hidden>
+      <div class="drum-row">
+        <span class="drum-label">Exercise</span>
+        <div class="seg" id="exerciseSeg" role="tablist">
+          <button type="button" data-ex="scale" class="active">Scale Notes</button>
+          <button type="button" data-ex="chord">Chord Tones</button>
+        </div>
+      </div>
       <div class="drum-row">
         <span class="drum-label">Tempo</span>
         <div class="seg tempo-seg" id="tempoSeg" role="tablist">
@@ -106,6 +112,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=48"></script>
+<script src="app.js?v=50"></script>
 </body>
 </html>

@@ -751,6 +751,283 @@ function generateQuarterNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// Alternative quarter-note generator that cycles through each chord's 1-3-5-7
+// chord tones instead of the full scale. Ported from the MuseScore
+// ExerciseBuilder "1357" plugin (Dropbox/MuseScore/Plugins/ExerciseBuilder.qml)
+// — same direction / enclosure / group-reversal logic. Returns the same
+// { results, chordEvents, patterns, effective } shape as generateQuarterNotes.
+function generate1357QuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // All MIDI pitches in the cello range that match a given pitch class.
+  function pitchesForPC(pc) {
+    const arr = [];
+    for (let oc = 0; oc <= 7; oc++) {
+      const p = pc + oc * 12;
+      if (p >= EX_LOW && p <= EX_HIGH) arr.push(p);
+    }
+    return arr;
+  }
+
+  // Number of quarter-note slots each chord event gets.
+  const quartersPerEvent = chordEvents.map(ce => {
+    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
+    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
+      ? beatsPerBar : (ce.chordIdxInBar + 1) * beatsPerChord;
+    return endBeat - ce.chordIdxInBar * beatsPerChord;
+  });
+
+  let descending = true;           // start by descending from top of range
+  let lastWrittenPitch = -1;
+  let secondLastWrittenPitch = -1;
+
+  chordEvents.forEach((ce, ci) => {
+    const eff = effective[ci];
+    const scale = eff.scale;
+    const rootPC = eff.root.pitchClass;
+    const rootTpc = eff.root.tpc;
+
+    // Build 4 chord-tone degrees: root(0), 3rd(1), 5th(2), 7th(3).
+    const degScaleIdx = [0, 2, 4, 6];
+    const degrees = [];
+    for (let d = 0; d < 4; d++) {
+      const si = degScaleIdx[d];
+      if (si >= scale.length) continue;
+      degrees.push({
+        pc: ((rootPC + scale[si].s) % 12 + 12) % 12,
+        tpc: rootTpc + scale[si].t
+      });
+    }
+    if (degrees.length < 4) return;
+
+    const numQuarters = quartersPerEvent[ci];
+    const notes = [];
+
+    if (numQuarters === 1) {
+      // Short chord: just the 3rd, continue current direction.
+      const ref = (lastWrittenPitch >= 0) ? lastWrittenPitch : 41;
+      const all3 = pitchesForPC(degrees[1].pc);
+      let bestP = -1;
+      if (descending) {
+        for (let k = all3.length - 1; k >= 0; k--) {
+          if (all3[k] < ref && all3[k] !== lastWrittenPitch) { bestP = all3[k]; break; }
+        }
+      } else {
+        for (let k = 0; k < all3.length; k++) {
+          if (all3[k] > ref && all3[k] !== lastWrittenPitch) { bestP = all3[k]; break; }
+        }
+      }
+      if (bestP < 0) {
+        let bestD = 9999;
+        for (let k = 0; k < all3.length; k++) {
+          if (all3[k] === lastWrittenPitch && all3.length > 1) continue;
+          const dist = Math.abs(all3[k] - ref);
+          if (dist < bestD) { bestD = dist; bestP = all3[k]; }
+        }
+      }
+      if (bestP >= 0) notes.push({ pitch: bestP, tpc: degrees[1].tpc });
+    } else if (numQuarters === 2) {
+      // Short chord: 3rd and 7th, strictly in current direction.
+      const ref = (lastWrittenPitch >= 0) ? lastWrittenPitch : 41;
+      const all3 = pitchesForPC(degrees[1].pc);
+      const all7 = pitchesForPC(degrees[3].pc);
+      const buildCands2 = (desc, fromP) => {
+        const cands = [];
+        for (let k = 0; k < all3.length; k++) {
+          if (all3[k] === fromP) continue;
+          if (desc ? all3[k] < fromP : all3[k] > fromP)
+            cands.push({ pitch: all3[k], degIdx: 1, tpc: degrees[1].tpc });
+        }
+        for (let k = 0; k < all7.length; k++) {
+          if (all7[k] === fromP) continue;
+          if (desc ? all7[k] < fromP : all7[k] > fromP)
+            cands.push({ pitch: all7[k], degIdx: 3, tpc: degrees[3].tpc });
+        }
+        cands.sort((a, b) => desc ? b.pitch - a.pitch : a.pitch - b.pitch);
+        return cands;
+      };
+      const findPair2 = (cands) => {
+        for (let i = 0; i < cands.length; i++) {
+          for (let j = i + 1; j < cands.length; j++) {
+            if (cands[j].degIdx !== cands[i].degIdx) return [cands[i], cands[j]];
+          }
+        }
+        return null;
+      };
+      let pair = findPair2(buildCands2(descending, ref));
+      if (!pair) {
+        descending = !descending;
+        pair = findPair2(buildCands2(descending, ref));
+      }
+      if (pair) {
+        notes.push({ pitch: pair[0].pitch, tpc: pair[0].tpc });
+        notes.push({ pitch: pair[1].pitch, tpc: pair[1].tpc });
+      } else {
+        // Last-resort: closest 3rd and 7th, ordered by direction.
+        let best3 = -1, best7 = -1, bd3 = 9999, bd7 = 9999;
+        for (let k = 0; k < all3.length; k++) {
+          if (all3[k] === lastWrittenPitch) continue;
+          const d = Math.abs(all3[k] - ref);
+          if (d < bd3) { bd3 = d; best3 = all3[k]; }
+        }
+        for (let k = 0; k < all7.length; k++) {
+          if (all7[k] === lastWrittenPitch) continue;
+          const d = Math.abs(all7[k] - ref);
+          if (d < bd7) { bd7 = d; best7 = all7[k]; }
+        }
+        if (best3 >= 0 && best7 >= 0) {
+          if (descending) {
+            const h = Math.max(best3, best7), l = Math.min(best3, best7);
+            const hTpc = (best3 >= best7) ? degrees[1].tpc : degrees[3].tpc;
+            const lTpc = (best3 >= best7) ? degrees[3].tpc : degrees[1].tpc;
+            notes.push({ pitch: h, tpc: hTpc });
+            notes.push({ pitch: l, tpc: lTpc });
+          } else {
+            const l = Math.min(best3, best7), h = Math.max(best3, best7);
+            const lTpc = (best3 <= best7) ? degrees[1].tpc : degrees[3].tpc;
+            const hTpc = (best3 <= best7) ? degrees[3].tpc : degrees[1].tpc;
+            notes.push({ pitch: l, tpc: lTpc });
+            notes.push({ pitch: h, tpc: hTpc });
+          }
+        } else if (best3 >= 0) {
+          notes.push({ pitch: best3, tpc: degrees[1].tpc });
+        } else if (best7 >= 0) {
+          notes.push({ pitch: best7, tpc: degrees[3].tpc });
+        }
+      }
+    } else {
+      // Full chord (3+ quarter notes): cyclic rotation through 1-3-5-7.
+      let startPitch = -1, startDegIdx = 0;
+
+      if (ci === 0) {
+        // First chord: highest chord tone in cello range.
+        for (let d = 0; d < degrees.length; d++) {
+          const all = pitchesForPC(degrees[d].pc);
+          for (let k = 0; k < all.length; k++) {
+            if (all[k] > startPitch) { startPitch = all[k]; startDegIdx = d; }
+          }
+        }
+        descending = true;
+      } else {
+        // Enclosure: pick a chord tone between the previous two notes.
+        if (secondLastWrittenPitch >= 0 && lastWrittenPitch >= 0) {
+          const lo = Math.min(secondLastWrittenPitch, lastWrittenPitch);
+          const hi = Math.max(secondLastWrittenPitch, lastWrittenPitch);
+          if (hi > lo) {
+            let encBestD = 9999;
+            const mid = (lo + hi) / 2;
+            for (let d = 0; d < degrees.length; d++) {
+              const all = pitchesForPC(degrees[d].pc);
+              for (let k = 0; k < all.length; k++) {
+                if (all[k] > lo && all[k] < hi && all[k] !== lastWrittenPitch) {
+                  const dist = Math.abs(all[k] - mid);
+                  if (dist < encBestD) {
+                    encBestD = dist; startPitch = all[k]; startDegIdx = d;
+                  }
+                }
+              }
+            }
+          }
+        }
+        // Fallback: closest chord tone (no repeat).
+        if (startPitch < 0) {
+          let bestD = 9999;
+          for (let d = 0; d < degrees.length; d++) {
+            const all = pitchesForPC(degrees[d].pc);
+            for (let k = 0; k < all.length; k++) {
+              if (all[k] === lastWrittenPitch) continue;
+              const dist = Math.abs(all[k] - lastWrittenPitch);
+              if (dist < bestD) { bestD = dist; startPitch = all[k]; startDegIdx = d; }
+            }
+          }
+        }
+      }
+      if (startPitch < 0) return;
+
+      // Validate direction: can we take 4 notes in current dir?
+      const firstGroup = Math.min(numQuarters, 4);
+      let checkPrev = startPitch;
+      let checkDeg = startDegIdx;
+      let dirOK = true;
+      for (let q = 1; q < firstGroup; q++) {
+        checkDeg = descending ? (checkDeg - 1 + 4) % 4 : (checkDeg + 1) % 4;
+        const chkAll = pitchesForPC(degrees[checkDeg].pc);
+        let found = false;
+        if (descending) {
+          for (let k = chkAll.length - 1; k >= 0; k--) {
+            if (chkAll[k] < checkPrev) { checkPrev = chkAll[k]; found = true; break; }
+          }
+        } else {
+          for (let k = 0; k < chkAll.length; k++) {
+            if (chkAll[k] > checkPrev) { checkPrev = chkAll[k]; found = true; break; }
+          }
+        }
+        if (!found) { dirOK = false; break; }
+      }
+      if (!dirOK) descending = !descending;
+
+      notes.push({ pitch: startPitch, tpc: degrees[startDegIdx].tpc });
+      let prev = startPitch;
+      let degIdx = startDegIdx;
+      for (let q = 1; q < numQuarters; q++) {
+        // Reverse every 4 notes so long chords zig-zag instead of running off.
+        if (q % 4 === 0) descending = !descending;
+        degIdx = descending ? (degIdx - 1 + 4) % 4 : (degIdx + 1) % 4;
+        const pc = degrees[degIdx].pc;
+        const all = pitchesForPC(pc);
+        let next = -1;
+        if (descending) {
+          for (let k = all.length - 1; k >= 0; k--) {
+            if (all[k] < prev) { next = all[k]; break; }
+          }
+        } else {
+          for (let k = 0; k < all.length; k++) {
+            if (all[k] > prev) { next = all[k]; break; }
+          }
+        }
+        if (next < 0) {
+          // Reverse if stuck at the range boundary.
+          descending = !descending;
+          if (descending) {
+            for (let k = all.length - 1; k >= 0; k--) {
+              if (all[k] < prev) { next = all[k]; break; }
+            }
+          } else {
+            for (let k = 0; k < all.length; k++) {
+              if (all[k] > prev) { next = all[k]; break; }
+            }
+          }
+        }
+        if (next < 0) break;
+        notes.push({ pitch: next, tpc: degrees[degIdx].tpc });
+        prev = next;
+      }
+    }
+
+    // Write the generated notes into results[barIdx][beat].
+    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
+    const startBeat = ce.chordIdxInBar * beatsPerChord;
+    for (let q = 0; q < notes.length; q++) {
+      const b = startBeat + q;
+      if (b >= beatsPerBar) break;
+      results[ce.barIdx][b] = { pitch: notes[q].pitch, tpc: notes[q].tpc };
+      secondLastWrittenPitch = lastWrittenPitch;
+      lastWrittenPitch = notes[q].pitch;
+    }
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
 // TPC → letter + accidental (e.g. TPC 7 → { letter:'C', acc:'b' })
 function tpcToLetterAcc(tpc) {
   const letters = ['F','C','G','D','A','E','B'];
@@ -1269,6 +1546,7 @@ function updateFingerboard(state) {
 // ===== Render (sheet music via VexFlow) =====
 let measuresPerLine = 2;
 let songRepeats = 1;
+let exerciseMode = 'scale'; // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
 
 function expandBarsByRepeats(bars, n) {
@@ -1342,9 +1620,14 @@ function renderChart(song, barsIn, timesigStr) {
   const VF = Vex.Flow;
   const ts = parseTimesig(timesigStr);
 
-  // Expand by song repeats and generate quarter notes across the whole thing
+  // Expand by song repeats and generate quarter notes across the whole thing.
+  // Exercise mode switches which generator we use:
+  //   - "scale"  → walk the current chord's scale (one note per beat)
+  //   - "chord"  → arpeggiate 1-3-5-7 through the chord tones (from the
+  //                MuseScore ExerciseBuilder 1357 plugin)
   const bars = expandBarsByRepeats(barsIn, songRepeats);
-  const { results: quarterNotes, chordEvents, patterns, effective } = generateQuarterNotes(bars, ts);
+  const gen = exerciseMode === 'chord' ? generate1357QuarterNotes : generateQuarterNotes;
+  const { results: quarterNotes, chordEvents, patterns, effective } = gen(bars, ts);
   // Per-bar/per-beat info for the fingerboard panel, keyed by expanded-bar idx.
   lastBeatInfo = buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns);
 
@@ -2214,12 +2497,15 @@ function refreshFingerboardForBar(idx) {
 //   - While paused: discard the pause state so the next play starts fresh
 //     from the tapped bar rather than resuming where we paused.
 //   - While stopped: just remember the selection and repaint the highlight.
-// When a Loop In/Out pair is active, taps outside [loopIn, loopOut] are
-// ignored so the user can't jump playback into a bar the loop wouldn't
-// play — which would otherwise result in confused/silent audio.
+// While a loop is active AND playback is running, taps outside the loop
+// range are ignored so the user can't jump playback into a bar the loop
+// wouldn't play (which would otherwise cause confused/silent audio).
+// When paused or stopped, any bar is selectable — the user might want to
+// move the selection (e.g. to set a new Loop In / Loop Out) even if it's
+// outside the current loop.
 function selectBar(idx) {
   const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
-  if (hasLoop && (idx < loopIn || idx > loopOut)) return;
+  if (hasLoop && playState === 'playing' && (idx < loopIn || idx > loopOut)) return;
   selectedBar = idx;
   updateLoopControls();
   if (playState === 'playing') {
@@ -2783,6 +3069,22 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
     document.querySelectorAll('#countInSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     countInBars = parseInt(b.dataset.count, 10) || 0;
+  });
+});
+
+// Exercise picker — regenerates the quarter notes with the selected
+// algorithm (scale-walker vs. 1-3-5-7 arpeggio). If playback is running,
+// restart so the audible notes match the re-rendered score.
+document.querySelectorAll('#exerciseSeg button').forEach(b => {
+  b.addEventListener('click', async () => {
+    document.querySelectorAll('#exerciseSeg button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    exerciseMode = b.dataset.ex === 'chord' ? 'chord' : 'scale';
+    rerenderCurrent();
+    if (playState === 'playing' && window.currentSong) {
+      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+    }
   });
 });
 

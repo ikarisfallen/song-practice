@@ -69,11 +69,40 @@ header {
 .top-btn.play { background: #3da9fc; color: #052033; border-color: #3da9fc; font-size: 18px; font-weight: bold; }
 .top-btn.play.playing { background: #ef4444; color: #fff; border-color: #ef4444; }
 
-/* Song picker: a dark pill identical to .top-btn, with a filled folder SVG
-   visible inside and the native <select> overlaid with opacity:0 so tapping
-   opens the OS's native dropdown. */
-.song-picker { text-decoration: none; }
-.song-picker .folder-glyph { width: 22px; height: 18px; pointer-events: none; }
+/* Song picker: flexible-width dark pill styled like the other top-bar
+   buttons, but stretching to fill the space between Clear Loop and the
+   note-info button. The song title is the label inside; the native
+   <select> is overlaid with opacity:0 so tapping anywhere opens the OS's
+   native dropdown. */
+.song-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 40px;
+  border-radius: 8px;
+  background: #2a3a48;
+  color: #cde;
+  border: 1px solid #334654;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  position: relative;
+  cursor: pointer;
+  overflow: hidden;
+  font-family: inherit;
+}
+.song-picker:active { transform: scale(0.98); }
+.song-picker .song-label {
+  pointer-events: none;
+  text-align: center;
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.15;
+  max-height: 2.4em;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
 .song-picker select {
   position: absolute; inset: 0; width: 100%; height: 100%;
   opacity: 0; cursor: pointer;
@@ -82,29 +111,6 @@ header {
   font-size: 16px;
 }
 
-/* Song name sits between the loop controls and the library picker, and
-   its flex-grow does double duty as the spacer that pushes the right-side
-   buttons (library, note panel, options) to the right edge. flex-basis 0
-   is important: with basis:auto the browser would use the title's one-line
-   natural width, and flex-wrap would push a trailing button to a new row
-   rather than wrap the title's text. basis:0 makes the title size to the
-   leftover space after the fixed buttons, so the text wraps internally and
-   every button stays on the first row. Clamped to ~2 lines via max-height
-   so extra-long titles don't expand the top bar. */
-.song-name {
-  flex: 1 1 0;
-  min-width: 0;
-  font-size: 12px;
-  font-style: italic;
-  color: #cde;
-  padding: 0 4px;
-  text-align: center;
-  line-height: 1.15;
-  max-height: 2.5em;
-  overflow: hidden;
-  overflow-wrap: break-word;
-  word-break: break-word;
-}
 
 /* The native <select> inside .song-picker is invisible (opacity:0) so the
    folder glyph shows through, but the OS-drawn dropdown list inherits the
