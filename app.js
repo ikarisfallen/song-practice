@@ -1511,12 +1511,16 @@ async function startPlayback(song, bars) {
   let tick = 0;
   let lastResolved = null;
 
-  // Count-in: N bars of click before the song, then shift all song events
-  // forward by N bars so they land on their expected beats.
+  // Count-in: N bars of click before the song starts. These are scheduled
+  // directly on the Transport (not on the looping Part) so they fire once
+  // and aren't filtered out by Part's [loopStart, loopEnd) range.
   const offset = countInBars;
   for (let cb = 0; cb < offset; cb++) {
     for (let beat = 0; beat < beatsPerBar; beat++) {
-      events.push({ time: `${cb}:${beat}:0`, type: 'click', accent: beat === 0 });
+      const accent = beat === 0;
+      Tone.Transport.scheduleOnce(t => {
+        click.triggerAttackRelease('32n', t, accent ? 0.95 : 0.55);
+      }, `${cb}:${beat}:0`);
     }
   }
 
@@ -1528,7 +1532,10 @@ async function startPlayback(song, bars) {
     else if (bar.repeatPrev === 2 && playlist[barNum - 2]) bar = playlist[barNum - 2].bar;
     else lastResolved = bar;
 
-    const absBar = barNum + offset;
+    // Schedule events at times RELATIVE to the Part (which starts at Transport
+    // position `${offset}:0:0`). That way Part.loopStart can stay at 0 and
+    // events don't wrap to the wrong positions on the first pass.
+    const absBar = barNum;
     events.push({ time: absBar + ':0:0', type: 'barStart', idx: entry.idx });
 
     // One stab per chord symbol, placed at the same beat as the chord
@@ -1662,12 +1669,13 @@ async function startPlayback(song, bars) {
     }
   }, events.map(e => [e.time, e]));
 
-  // Loop the song indefinitely. Start loop after the count-in bars so the
-  // count-in only plays once.
+  // Loop the song indefinitely. Part events are scheduled in Part-relative
+  // time (bar 0 = first song bar), so we start the Part itself at Transport
+  // position `${offset}:0:0` to line up after the count-in.
   playbackPart.loop = true;
-  playbackPart.loopStart = `${offset}:0:0`;
-  playbackPart.loopEnd = `${offset + playlist.length}:0:0`;
-  playbackPart.start(0);
+  playbackPart.loopStart = 0;
+  playbackPart.loopEnd = `${playlist.length}:0:0`;
+  playbackPart.start(`${offset}:0:0`);
 
   // If Real mode has a recorded drum loop for this tempo tier + time sig,
   // sync it to the Transport so it phase-locks with the bars. Adjust
@@ -1684,11 +1692,18 @@ async function startPlayback(song, bars) {
       const effectiveSourceBpm = (60 * entry.beats) / entry.player.buffer.duration;
       entry.player.playbackRate = currentTempo / effectiveSourceBpm;
       entry.player.unsync();
-      entry.player.sync().start(`${offset}:0:0`);
+      // Schedule the player to start at the right bar via Transport directly —
+      // avoids any leftover-state weirdness from sync() across stop/start cycles.
+      Tone.Transport.scheduleOnce(t => {
+        try { entry.player.start(t); } catch (e) {}
+      }, `${offset}:0:0`);
       currentRealLoop = entry;
     }
   }
 
+  // Reset Transport to position 0 so the count-in plays from the very top,
+  // even if a previous session left the position somewhere else.
+  Tone.Transport.position = 0;
   Tone.Transport.start();
   playing = true;
   const btn = document.getElementById('playBtn');
