@@ -787,15 +787,18 @@ const FB_FRETS = 7;
 
 function buildFingerboardSVG() {
   // Columns packed tight: 18px circle with a few px of air between adjacent
-  // strings. Total width = 5*22 + 4*4 = 126.
+  // strings. Total width = 5*22 + 4*4 = 126. We extend the viewBox by a
+  // few pixels on each side so the r=12 "in-bar" rings on the leftmost and
+  // rightmost strings don't get clipped.
   const colW = 22;
   const gap = 4;
   const cols = FB_STRING_BASES.length;
   const rowH = 22;
   const totalW = cols * colW + (cols - 1) * gap;
   const totalH = FB_FRETS * rowH + 4;
+  const padX = 4;
 
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalW} ${totalH}" preserveAspectRatio="xMidYMid meet">`;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${-padX} 0 ${totalW + 2 * padX} ${totalH}" preserveAspectRatio="xMidYMid meet">`;
   const gridTop = 0;
   // Horizontal fret lines spanning all columns (nut is thicker)
   const fretYs = [1, 2, 3, 4, 5, 6].map(i => gridTop + i * rowH + 1);
@@ -815,7 +818,10 @@ function buildFingerboardSVG() {
     for (let r = 0; r < FB_FRETS; r++) {
       const cy = gridTop + r * rowH + (rowH - 9);
       const midi = FB_STRING_BASES[c] + r;
-      svg += `<g class="fb-cell" data-midi="${midi}" data-pc="${((midi % 12) + 12) % 12}">` +
+      svg += `<g class="fb-cell" data-midi="${midi}" data-pc="${((midi % 12) + 12) % 12}" data-fret="${r}">` +
+             // Outer ring — drawn around the filled circle when this note is
+             // one of the quarter notes played in the current bar.
+             `<circle cx="${cx}" cy="${cy}" r="12" fill="none" stroke="#000" stroke-width="1.2" class="fb-ring" style="display:none"/>` +
              `<circle cx="${cx}" cy="${cy}" r="9" fill="#000" stroke="#000" stroke-width="1" class="fb-circle" style="display:none"/>` +
              `<text x="${cx}" y="${cy + 3}" text-anchor="middle" font-family="sans-serif" font-size="8" font-weight="bold" fill="#fff" stroke="none" class="fb-degree"></text>` +
              `</g>`;
@@ -1179,19 +1185,29 @@ function updateFingerboard(state) {
   // Scale-measure view (left side).
   buildNotesMeasureSVG(state);
 
-  // Fingerboard view (right side). Three tiers of visibility:
-  //   - currently-lit pitch → blue
-  //   - any pitch used elsewhere in this measure → fully opaque black
-  //   - other scale notes → semi-transparent
-  //   - non-scale notes → hidden
+  // Fingerboard view (right side). Visibility tiers:
+  //   - currently-lit pitch → blue filled circle (also ringed, since it's in
+  //     the bar by definition)
+  //   - any pitch played elsewhere in this bar → ringed; filled black when
+  //     the pitch's class belongs to the current chord's scale, filled grey
+  //     when it belongs only to another chord in the same bar
+  //   - other current-chord scale notes → plain black circle (no ring)
+  //   - everything else → hidden
+  // Out-of-scale in-bar notes use the opposite sharp/flat spelling so e.g.
+  // an F♯ played by a D7 shows as "F♯" even when the active chord (Am7♭5)
+  // prefers flats.
   const cells = host.querySelectorAll('.fb-cell');
   const lit = new Set(state.litMidis || []);
   const measure = new Set(state.measurePitches || []);
   const scale = state.scalePcs instanceof Set ? state.scalePcs : new Set(state.scalePcs || []);
   const names = state.useFlats ? PC_NAMES_FLAT : PC_NAMES_SHARP;
+  const altNames = state.useFlats ? PC_NAMES_SHARP : PC_NAMES_FLAT;
   cells.forEach(cell => {
     const midi = parseInt(cell.dataset.midi, 10);
     const pc = parseInt(cell.dataset.pc, 10);
+    const fret = parseInt(cell.dataset.fret, 10);
+    const isOpen = fret === 0; // first row = unfretted / open string
+    const ring = cell.querySelector('.fb-ring');
     const circle = cell.querySelector('.fb-circle');
     const text = cell.querySelector('.fb-degree');
     const isLit = lit.has(midi);
@@ -1199,25 +1215,52 @@ function updateFingerboard(state) {
     const inScale = scale.has(pc);
     if (isLit || inMeasure || inScale) {
       circle.style.display = '';
-      if (isLit) {
-        circle.setAttribute('fill', '#2e78ff');
-        circle.setAttribute('stroke', '#1a4bb8');
-      } else if (inMeasure) {
-        circle.setAttribute('fill', '#000');
-        circle.setAttribute('stroke', '#000');
-      } else {
-        // Solid medium grey for scale notes that aren't in the current
-        // measure — reads cleaner than a faded black.
-        circle.setAttribute('fill', '#9a9a9a');
-        circle.setAttribute('stroke', '#9a9a9a');
-      }
       circle.setAttribute('fill-opacity', '1');
       circle.setAttribute('stroke-opacity', '1');
-      text.textContent = names[pc];
+      // Tone of the circle/text — black for in-scale, grey for out-of-scale.
+      const tone = inScale || isLit ? '#000' : '#9a9a9a';
+      if (isLit) {
+        // Lit note always renders as a filled blue disc with white text,
+        // regardless of whether the position is open or fretted — matches
+        // the highlight used elsewhere.
+        circle.setAttribute('fill', '#2e78ff');
+        circle.setAttribute('stroke', '#1a4bb8');
+        circle.setAttribute('stroke-width', '1');
+        text.setAttribute('fill', '#fff');
+      } else if (isOpen) {
+        // Open-string row: hollow circle with a dark outline (like open
+        // strings on a traditional chord diagram) and matching dark text
+        // so the letter reads on the white interior.
+        circle.setAttribute('fill', '#fff');
+        circle.setAttribute('stroke', tone);
+        circle.setAttribute('stroke-width', '2');
+        text.setAttribute('fill', tone);
+      } else if (inScale) {
+        circle.setAttribute('fill', '#000');
+        circle.setAttribute('stroke', '#000');
+        circle.setAttribute('stroke-width', '1');
+        text.setAttribute('fill', '#fff');
+      } else {
+        // In the bar but outside the current chord's scale → grey fill.
+        circle.setAttribute('fill', '#9a9a9a');
+        circle.setAttribute('stroke', '#9a9a9a');
+        circle.setAttribute('stroke-width', '1');
+        text.setAttribute('fill', '#fff');
+      }
+      if (inMeasure) {
+        ring.style.display = '';
+        ring.setAttribute('stroke', tone);
+        ring.setAttribute('stroke-width', isOpen ? '2' : '1.2');
+      } else {
+        ring.style.display = 'none';
+      }
+      const useAlt = inMeasure && !inScale;
+      text.textContent = (useAlt ? altNames : names)[pc];
       text.style.display = '';
       text.setAttribute('fill-opacity', '1');
     } else {
       circle.style.display = 'none';
+      ring.style.display = 'none';
       text.style.display = 'none';
     }
   });
@@ -1225,7 +1268,7 @@ function updateFingerboard(state) {
 
 // ===== Render (sheet music via VexFlow) =====
 let measuresPerLine = 2;
-let songRepeats = 2;
+let songRepeats = 1;
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
 
 function expandBarsByRepeats(bars, n) {
@@ -1286,6 +1329,11 @@ function renderChart(song, barsIn, timesigStr) {
   // A fresh render invalidates any previous bar selection (song changed, or
   // options toggled the bar count).
   selectedBar = null;
+
+  // Song title lives in the top bar (between Clear Loop and the song
+  // picker) — set it here so it refreshes on every song load.
+  const nameEl = document.getElementById('songName');
+  if (nameEl) nameEl.textContent = (song && song.title) || '';
 
   if (!window.Vex || !window.Vex.Flow) {
     chartEl.textContent = 'VexFlow failed to load.';
@@ -1669,6 +1717,13 @@ function renderChart(song, barsIn, timesigStr) {
   // Seed the info panel with the first bar's chord/scale so the scale SVG
   // and fingerboard have something to draw even before playback starts.
   refreshFingerboardForBar(0);
+
+  // Preserve loop brackets across re-renders (options panel changes, etc.),
+  // but drop any endpoint that's now out of range for the new bar count.
+  const totalBars = bars.length;
+  if (loopIn != null && loopIn >= totalBars) loopIn = null;
+  if (loopOut != null && loopOut >= totalBars) loopOut = null;
+  redrawLoopBrackets();
 }
 
 // ===== Chord-to-notes =====
@@ -1831,7 +1886,7 @@ let realHihat, brushSweep, brushTap;
 // bpm so playbackRate can be adapted if the user-selected tempo differs.
 const realLoops = {};  // key "ballad-4/4" → { player, sourceBpm }
 let currentRealLoop = null;
-let drumMode = 'hat'; // 'hat' | 'ride' | 'click'
+let drumMode = 'ride'; // 'hat' | 'ride' | 'click'
 let countInBars = 0;  // 0, 1, or 2 measures of click before the song starts
 let playbackPart;
 let playState = 'stopped'; // 'stopped' | 'playing' | 'paused'
@@ -1839,6 +1894,9 @@ let pauseContext = null;   // { offset, beatsPerBar } captured at startPlayback;
 let currentPlaylist = []; // sequence of { bar, idx } one entry = one bar
 let currentBeatHighlight = null;
 let selectedBar = null;   // user-tapped bar index; when set, play starts here
+let loopIn = null;        // inclusive start bar of practice loop (null = no loop)
+let loopOut = null;       // inclusive end bar of practice loop (null = no loop)
+let currentPlayingBar = 0; // latest bar index the Part's barStart event fired for
 
 async function initAudio() {
   if (piano) return;
@@ -1979,9 +2037,10 @@ function stopPlayback() {
   playState = 'stopped';
   pauseContext = null;
   const btn = document.getElementById('playBtn');
-  btn.textContent = '▶';
+  btn.querySelector('.play-glyph').textContent = '▶';
   btn.classList.remove('playing');
   clearHighlight();
+  updateLoopControls();
 }
 
 function pausePlayback() {
@@ -1995,9 +2054,10 @@ function pausePlayback() {
   Tone.Transport.pause();
   playState = 'paused';
   const btn = document.getElementById('playBtn');
-  btn.textContent = '▶';
+  btn.querySelector('.play-glyph').textContent = '▶';
   btn.classList.remove('playing');
   document.getElementById('status').textContent = 'Paused';
+  updateLoopControls();
 }
 
 function resumePlayback() {
@@ -2030,13 +2090,96 @@ function resumePlayback() {
   Tone.Transport.start();
   playState = 'playing';
   const btn = document.getElementById('playBtn');
-  btn.textContent = '⏸';
+  btn.querySelector('.play-glyph').textContent = '⏸';
   btn.classList.add('playing');
   document.getElementById('status').textContent = 'Playing';
+  updateLoopControls();
 }
 
 function clearHighlight() {
   document.querySelectorAll('svg .hi-overlay').forEach(el => el.remove());
+}
+
+// Draw a practice-loop bracket on the specified bar. `side` is "in" (hollow
+// bracket on the left edge) or "out" (thicker bracket on the right edge).
+// Drawn as an SVG <path> on the row's SVG so it scales with the viewBox.
+function drawLoopBracket(barIdx, side) {
+  const info = barElements[barIdx];
+  if (!info) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
+  const armLen = 14;
+  const yTop = info.y - 4;
+  const yBot = info.y + info.h - 2;
+  let d;
+  if (side === 'in') {
+    const x = info.x + 2;
+    d = `M ${x + armLen} ${yTop} L ${x} ${yTop} L ${x} ${yBot} L ${x + armLen} ${yBot}`;
+  } else {
+    const x = info.x + info.w - 2;
+    d = `M ${x - armLen} ${yTop} L ${x} ${yTop} L ${x} ${yBot} L ${x - armLen} ${yBot}`;
+  }
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', d);
+  path.setAttribute('class', 'loop-bracket loop-' + side);
+  svg.appendChild(path);
+}
+function clearLoopBrackets() {
+  document.querySelectorAll('svg .loop-bracket').forEach(el => el.remove());
+}
+function redrawLoopBrackets() {
+  clearLoopBrackets();
+  if (loopIn != null) drawLoopBracket(loopIn, 'in');
+  if (loopOut != null) drawLoopBracket(loopOut, 'out');
+  updateLoopControls();
+}
+
+// Keep UI elements that depend on loop state in sync:
+//   - Loop-in / loop-out need a selected bar to know which measure to mark,
+//     and are disabled while playback is running (editing the loop mid-play
+//     would re-seed the Part and cause audible jumps).
+//   - Clear-loop button is disabled when there's no loop or while playing.
+//   - Play button shows a small loop glyph when both brackets are placed.
+function updateLoopControls() {
+  const playing = playState === 'playing';
+  const noSelection = selectedBar == null;
+  const loopInBtn = document.getElementById('loopInBtn');
+  const loopOutBtn = document.getElementById('loopOutBtn');
+  if (loopInBtn) loopInBtn.disabled = playing || noSelection;
+  if (loopOutBtn) loopOutBtn.disabled = playing || noSelection;
+  const clearBtn = document.getElementById('clearLoopBtn');
+  if (clearBtn) clearBtn.disabled = playing || (loopIn == null && loopOut == null);
+  const playBtn = document.getElementById('playBtn');
+  if (playBtn) {
+    const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+    playBtn.classList.toggle('has-loop', hasLoop);
+  }
+}
+
+// Push the current loopIn/loopOut values into the running Part so that any
+// change the user makes during playback (set, move, or clear a bracket)
+// takes effect immediately. When not playing, we just cache the values and
+// let the next startPlayback pick them up. When playing, we restart the
+// Part from the currently-playing bar — mutating Part.loopEnd in-flight
+// leaves the Part's internal scheduler in an inconsistent state (it'll
+// jump ahead by some multiple of the old loop length), so a clean restart
+// at the same bar is the reliable way to update the loop range.
+function applyLoopBoundsToPart() {
+  if (playState !== 'playing') return;
+  if (!window.currentSong) return;
+  const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+  // Resume at the *audible* current bar — Transport.position climbs
+  // monotonically while the Part wraps, so it doesn't represent the bar
+  // the listener is hearing. `currentPlayingBar` is updated on every
+  // Part barStart event and does.
+  let resumeBar = currentPlayingBar;
+  // If the user just placed a new loop and the audible bar is outside it,
+  // snap to loopIn so the restart lands inside the loop range.
+  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+  if (hasLoop && (resumeBar < loopIn || resumeBar > loopOut)) {
+    resumeBar = loopIn;
+  }
+  startPlayback(window.currentSong.song, expanded, resumeBar);
 }
 
 // Push the first non-null beat-info for the given bar index into the note
@@ -2071,8 +2214,14 @@ function refreshFingerboardForBar(idx) {
 //   - While paused: discard the pause state so the next play starts fresh
 //     from the tapped bar rather than resuming where we paused.
 //   - While stopped: just remember the selection and repaint the highlight.
+// When a Loop In/Out pair is active, taps outside [loopIn, loopOut] are
+// ignored so the user can't jump playback into a bar the loop wouldn't
+// play — which would otherwise result in confused/silent audio.
 function selectBar(idx) {
+  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+  if (hasLoop && (idx < loopIn || idx > loopOut)) return;
   selectedBar = idx;
+  updateLoopControls();
   if (playState === 'playing') {
     if (!window.currentSong) return;
     const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
@@ -2283,6 +2432,10 @@ async function startPlayback(song, bars, startBarIdx = 0) {
 
   playbackPart = new Tone.Part((time, ev) => {
     if (ev.type === 'barStart') {
+      // Track the currently-playing bar so clear-loop / change-loop can
+      // restart playback at the right spot (Transport.position keeps
+      // climbing during looping and can't be trusted for this).
+      currentPlayingBar = ev.idx;
       Tone.Draw.schedule(() => highlightBar(ev.idx), time);
       return;
     }
@@ -2330,10 +2483,13 @@ async function startPlayback(song, bars, startBarIdx = 0) {
 
   // Loop the song indefinitely. Part events are scheduled in Part-relative
   // time (bar 0 = first song bar), so we start the Part itself at Transport
-  // position `${offset}:0:0` to line up after the count-in.
+  // position `${offset}:0:0` to line up after the count-in. If the user has
+  // set Loop In / Loop Out brackets, narrow the loop range to just those
+  // bars so playback cycles between them.
+  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
   playbackPart.loop = true;
-  playbackPart.loopStart = 0;
-  playbackPart.loopEnd = `${playlist.length}:0:0`;
+  playbackPart.loopStart = hasLoop ? `${loopIn}:0:0` : 0;
+  playbackPart.loopEnd = hasLoop ? `${loopOut + 1}:0:0` : `${playlist.length}:0:0`;
   playbackPart.start(`${offset}:0:0`);
 
   // If Real mode has a recorded drum loop for this tempo tier + time sig,
@@ -2376,9 +2532,10 @@ async function startPlayback(song, bars, startBarIdx = 0) {
   playState = 'playing';
   pauseContext = { offset, beatsPerBar };
   const btn = document.getElementById('playBtn');
-  btn.textContent = '⏸';
+  btn.querySelector('.play-glyph').textContent = '⏸';
   btn.classList.add('playing');
   document.getElementById('status').textContent = `Playing · ${playlist.length} bars`;
+  updateLoopControls();
 }
 
 // ===== File loading =====
@@ -2453,16 +2610,64 @@ document.getElementById('playBtn').addEventListener('click', async () => {
   if (playState === 'paused') { resumePlayback(); return; }
   if (!window.currentSong) return;
   const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-  // If the user tapped a bar, start there; otherwise from the top.
-  const startAt = selectedBar != null ? selectedBar : 0;
+  // Pick a starting bar:
+  //   - a complete Loop In / Loop Out pair wins (pinned to loopIn unless the
+  //     user's selection already sits inside the loop range)
+  //   - otherwise a tapped bar
+  //   - otherwise the top
+  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+  let startAt;
+  if (hasLoop) {
+    if (selectedBar != null && selectedBar >= loopIn && selectedBar <= loopOut) {
+      startAt = selectedBar;
+    } else {
+      startAt = loopIn;
+    }
+  } else {
+    startAt = selectedBar != null ? selectedBar : 0;
+  }
   await startPlayback(window.currentSong.song, expanded, startAt);
 });
 document.getElementById('rewindBtn').addEventListener('click', () => {
-  // Full reset — always go back to the top and drop any bar selection.
-  // Does not auto-play; user can tap play again to start from the beginning.
-  selectedBar = null;
+  // Back to start. With a Loop In bracket placed, "start" means the loop's
+  // beginning so the next play resumes the practice section. Otherwise it
+  // drops the bar selection and resets to the top of the song. Either way,
+  // playback stops — user taps play to resume.
   stopPlayback();
+  if (loopIn != null) {
+    selectedBar = loopIn;
+    highlightBar(loopIn);
+    refreshFingerboardForBar(loopIn);
+  } else {
+    selectedBar = null;
+  }
+  updateLoopControls();
   document.getElementById('status').textContent = 'Ready';
+});
+
+// Loop controls. Loop In / Loop Out operate on the currently-selected bar.
+// If the new Loop Out comes before an existing Loop In (or vice-versa), the
+// conflicting endpoint is cleared so the bracket pair always reads left→right.
+document.getElementById('loopInBtn').addEventListener('click', () => {
+  if (selectedBar == null) return;
+  if (loopOut != null && loopOut < selectedBar) loopOut = null;
+  loopIn = selectedBar;
+  redrawLoopBrackets();
+  applyLoopBoundsToPart();
+});
+document.getElementById('loopOutBtn').addEventListener('click', () => {
+  if (selectedBar == null) return;
+  if (loopIn != null && loopIn > selectedBar) loopIn = null;
+  loopOut = selectedBar;
+  redrawLoopBrackets();
+  applyLoopBoundsToPart();
+});
+document.getElementById('clearLoopBtn').addEventListener('click', () => {
+  loopIn = null;
+  loopOut = null;
+  clearLoopBrackets();
+  updateLoopControls();
+  applyLoopBoundsToPart();
 });
 let currentTempo = 120;
 document.querySelectorAll('#tempoSeg button').forEach(b => {
@@ -2658,6 +2863,10 @@ async function initSongLibrary() {
   });
   sel.addEventListener('change', () => {
     if (playState !== 'stopped') stopPlayback();
+    // Loop brackets from the old song don't make sense for a new one.
+    loopIn = null;
+    loopOut = null;
+    updateLoopControls();
     const idx = parseInt(sel.value, 10);
     loadSongEntry(songs[idx]);
   });

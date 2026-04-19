@@ -18,18 +18,6 @@ header {
 }
 .meta { line-height: 1.2; }
 .title { font-size: 20px; font-weight: 700; }
-.song-select {
-  font-size: 18px; font-weight: 700;
-  background: #14202a; color: #e6e3da;
-  border: 1px solid #334654; border-radius: 6px;
-  padding: 6px 28px 6px 8px; width: 100%;
-  font-family: inherit;
-  appearance: none; -webkit-appearance: none;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23e6e3da' d='M0 0 L6 8 L12 0 Z'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-}
-.song-select:focus { outline: 1px solid #3da9fc; }
 .composer { font-size: 13px; color: #9ab; }
 .style { font-size: 12px; color: #7a8c9a; font-style: italic; }
 
@@ -37,41 +25,102 @@ header {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
 .top-row {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
 }
-.top-row .song-select { flex: 1; min-width: 0; }
-.options-toggle {
+
+/* Shared style for every button in the top bar: identical footprint,
+   rounded rectangle, dark pill. Sized to fit eight in a row on a standard
+   phone viewport. */
+.top-btn {
+  width: 40px; height: 40px; border-radius: 8px;
   background: #2a3a48; color: #cde;
-  border: 1px solid #334654; border-radius: 6px;
-  padding: 10px 12px; font-size: 18px; cursor: pointer;
+  border: 1px solid #334654;
+  font-size: 16px; line-height: 1; padding: 0;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
   font-family: inherit;
   flex-shrink: 0;
+  position: relative;
 }
-.options-toggle:active { transform: scale(0.96); }
-.options-toggle[aria-expanded="true"] { background: #3da9fc; color: #052033; border-color: #3da9fc; }
+.top-btn:active { transform: scale(0.96); }
+.top-btn[aria-expanded="true"] { background: #3da9fc; color: #052033; border-color: #3da9fc; }
+.top-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
+}
+.top-btn svg { width: 16px; height: 22px; display: block; }
+
+/* Small loop glyph shown at the bottom-right of the play button when both
+   Loop In and Loop Out brackets are placed. Hidden otherwise. */
+.top-btn.play .loop-indicator {
+  position: absolute;
+  right: 2px; bottom: 1px;
+  font-size: 10px;
+  line-height: 1;
+  display: none;
+  color: inherit;
+  pointer-events: none;
+}
+.top-btn.play.has-loop .loop-indicator { display: block; }
+
+/* The play button is the accent button — blue in stopped state, red while
+   playing. Shape stays the same as the other top-bar buttons. */
+.top-btn.play { background: #3da9fc; color: #052033; border-color: #3da9fc; font-size: 18px; font-weight: bold; }
+.top-btn.play.playing { background: #ef4444; color: #fff; border-color: #ef4444; }
+
+/* Song picker: a dark pill identical to .top-btn, with a filled folder SVG
+   visible inside and the native <select> overlaid with opacity:0 so tapping
+   opens the OS's native dropdown. */
+.song-picker { text-decoration: none; }
+.song-picker .folder-glyph { width: 22px; height: 18px; pointer-events: none; }
+.song-picker select {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer;
+  border: 0; background: transparent;
+  appearance: none; -webkit-appearance: none;
+  font-size: 16px;
+}
+
+/* Song name sits between the loop controls and the library picker, and
+   its flex-grow does double duty as the spacer that pushes the right-side
+   buttons (library, note panel, options) to the right edge. flex-basis 0
+   is important: with basis:auto the browser would use the title's one-line
+   natural width, and flex-wrap would push a trailing button to a new row
+   rather than wrap the title's text. basis:0 makes the title size to the
+   leftover space after the fixed buttons, so the text wraps internally and
+   every button stays on the first row. Clamped to ~2 lines via max-height
+   so extra-long titles don't expand the top bar. */
+.song-name {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: #cde;
+  padding: 0 4px;
+  text-align: center;
+  line-height: 1.15;
+  max-height: 2.5em;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* The native <select> inside .song-picker is invisible (opacity:0) so the
+   folder glyph shows through, but the OS-drawn dropdown list inherits the
+   element's color — which previously picked up the grey used by the old
+   visible-select styling. Force black text on white background so the list
+   is readable. */
+#songSelect, #songSelect option { color: #000; background: #fff; }
+
+/* Loop bracket overlays drawn on the score. Both "in" and "out" use the
+   same stroke weight — the distinction is purely which side of the bar
+   the bracket hugs. */
+.loop-bracket { pointer-events: none; }
+.loop-in, .loop-out { stroke: #000; stroke-width: 2; fill: none; }
+
 .options-panel { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
 .options-panel[hidden] { display: none; }
-.play-wrap { position: relative; flex-shrink: 0; }
-button.play {
-  width: 48px; height: 48px; border-radius: 50%;
-  background: #3da9fc; color: #052033; border: 0;
-  font-size: 22px; font-weight: bold; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-}
-button.play:active { transform: scale(0.96); }
-button.play.playing { background: #ef4444; color: #fff; }
-button.rewind {
-  position: absolute;
-  right: -4px; bottom: -4px;
-  width: 22px; height: 22px; border-radius: 50%;
-  background: #14202a; color: #cde;
-  border: 1px solid #334654;
-  font-size: 11px; line-height: 1; padding: 0;
-  cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  font-family: inherit;
-}
-button.rewind:active { transform: scale(0.9); }
 
 .tempo { flex: 1; display: flex; flex-direction: column; font-size: 11px; color: #9ab; }
 .tempo input { width: 100%; }
@@ -167,7 +216,6 @@ main {
   padding: 10px;
   background: #1b2730;
 }
-.fb-header-toggle { padding: 10px 12px; font-size: 16px; }
 .fingerboard-panel {
   background: #fff;
   color: #000;

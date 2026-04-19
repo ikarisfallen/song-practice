@@ -5,19 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=21" />
+<link rel="stylesheet" href="style.css?v=27" />
 </head>
 <body>
 <div id="app">
   <header>
     <div class="top-row">
-      <div class="play-wrap">
-        <button id="playBtn" class="play" aria-label="Play">▶</button>
-        <button id="rewindBtn" class="rewind" aria-label="Rewind to start">⏮</button>
-      </div>
-      <select id="songSelect" class="song-select" aria-label="Song"></select>
-      <button id="optionsToggle" class="options-toggle" aria-label="Toggle options" aria-expanded="false">⚙</button>
-      <button id="fbToggle" class="options-toggle fb-header-toggle" aria-label="Toggle note info" aria-expanded="false">♪</button>
+      <button id="playBtn" class="top-btn play" aria-label="Play"><span class="play-glyph">▶</span><span class="loop-indicator" aria-hidden="true">↻</span></button>
+      <button id="rewindBtn" class="top-btn" aria-label="Rewind to start">⏮</button>
+      <button id="loopInBtn" class="top-btn" aria-label="Loop in" disabled>
+        <svg viewBox="0 0 16 22" aria-hidden="true"><path d="M 13 2 L 3 2 L 3 20 L 13 20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="square"/></svg>
+      </button>
+      <button id="loopOutBtn" class="top-btn" aria-label="Loop out" disabled>
+        <svg viewBox="0 0 16 22" aria-hidden="true"><path d="M 3 2 L 13 2 L 13 20 L 3 20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="square"/></svg>
+      </button>
+      <button id="clearLoopBtn" class="top-btn" aria-label="Clear loop" disabled>✕</button>
+      <span id="songName" class="song-name" aria-live="polite"></span>
+      <label class="song-picker top-btn" aria-label="Song library">
+        <svg class="folder-glyph" viewBox="0 0 24 20" aria-hidden="true"><path d="M 2 4 h 7 l 2 2 h 11 v 12 h -20 Z" fill="currentColor"/></svg>
+        <select id="songSelect" class="song-select" aria-label="Song"></select>
+      </label>
+      <button id="fbToggle" class="top-btn" aria-label="Toggle note info" aria-expanded="false">♪</button>
+      <button id="optionsToggle" class="top-btn" aria-label="Toggle options" aria-expanded="false">⚙</button>
     </div>
     <div id="optionsPanel" class="options-panel" hidden>
       <div class="drum-row">
@@ -31,8 +40,8 @@
       <div class="drum-row">
         <span class="drum-label">Drums</span>
         <div class="seg" id="drumSeg" role="tablist">
-          <button type="button" data-mode="ride">Real</button>
-          <button type="button" data-mode="hat" class="active">2 & 4</button>
+          <button type="button" data-mode="ride" class="active">Real</button>
+          <button type="button" data-mode="hat">2 & 4</button>
           <button type="button" data-mode="click">Click</button>
         </div>
         <input type="range" id="drumVol" class="drum-vol" min="0" max="100" value="75" aria-label="Drum volume" />
@@ -50,8 +59,8 @@
       <div class="drum-row">
         <span class="drum-label">Repeats</span>
         <div class="seg" id="repeatSeg" role="tablist">
-          <button type="button" data-r="1">1</button>
-          <button type="button" data-r="2" class="active">2</button>
+          <button type="button" data-r="1" class="active">1</button>
+          <button type="button" data-r="2">2</button>
           <button type="button" data-r="3">3</button>
           <button type="button" data-r="4">4</button>
         </div>
@@ -97,6 +106,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=36"></script>
+<script src="app.js?v=48"></script>
 </body>
 </html>
