@@ -1674,7 +1674,11 @@ function updateFingerboard(state) {
       }
       if (inMeasure) {
         ring.style.display = '';
-        ring.setAttribute('stroke', tone);
+        // Ring is always black — it encodes "this note is in the current
+        // bar" regardless of whether the filled circle underneath is black
+        // (in scale) or grey (in the bar but outside the current chord's
+        // scale). A grey ring on a grey circle is hard to see.
+        ring.setAttribute('stroke', '#000');
         ring.setAttribute('stroke-width', isOpen ? '2' : '1.2');
       } else {
         ring.style.display = 'none';
