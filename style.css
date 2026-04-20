@@ -305,6 +305,10 @@ main {
   display: block;
   width: 100%;
   height: auto;
+  /* Allow the Info Overlay zoom window to paint outside the staff SVG
+     bounds when the current note sits high above or low below the
+     staff — otherwise very high/low notes get cropped. */
+  overflow: visible;
 }
 .staff-row svg * { color: #000; }
 /* Make sure VexFlow's staff-line and barline rects render solid black

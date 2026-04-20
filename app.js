@@ -420,15 +420,27 @@ function findClosestIndex(tones, target) {
 function findSmoothContinuation(tones, lastPitch, lastTpc, dir) {
   const primary = findContinuationIndex(tones, lastPitch, dir);
   if (lastTpc == null || lastTpc < 0) return primary;
-  const primTpc = tones[primary.idx].tpc;
-  const lastLetter = (((lastTpc + 1) % 7) + 7) % 7;
-  const primLetter = (((primTpc + 1) % 7) + 7) % 7;
+  const letterOf = (tpc) => (((tpc + 1) % 7) + 7) % 7;
+  const lastLetter = letterOf(lastTpc);
+  const primTpc   = tones[primary.idx].tpc;
   const primPitch = tones[primary.idx].pitch;
-  if (primLetter === lastLetter && Math.abs(primPitch - lastPitch) === 1) {
+  if (letterOf(primTpc) === lastLetter && Math.abs(primPitch - lastPitch) === 1) {
+    // Awkward same-letter chromatic step (e.g. F → F#). Don't flip
+    // direction — instead step ONE FURTHER in the current direction
+    // so we skip over the chromatic, preserving the descending /
+    // ascending sweep the user expects between EX_LOW and EX_HIGH.
+    // Direction only flips at the hard cello-range boundaries.
+    let idx = primary.idx + primary.dir;
+    while (idx >= 0 && idx < tones.length) {
+      if (letterOf(tones[idx].tpc) !== lastLetter) {
+        return { idx, dir: primary.dir };
+      }
+      idx += primary.dir;
+    }
+    // No alternative in current direction — fall back to reversing
+    // (keeps the old behavior as a safety net at extreme edges).
     const reverse = findContinuationIndex(tones, lastPitch, -dir);
-    const revTpc = tones[reverse.idx].tpc;
-    const revLetter = (((revTpc + 1) % 7) + 7) % 7;
-    if (revLetter !== lastLetter) {
+    if (letterOf(tones[reverse.idx].tpc) !== lastLetter) {
       return { idx: reverse.idx, dir: -dir };
     }
   }
@@ -1928,6 +1940,10 @@ function renderChart(song, barsIn, timesigStr) {
       // Quarter notes per beat (generated from chord scales).
       const beatPitches = quarterNotes[barIdx] || [];
       const notes = [];
+      // Parallel array to `notes[]` — one entry per rendered stavenote.
+      // Real notes carry {pitch, tpc}; rests are null. Used by the Info
+      // Overlay to label each note in the current measure.
+      const barNoteData = [];
       // Per-measure courtesy-accidental state. Keyed by "letter:octave" (the
       // specific staff position) so a courtesy only fires when the same line
       // or space was altered in the previous bar — not just the same letter
@@ -1991,12 +2007,14 @@ function renderChart(song, barsIn, timesigStr) {
 
           const slotIdx = notes.length;
           notes.push(n);
+          barNoteData.push({ pitch: bp.pitch, tpc: bp.tpc });
           for (let bb = b; bb < b + consume && bb < ts.num; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
           b += consume;
         } else {
           notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
+          barNoteData.push(null);
           b++;
         }
       }
@@ -2074,6 +2092,7 @@ function renderChart(song, barsIn, timesigStr) {
         noteStartX: stave.getNoteStartX(),
         noteEndX: stave.getNoteEndX(),
         noteEls: barNoteEls,
+        noteData: barNoteData,
         beatToNoteSlot
       };
 
@@ -2639,6 +2658,27 @@ function updateNoteHighlight(barIdx, beat) {
   lastLitNoteEl = el;
 }
 
+// ===== Fingering =====
+// Map a sounding MIDI pitch to a cello fingering label. Ported from the
+// MuseScore "Ambitus" fingering plugin — each open string (F1=29,
+// C2=36, G2=43, D3=50, A3=57) is a Roman numeral (V, IV, III, II, I);
+// the six semitones above each open string are the finger positions
+// -1, 1, 2, 3, 4, 4+ (the -1 is a "half-extension" one fret below the
+// first-position index finger, 4+ is an extended pinky reaching a
+// half-step above the normal 4th-finger position).
+function midiToFingering(pitch) {
+  const ROMAN   = ['V', 'IV', 'III', 'II', 'I'];
+  const FINGERS = ['', '-1', '1', '2', '3', '4', '4+']; // index 0 unused (open)
+  const OPENS   = [29, 36, 43, 50, 57];
+  for (let s = 0; s < OPENS.length; s++) {
+    const o = OPENS[s];
+    if (pitch >= o && pitch < o + 7) {
+      return pitch === o ? ROMAN[s] : FINGERS[pitch - o];
+    }
+  }
+  return '';
+}
+
 // ===== Info Overlay =====
 // Optional small blue dot drawn adjacent to each note as it plays, so the
 // user can sight-follow the beat without losing the staff notation. The
@@ -2647,72 +2687,104 @@ function updateNoteHighlight(barIdx, beat) {
 // below).
 let infoOverlayOn = false;
 let infoOverlayEl = null;
+let infoOverlayBarIdx = -1;
 function clearInfoOverlay() {
   if (infoOverlayEl && infoOverlayEl.parentNode) {
     infoOverlayEl.parentNode.removeChild(infoOverlayEl);
   }
   infoOverlayEl = null;
+  infoOverlayBarIdx = -1;
 }
+// Label every note in the current measure with its note name. Labels
+// sit between the chord symbols and the top of the staff. If a note
+// head is above the top line, its label moves up so it clears the head
+// (possibly overlapping the chord symbol — that's acceptable).
 function updateInfoOverlay(barIdx, beat, pitch, tpc) {
+  if (!infoOverlayOn) { clearInfoOverlay(); return; }
+  // Only rebuild when the measure changes.
+  if (barIdx === infoOverlayBarIdx && infoOverlayEl) return;
   clearInfoOverlay();
-  if (!infoOverlayOn) return;
-  if (pitch == null || tpc == null) return;
   const info = barElements[barIdx];
   if (!info) return;
   const svg = info.rowEl.querySelector('svg');
   if (!svg) return;
-  const ts = parseTimesig((window.currentSong && window.currentSong.timesig) || '44');
-  const beatsPerBar = ts.num;
-  // Derive the note's vertical position from its written letter + octave.
-  const { letterIdx, octave } = midiTpcToVexKey(pitch, tpc);
-  const LETTER_IDX_TO_STEP = [3, 0, 4, 1, 5, 2, 6]; // F,C,G,D,A,E,B → step 0-6
-  const step = LETTER_IDX_TO_STEP[letterIdx];
-  const totalStep = (octave - 3) * 7 + (step - 1); // 0 = D3 middle line
-  // Middle line y = staffY + space_above_staff_ln(4) * 10 + half-staff(20).
-  const middleY = info.y + 60;
-  const noteY = middleY - totalStep * 5;
-  // Pick the side that avoids the busier text edge of the measure —
-  // upper notes bump the chord-symbol area above, so drop the dot below.
-  // Lower notes bump the scale label below, so push the dot above.
-  const r = 17;                 // 75% of the previous r=22
-  const offset = 44;            // pushed further away from the note head
-  const cy = noteY < middleY ? noteY + offset : noteY - offset;
-  // Beat position within the measure's note area.
-  const cx = info.noteStartX + (beat + 0.5) * (info.noteEndX - info.noteStartX) / beatsPerBar;
+  if (!info.noteEls || !info.noteData) return;
 
-  // Note-name label, e.g. "A♭" / "F♯" — derived from the TPC so the
-  // spelling matches the scale the note belongs to. normalizeEnharmonic
-  // inside tpcToLetterAcc folds C♭/F♭/E♯/B♯ into their friendlier names.
-  const { letter, acc } = tpcToLetterAcc(tpc);
-  const accGlyph = acc === 'b' ? '♭'
-                 : acc === 'bb' ? '♭♭'
-                 : acc === '#' ? '♯'
-                 : acc === '##' ? '♯♯'
-                 : '';
-  const displayText = letter + accGlyph;
+  // Screen-rect → SVG user coord helper (handles viewBox scaling).
+  const svgRect = svg.getBoundingClientRect();
+  const vb      = svg.viewBox && svg.viewBox.baseVal;
+  const vbOK    = vb && vb.width > 0 && vb.height > 0;
+  const vbSX    = vbOK ? vb.width  / svgRect.width  : 1;
+  const vbSY    = vbOK ? vb.height / svgRect.height : 1;
+  const vbOX    = vbOK ? vb.x : 0;
+  const vbOY    = vbOK ? vb.y : 0;
+  function rectToUser(r) {
+    return {
+      cx: (r.left + r.width  / 2 - svgRect.left) * vbSX + vbOX,
+      cy: (r.top  + r.height / 2 - svgRect.top ) * vbSY + vbOY,
+      top: (r.top                         - svgRect.top ) * vbSY + vbOY,
+    };
+  }
+
+  // Staff geometry (user coords): top line = info.y + 40.
+  const topLineY      = info.y + 40;
+  // Default label baseline: sits between chord text (above staff) and
+  // the top line. info.y itself is roughly where the chord row sits.
+  const labelDefaultY = info.y + 18;
+  const fontSize      = 22;
 
   const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  g.setAttribute('class', 'info-overlay-dot');
-  const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  circle.setAttribute('cx', cx);
-  circle.setAttribute('cy', cy);
-  circle.setAttribute('r', r);
-  circle.setAttribute('fill', '#2e78ff');
-  circle.setAttribute('stroke', 'none');
-  g.appendChild(circle);
-  const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-  text.setAttribute('x', cx);
-  text.setAttribute('y', cy + 5);
-  text.setAttribute('text-anchor', 'middle');
-  text.setAttribute('font-family', 'sans-serif');
-  text.setAttribute('font-size', 15);
-  text.setAttribute('font-weight', 'bold');
-  text.setAttribute('fill', '#fff');
-  text.setAttribute('stroke', 'none');
-  text.textContent = displayText;
-  g.appendChild(text);
+  g.setAttribute('class', 'info-overlay-labels');
+  g.setAttribute('pointer-events', 'none');
+
+  for (let i = 0; i < info.noteData.length; i++) {
+    const nd = info.noteData[i];
+    if (!nd) continue;                 // skip rests
+    const noteEl = info.noteEls[i];
+    if (!noteEl) continue;
+
+    // X: just the horizontal center of the note's rendered bbox. Y is
+    // computed separately so we can detect high notes that poke above
+    // the top staff line.
+    const rect = noteEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const noteX   = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
+    const noteTop = (rect.top                         - svgRect.top ) * vbSY + vbOY;
+
+    // Default position: labelDefaultY (between chords and the top
+    // staff line). Labels never go lower than that — i.e. for any
+    // note sitting on or below the top line, the label stays at
+    // labelDefaultY, so a row of labels across the measure lines up
+    // cleanly. For notes that poke ABOVE the top line, push the label
+    // up so its bottom edge clears the note head with a bit of gap
+    // (overlap with the chord-symbol row is acceptable).
+    let labelY = labelDefaultY;
+    if (noteTop < topLineY) {
+      // With dominant-baseline="central", the text's bottom sits at
+      // labelY + fontSize/2. Offset so bottom is ~0.3×fs above noteTop.
+      labelY = Math.min(labelDefaultY, noteTop - fontSize * 0.8);
+    }
+
+    const labelStr = midiToFingering(nd.pitch);
+    if (!labelStr) continue;
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', noteX);
+    text.setAttribute('y', labelY);
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('dominant-baseline', 'central');
+    text.setAttribute('font-family', 'sans-serif');
+    text.setAttribute('font-size', fontSize);
+    text.setAttribute('font-weight', 'bold');
+    text.setAttribute('fill', '#2e78ff');
+    text.setAttribute('stroke', 'none');
+    text.setAttribute('style', 'fill: #2e78ff !important; stroke: none !important;');
+    text.textContent = labelStr;
+    g.appendChild(text);
+  }
+
   svg.appendChild(g);
-  infoOverlayEl = g;
+  infoOverlayEl    = g;
+  infoOverlayBarIdx = barIdx;
 }
 (function bindInfoOverlaySwitch() {
   const sw = document.getElementById('infoOverlayToggle');
