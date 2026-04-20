@@ -1641,6 +1641,51 @@ function buildNotesMeasureSVG(state) {
   }
 }
 let lastFbState = null;
+
+// Add `chordText`-derived `<tspan>`s to an SVG <text>, giving the
+// flat its own tspan so we can force a regular sans-serif font on
+// just that glyph. On Pixel/Android the default serif falls back to
+// a music-symbol font for ♭ which has generous side bearings;
+// switching fonts just for the flat keeps the metrics tight without
+// affecting anything else.
+function appendChordLabelTspans(textEl, str) {
+  const s = String(str || '');
+  const parts = s.split(/(♭)/);
+  for (const part of parts) {
+    if (!part) continue;
+    const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+    if (part === '♭') {
+      tspan.setAttribute('font-family',
+        'Arial, Helvetica, "Segoe UI", Roboto, sans-serif');
+    }
+    tspan.textContent = part;
+    textEl.appendChild(tspan);
+  }
+}
+
+// Wrap each Unicode flat (♭) in a <span class="fl"> so CSS can pull
+// it in with negative margins. On some platforms (notably Pixel /
+// Android) the ♭ glyph falls back to a music-symbol font that has
+// extra side bearings, making "Bb" look like "B  b". We don't wrap
+// sharps (♯) because they tend to render cleanly from the regular
+// sans/serif font. Escapes HTML special chars in the non-flat parts.
+function markupFlats(text) {
+  if (text == null) return '';
+  const s = String(text);
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '♭') {
+      out += '<span class="fl">♭</span>';
+    } else if (c === '&') out += '&amp;';
+    else if (c === '<') out += '&lt;';
+    else if (c === '>') out += '&gt;';
+    else if (c === '"') out += '&quot;';
+    else if (c === "'") out += '&#39;';
+    else out += c;
+  }
+  return out;
+}
 let lastBeatInfo = null; // per-bar per-beat fingerboard info; populated by renderChart
 
 // Update the fingerboard SVG to reflect the current beat.
@@ -1652,10 +1697,11 @@ function updateFingerboard(state) {
   const chordNameEl = document.getElementById('fbChordName');
   const chordNotesEl = document.getElementById('fbChordNotes');
   const scaleEl = document.getElementById('fbScale');
-  if (chordNameEl) chordNameEl.textContent = state.chordSymbol || '';
+  if (chordNameEl) chordNameEl.innerHTML = markupFlats(state.chordSymbol || '');
   if (chordNotesEl) {
     // Chord tones shown inline next to the chord name, in parentheses.
-    chordNotesEl.textContent = state.chordNotesLabel ? '(' + state.chordNotesLabel + ')' : '';
+    chordNotesEl.innerHTML = state.chordNotesLabel
+      ? '(' + markupFlats(state.chordNotesLabel) + ')' : '';
   }
   if (scaleEl) {
     // When the label has a parenthetical parent in it ("D Mixolydian
@@ -1663,15 +1709,19 @@ function updateFingerboard(state) {
     // like "D Phrygian Dominant (G Harmonic Minor)" don't spill past
     // the panel width. Labels without parens ("C Major", "G Melodic
     // Minor") render unchanged.
-    scaleEl.textContent = '';
+    scaleEl.innerHTML = '';
     const label = state.scaleLabel || '';
     const m = label.match(/^(.+?)\s*(\(.+\))\s*$/);
     if (m) {
-      scaleEl.appendChild(document.createTextNode(m[1]));
+      const head = document.createElement('span');
+      head.innerHTML = markupFlats(m[1]);
+      scaleEl.appendChild(head);
       scaleEl.appendChild(document.createElement('br'));
-      scaleEl.appendChild(document.createTextNode(m[2]));
+      const tail = document.createElement('span');
+      tail.innerHTML = markupFlats(m[2]);
+      scaleEl.appendChild(tail);
     } else {
-      scaleEl.textContent = label;
+      scaleEl.innerHTML = markupFlats(label);
     }
   }
 
@@ -2127,7 +2177,9 @@ function renderChart(song, barsIn, timesigStr) {
           t.setAttribute('font-size', 15);
           t.setAttribute('fill', '#000');
           t.setAttribute('stroke', 'none');
-          t.textContent = chordText(ch);
+          // Wrap flats in a <tspan> with negative dx/dx after so the
+          // ♭ glyph doesn't sit inside a wide metric box on Android.
+          appendChordLabelTspans(t, chordText(ch));
           svg.appendChild(t);
         });
       }

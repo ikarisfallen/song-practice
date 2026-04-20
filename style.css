@@ -369,6 +369,16 @@ main {
 .fb-notes-measure { flex: 0 0 auto; max-width: 300px; width: 100%; }
 .fb-notes-measure svg { width: 100%; height: auto; display: block; }
 .fb-scale-name { font-size: 16px; font-weight: bold; line-height: 1.2; }
+/* Unicode flat (♭) rendering fix. On Android/Pixel the glyph falls
+   back to a music-symbol font with generous side bearings, giving
+   visible whitespace around the flat. Forcing a regular text font
+   stack avoids that fallback — on desktop/iOS the flat already
+   renders tightly from these fonts, so nothing changes there.
+   Sharps don't need this — they render cleanly from the system
+   font already. */
+.fl {
+  font-family: Arial, Helvetica, "Segoe UI", Roboto, sans-serif;
+}
 /* Prev/Next chord navigator pinned to the bottom of the fb-left column.
    margin-top:auto pushes the row to the bottom so the chord/scale stack
    sits flush at the top of the panel. */
