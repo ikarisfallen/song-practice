@@ -1331,9 +1331,34 @@ function chordTonesMap(ch) {
 const MODE_PARENT_OFFSET = {
   '0,2,4,5,7,9,11': 0,   // Ionian (itself)
   '0,2,3,5,7,9,10': 2,   // Dorian
+  '0,1,3,5,7,8,10': 4,   // Phrygian
+  '0,2,4,6,7,9,11': 5,   // Lydian
   '0,2,4,5,7,9,10': 7,   // Mixolydian
+  '0,2,3,5,7,8,10': 9,   // Aeolian
   '0,1,3,5,6,8,10': 11   // Locrian
 };
+
+// Display name for each mode (used in the note-info panel label). The
+// Ionian entry is null so that Ionian reads as just "X Major" instead
+// of "X Ionian (X Major)" — since the mode and its parent are the same.
+// Aeolian reads as "X Minor" rather than "X Aeolian" because that's the
+// common name jazz/classical players use for natural minor.
+const MODE_NAMES = {
+  '0,2,4,5,7,9,11': null,          // Ionian — just "X Major"
+  '0,2,3,5,7,9,10': 'Dorian',
+  '0,1,3,5,7,8,10': 'Phrygian',
+  '0,2,4,6,7,9,11': 'Lydian',
+  '0,2,4,5,7,9,10': 'Mixolydian',
+  '0,2,3,5,7,8,10': 'Minor',
+  '0,1,3,5,6,8,10': 'Locrian'
+};
+
+// Phrygian Dominant is the 5th mode of harmonic minor (not any major
+// scale). For D Phrygian Dominant the parent is G harmonic minor
+// (G A Bb C D Eb F#). We label these separately from MODE_PARENT_OFFSET
+// because their parent isn't a major scale — writing "GMaj" would be
+// wrong (G major has B♮ and E♮, not Bb/Eb).
+const PHRYGIAN_DOMINANT_SIG = '0,1,4,5,7,8,10';
 
 // Parent-major root PC for the effective scale (used to pick flat/sharp
 // spelling on the fingerboard).
@@ -1362,11 +1387,33 @@ function relatedScaleLabel(eff, patternKeyName) {
   const parent = parentMajorPc(eff);
   const useFlats = FLAT_PARENT_PCS.has(parent);
   const names = useFlats ? PC_NAMES_FLAT : PC_NAMES_SHARP;
+  // Melodic minor — named directly on its own root. No parent major in
+  // parens because melodic minor doesn't align with any major scale.
   if (sig === '0,2,3,5,7,9,11') {
-    return names[rootPc] + 'm (' + names[parent] + 'Maj)';
+    return names[rootPc] + ' Melodic Minor';
   }
+  // Phrygian Dominant — 5th mode of harmonic minor; parent key is the
+  // harmonic minor a fifth below (e.g. D Phrygian Dominant → G Harmonic
+  // Minor, which contains Bb, Eb, F#).
+  if (sig === PHRYGIAN_DOMINANT_SIG) {
+    const hmRoot = (((rootPc - 7) % 12) + 12) % 12;
+    const hmUseFlats = FLAT_PARENT_PCS.has((hmRoot + 3) % 12);
+    const hmNames = hmUseFlats ? PC_NAMES_FLAT : PC_NAMES_SHARP;
+    return names[rootPc] + ' Phrygian Dominant (' + hmNames[hmRoot] + ' Harmonic Minor)';
+  }
+  // Diatonic mode of a major scale — name the mode on its own root and
+  // show the parent major in parens so the reader sees both the modal
+  // character (how to phrase the notes) and the key signature:
+  //   C Ionian     → "C Major"
+  //   D Dorian     → "D Dorian (C Major)"
+  //   A Aeolian    → "A Minor (C Major)"
+  //   G Mixolydian → "G Mixolydian (C Major)"
+  // Ionian is a special case — we show just "X Major" since the mode
+  // and its parent are the same scale.
   if (MODE_PARENT_OFFSET[sig] !== undefined) {
-    return names[parent] + 'Maj';
+    const modeName = MODE_NAMES[sig];
+    if (modeName === null) return names[rootPc] + ' Major';
+    return names[rootPc] + ' ' + modeName + ' (' + names[parent] + ' Major)';
   }
   return names[rootPc];
 }
@@ -1384,7 +1431,13 @@ function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns)
     const scalePcs = new Set(eff.scale.map(x => ((eff.root.pitchClass + x.s) % 12 + 12) % 12));
     const tones = chordTonesMap(ce.chord);
     const chordSymbol = chordText(ce.chord);
-    const scaleLabel = relatedScaleLabel(eff, pat && pat.keyName);
+    // Note-info-panel scale label: always use the PARENT MAJOR of this
+    // specific chord's effective scale, never the pattern's keyName.
+    // For minor 251 patterns (e.g. "Gm (B♭Maj)") the pattern name reads
+    // as the song key, but per-chord it's more useful to see the
+    // actual scale being played — A Locrian → BbMaj, D Phrygian
+    // Dominant → GMaj, etc.
+    const scaleLabel = relatedScaleLabel(eff, null);
     const chordNotesLabel = tones.names.join(' ');
     // Flats/sharps follow the SONG context (pattern key) when in a pattern,
     // so all chords of a Gm (B♭Maj) 251 read with flats even though D
@@ -1604,7 +1657,23 @@ function updateFingerboard(state) {
     // Chord tones shown inline next to the chord name, in parentheses.
     chordNotesEl.textContent = state.chordNotesLabel ? '(' + state.chordNotesLabel + ')' : '';
   }
-  if (scaleEl) scaleEl.textContent = state.scaleLabel || '';
+  if (scaleEl) {
+    // When the label has a parenthetical parent in it ("D Mixolydian
+    // (G Major)"), break the paren onto its own line so longer labels
+    // like "D Phrygian Dominant (G Harmonic Minor)" don't spill past
+    // the panel width. Labels without parens ("C Major", "G Melodic
+    // Minor") render unchanged.
+    scaleEl.textContent = '';
+    const label = state.scaleLabel || '';
+    const m = label.match(/^(.+?)\s*(\(.+\))\s*$/);
+    if (m) {
+      scaleEl.appendChild(document.createTextNode(m[1]));
+      scaleEl.appendChild(document.createElement('br'));
+      scaleEl.appendChild(document.createTextNode(m[2]));
+    } else {
+      scaleEl.textContent = label;
+    }
+  }
 
   // Scale-measure view (left side).
   buildNotesMeasureSVG(state);
@@ -1665,11 +1734,13 @@ function updateFingerboard(state) {
         circle.setAttribute('stroke-width', '1');
         text.setAttribute('fill', '#fff');
       } else {
-        // In the bar but outside the current chord's scale → grey fill.
-        circle.setAttribute('fill', '#9a9a9a');
-        circle.setAttribute('stroke', '#9a9a9a');
+        // In the bar but outside the current chord's scale → light grey
+        // fill with black text so the letter reads clearly at the
+        // lighter tone.
+        circle.setAttribute('fill', '#d0d0d0');
+        circle.setAttribute('stroke', '#d0d0d0');
         circle.setAttribute('stroke-width', '1');
-        text.setAttribute('fill', '#fff');
+        text.setAttribute('fill', '#000');
       }
       if (inMeasure) {
         ring.style.display = '';
@@ -1696,6 +1767,15 @@ function updateFingerboard(state) {
 
 // ===== Render (sheet music via VexFlow) =====
 let measuresPerLine = 2;
+// Per-measure viewBox width in VexFlow units. The "Size" segmented
+// control sets this. A SMALLER value squeezes each measure's notes
+// into fewer viewBox units; since the SVG still stretches to fill
+// the container, the scale factor goes UP and everything (staff
+// lines, note heads, clefs) renders BIGGER on screen. So Size=L / XL
+// corresponds to a smaller measureWidth, giving a big-notes look at
+// any Per line count. Tight internal spacing is fine for sparse
+// exercises like Cantus Firmus.
+let chartSize = 240;
 let songRepeats = 1;
 let exerciseMode = 'scale'; // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
@@ -1813,7 +1893,7 @@ function renderChart(song, barsIn, timesigStr) {
   let prevLastNote = null; // { posKey, level } | null
 
   const mpl = measuresPerLine;
-  const measureWidth = 240;
+  const measureWidth = chartSize;
   const leftPadding = 14;
   const rightPadding = 14;
   const firstMeasureClefWidth = 68; // bass clef + 8vb + time sig on line 1
@@ -2552,6 +2632,7 @@ function stopPlayback() {
   clearHighlight();
   clearNoteHighlight();
   updateLoopControls();
+  updateChordNav();
 }
 
 function pausePlayback() {
@@ -2569,6 +2650,7 @@ function pausePlayback() {
   btn.classList.remove('playing');
   document.getElementById('status').textContent = 'Paused';
   updateLoopControls();
+  updateChordNav();
 }
 
 function resumePlayback() {
@@ -2605,6 +2687,7 @@ function resumePlayback() {
   btn.classList.add('playing');
   document.getElementById('status').textContent = 'Playing';
   updateLoopControls();
+  updateChordNav();
 }
 
 function clearHighlight() {
@@ -2725,13 +2808,38 @@ function applyLoopBoundsToPart() {
   }
 }
 
-// Push the first non-null beat-info for the given bar index into the note
-// info panel (chord name / notes / scale label, fingerboard overlay, scale
-// measure). Used to seed the panel on song load and whenever the user taps
-// a bar in the score.
-function refreshFingerboardForBar(idx) {
+// Walk a bar's beatInfo and return the start-beat of each distinct
+// chord in the bar (by chord symbol). For a one-chord bar this is just
+// [firstNonNullBeat]; for a bar with two chords it's two beats, etc.
+function chordStartBeatsForBar(idx) {
   const bar = lastBeatInfo && lastBeatInfo[idx];
-  const info = bar && bar.find(b => b);
+  if (!bar) return [];
+  const starts = [];
+  let lastSymbol = null;
+  for (let b = 0; b < bar.length; b++) {
+    const info = bar[b];
+    if (!info) continue;
+    if (info.chordSymbol !== lastSymbol) {
+      starts.push(b);
+      lastSymbol = info.chordSymbol;
+    }
+  }
+  return starts;
+}
+
+// Which chord index within the currently-selected bar is shown in the
+// note-info panel. Reset to 0 on every bar selection and advanced by
+// the Prev/Next buttons below the fb-left column.
+let selectedChordIdxInBar = 0;
+
+// Push a specific beat-info from the given bar into the note info
+// panel. When `beatInChord` is omitted we pick the first non-null beat
+// in the bar (matches the pre-existing "seed the panel" behavior).
+function refreshFingerboardForBar(idx, beatInBar) {
+  const bar = lastBeatInfo && lastBeatInfo[idx];
+  const info = (beatInBar != null && bar && bar[beatInBar])
+    ? bar[beatInBar]
+    : (bar && bar.find(b => b));
   if (!info) return;
   const measurePitches = bar.map(b => b && b.pitch).filter(p => p != null);
   updateFingerboard({
@@ -2748,6 +2856,48 @@ function refreshFingerboardForBar(idx) {
     measurePitches
   });
 }
+
+// Show/hide and enable/disable the Prev/Next chord buttons based on
+// how many distinct chords the currently-selected bar has and which
+// one is currently displayed. Hidden entirely for 1-chord bars.
+function updateChordNav() {
+  const nav  = document.getElementById('fbChordNav');
+  const prev = document.getElementById('fbChordPrev');
+  const next = document.getElementById('fbChordNext');
+  if (!nav || !prev || !next) return;
+  // Only shown while stopped or paused. During playback the panel
+  // updates per-beat automatically — the buttons would fight the
+  // incoming beat events.
+  if (playState === 'playing' || selectedBar == null) {
+    nav.hidden = true;
+    return;
+  }
+  const starts = chordStartBeatsForBar(selectedBar);
+  if (starts.length <= 1) { nav.hidden = true; return; }
+  nav.hidden = false;
+  // Clamp the chord index in case the bar changed under us.
+  if (selectedChordIdxInBar < 0) selectedChordIdxInBar = 0;
+  if (selectedChordIdxInBar >= starts.length) selectedChordIdxInBar = starts.length - 1;
+  prev.disabled = selectedChordIdxInBar === 0;
+  next.disabled = selectedChordIdxInBar === starts.length - 1;
+}
+(function bindChordNav() {
+  const prev = document.getElementById('fbChordPrev');
+  const next = document.getElementById('fbChordNext');
+  if (!prev || !next) return;
+  const step = (delta) => {
+    if (selectedBar == null) return;
+    const starts = chordStartBeatsForBar(selectedBar);
+    if (starts.length <= 1) return;
+    const newIdx = selectedChordIdxInBar + delta;
+    if (newIdx < 0 || newIdx >= starts.length) return;
+    selectedChordIdxInBar = newIdx;
+    refreshFingerboardForBar(selectedBar, starts[newIdx]);
+    updateChordNav();
+  };
+  prev.addEventListener('click', () => step(-1));
+  next.addEventListener('click', () => step(+1));
+})();
 
 // User tapped a bar in the score. Stow it as the next playback start point,
 // paint the blue highlight, and update the note-info panel to reflect that
@@ -2780,7 +2930,12 @@ function selectBar(idx) {
   }
   if (playState === 'paused') stopPlayback();
   highlightBar(idx);
+  // New bar selection → reset the chord nav to the first chord in
+  // the bar. The prev/next buttons let the user step through the
+  // remaining chords without starting playback.
+  selectedChordIdxInBar = 0;
   refreshFingerboardForBar(idx);
+  updateChordNav();
 }
 function highlightBar(idx) {
   clearHighlight();
@@ -2801,16 +2956,37 @@ function highlightBar(idx) {
   rect.setAttribute('height', info.h + TOP_EXTEND - 4);
   rect.setAttribute('rx', 2);
   svg.appendChild(rect);
-  // Check visibility against the scrollable .chart container rather than the
-  // viewport — when the fingerboard panel is open it eats the bottom of the
-  // viewport, so a row that's "on screen" by window.innerHeight can actually
-  // be hidden under the panel.
-  const bcr = info.rowEl.getBoundingClientRect();
+  // During a practice loop, keep the scroll position the user set up
+  // to view the looped section. Auto-scrolling on every bar would
+  // bounce between the first and last bar of the loop — scrolling the
+  // score up to the top and back down on every wrap — which is jarring
+  // and defeats the point of seeing the loop framed on screen.
+  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+  if (hasLoop && idx >= loopIn && idx <= loopOut) return;
+  // Center the current row vertically inside the scrollable .chart
+  // container so the user can see the next measure(s) coming up,
+  // rather than the row being pushed to the bottom edge (which was
+  // what `scrollIntoView({block:'center'})` could produce depending
+  // on sizing). We compute the target scrollTop explicitly and only
+  // animate when the row has actually drifted out of a comfortable
+  // center zone.
   const chartEl = document.getElementById('chart');
-  const crect = chartEl ? chartEl.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
-  const margin = 10;
-  if (bcr.top < crect.top + margin || bcr.bottom > crect.bottom - margin) {
-    info.rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (!chartEl) return;
+  const rowTop    = info.rowEl.offsetTop;          // relative to .chart
+  const rowHeight = info.rowEl.offsetHeight;
+  const viewHeight = chartEl.clientHeight;
+  // Bias the current row a bit above the vertical center so more of
+  // the upcoming row(s) are visible below. Uses a fraction of the
+  // viewport height — feels consistent across screen sizes.
+  const leadBias = viewHeight * 0.22;
+  const targetScrollTop = Math.max(0,
+    rowTop + rowHeight / 2 - viewHeight / 2 + leadBias);
+  // Only scroll if the current row isn't already roughly centered —
+  // avoids a jitter of tiny smooth-scrolls on consecutive bars that
+  // live in the same visual row.
+  const drift = Math.abs(chartEl.scrollTop - targetScrollTop);
+  if (drift > 20) {
+    chartEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
   }
 }
 
@@ -3332,6 +3508,15 @@ document.querySelectorAll('#mplSeg button').forEach(b => {
     document.querySelectorAll('#mplSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     measuresPerLine = parseInt(b.dataset.mpl, 10) || 4;
+    rerenderCurrent();
+  });
+});
+
+document.querySelectorAll('#sizeSeg button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#sizeSeg button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    chartSize = parseInt(b.dataset.size, 10) || 240;
     rerenderCurrent();
   });
 });

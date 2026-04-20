@@ -368,7 +368,34 @@ main {
    which fits in the ~114px budget with a few pixels of centering slack. */
 .fb-notes-measure { flex: 0 0 auto; max-width: 300px; width: 100%; }
 .fb-notes-measure svg { width: 100%; height: auto; display: block; }
-.fb-scale-name { font-size: 18px; font-weight: bold; }
+.fb-scale-name { font-size: 16px; font-weight: bold; line-height: 1.2; }
+/* Prev/Next chord navigator pinned to the bottom of the fb-left column.
+   margin-top:auto pushes the row to the bottom so the chord/scale stack
+   sits flush at the top of the panel. */
+.fb-chord-nav {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 8px;
+  max-width: 300px;
+}
+.fb-chord-nav[hidden] { display: none; }
+.fb-chord-nav-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: #2e78ff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.fb-chord-nav-btn:disabled { background: #9a9a9a; cursor: default; }
+.fb-chord-nav-btn:not(:disabled):active { filter: brightness(0.9); }
 .fb-grid { flex: 0 0 150px; align-self: flex-start; }
 .fb-grid svg { width: 100%; height: auto; display: block; }
 

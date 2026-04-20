@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=39" />
+<link rel="stylesheet" href="style.css?v=49" />
 </head>
 <body>
 <div id="app">
@@ -71,6 +71,14 @@
         </div>
       </div>
       <div class="drum-row">
+        <span class="drum-label">Size</span>
+        <div class="seg" id="sizeSeg" role="tablist">
+          <button type="button" data-size="240" class="active">S</button>
+          <button type="button" data-size="180">M</button>
+          <button type="button" data-size="120">L</button>
+        </div>
+      </div>
+      <div class="drum-row">
         <span class="drum-label">Repeats</span>
         <div class="seg" id="repeatSeg" role="tablist">
           <button type="button" data-r="1" class="active">1</button>
@@ -109,6 +117,10 @@
         </div>
         <div class="fb-notes-measure" id="fbNotesMeasure"></div>
         <div class="fb-scale-name" id="fbScale"></div>
+        <div class="fb-chord-nav" id="fbChordNav" hidden>
+          <button type="button" id="fbChordPrev" class="fb-chord-nav-btn">Previous</button>
+          <button type="button" id="fbChordNext" class="fb-chord-nav-btn">Next</button>
+        </div>
       </div>
       <div class="fb-grid" id="fbGrid"></div>
     </div>
@@ -121,6 +133,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=102"></script>
+<script src="app.js?v=121"></script>
 </body>
 </html>
