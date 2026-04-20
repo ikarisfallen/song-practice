@@ -204,21 +204,85 @@ header {
   overflow-wrap: break-word;
   word-break: break-word;
 }
-.song-picker select {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  opacity: 0; cursor: pointer;
-  border: 0; background: transparent;
-  appearance: none; -webkit-appearance: none;
-  font-size: 16px;
+/* Song filter row — lives at the top of the song list panel in both
+   layouts. In landscape the panel is always visible in the sidebar;
+   in portrait the panel is shown as a full-screen overlay when the
+   user taps the song-picker button. */
+.song-filter-row {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  flex-shrink: 0;
 }
+.song-filter-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.song-filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 32px 8px 10px;
+  font-size: 15px;
+  font-family: inherit;
+  color: #000;
+  background: #fff;
+  border: 1px solid #334654;
+  border-radius: 6px;
+}
+.song-filter:focus { outline: 2px solid #3da9fc; outline-offset: 0; }
+.song-filter-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px; height: 26px;
+  border: 0;
+  background: transparent;
+  color: #666;
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.song-filter-clear[hidden] { display: none; }
+.song-picker-close {
+  flex-shrink: 0;
+  width: 36px; height: 36px;
+  border: 1px solid #334654;
+  background: #2a3a48;
+  color: #cde;
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+}
+.song-picker-close[hidden] { display: none; }
 
-
-/* The native <select> inside .song-picker is invisible (opacity:0) so the
-   folder glyph shows through, but the OS-drawn dropdown list inherits the
-   element's color — which previously picked up the grey used by the old
-   visible-select styling. Force black text on white background so the list
-   is readable. */
-#songSelect, #songSelect option { color: #000; background: #fff; }
+/* Portrait modal: when open, cover the whole screen with the song
+   list panel. The close button on the right of the filter row is
+   only visible in this state. */
+body:not(.layout-landscape) #songListPanel.open {
+  display: flex !important;
+  flex-direction: column;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: #1b2730;
+  padding: 8px;
+  padding-top: calc(8px + env(safe-area-inset-top, 0));
+}
+body:not(.layout-landscape) #songListPanel.open .song-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  background: #1a2632;
+  border: 1px solid #334654;
+  border-radius: 6px;
+}
+body:not(.layout-landscape) #songListPanel.open .song-picker-close {
+  display: block;
+}
 
 /* Loop bracket overlays drawn on the score. Both "in" and "out" use the
    same stroke weight — the distinction is purely which side of the bar
@@ -372,12 +436,18 @@ main {
 /* Unicode flat (♭) rendering fix. On Android/Pixel the glyph falls
    back to a music-symbol font with generous side bearings, giving
    visible whitespace around the flat. Forcing a regular text font
-   stack avoids that fallback — on desktop/iOS the flat already
-   renders tightly from these fonts, so nothing changes there.
-   Sharps don't need this — they render cleanly from the system
-   font already. */
+   stack avoids that fallback, and on Android we additionally pull
+   the flat in with negative margins. Desktop/iOS don't need the
+   margin adjustment — the font swap alone gives a tight flat on
+   those platforms. Sharps render fine from the system font and
+   don't need any special handling. */
 .fl {
   font-family: Arial, Helvetica, "Segoe UI", Roboto, sans-serif;
+}
+html.is-android .fl {
+  display: inline-block;
+  margin-left: -0.18em;
+  margin-right: -0.18em;
 }
 /* Prev/Next chord navigator pinned to the bottom of the fb-left column.
    margin-top:auto pushes the row to the bottom so the chord/scale stack

@@ -5,15 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=51" />
+<link rel="stylesheet" href="style.css?v=53" />
 </head>
 <body>
 <div id="app">
-  <aside id="sidebar" hidden>
-    <div id="songListPanel" class="song-list-panel">
-      <ul id="songList" class="song-list" role="listbox" aria-label="Songs"></ul>
+  <aside id="sidebar" hidden></aside>
+  <div id="songListPanel" class="song-list-panel">
+    <div class="song-filter-row">
+      <div class="song-filter-wrap">
+        <input type="text" id="songFilter" class="song-filter" placeholder="Filter..." autocomplete="off" />
+        <button type="button" id="songFilterClear" class="song-filter-clear" aria-label="Clear filter" hidden>✕</button>
+      </div>
+      <button type="button" id="songPickerClose" class="song-picker-close" aria-label="Close" hidden>✕</button>
     </div>
-  </aside>
+    <ul id="songList" class="song-list" role="listbox" aria-label="Songs"></ul>
+  </div>
   <div id="mainArea" class="main-area">
   <header>
     <div class="top-row">
@@ -26,10 +32,9 @@
         <svg viewBox="0 0 16 22" aria-hidden="true"><path d="M 3 2 L 13 2 L 13 20 L 3 20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="square"/></svg>
       </button>
       <button id="clearLoopBtn" class="top-btn" aria-label="Clear loop" disabled>✕</button>
-      <label class="song-picker" aria-label="Song library">
+      <button type="button" id="songPickerBtn" class="song-picker" aria-label="Song library">
         <span id="songName" class="song-label" aria-live="polite"></span>
-        <select id="songSelect" class="song-select" aria-label="Song"></select>
-      </label>
+      </button>
       <button id="fbToggle" class="top-btn" aria-label="Toggle note info" aria-expanded="false">♪</button>
       <button id="optionsToggle" class="top-btn" aria-label="Toggle options" aria-expanded="false">⚙</button>
     </div>
@@ -133,6 +138,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=123"></script>
+<script src="app.js?v=133"></script>
 </body>
 </html>

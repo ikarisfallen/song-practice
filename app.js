@@ -1642,13 +1642,23 @@ function buildNotesMeasureSVG(state) {
 }
 let lastFbState = null;
 
-// Add `chordText`-derived `<tspan>`s to an SVG <text>, giving the
-// flat its own tspan so we can force a regular sans-serif font on
-// just that glyph. On Pixel/Android the default serif falls back to
-// a music-symbol font for ♭ which has generous side bearings;
-// switching fonts just for the flat keeps the metrics tight without
-// affecting anything else.
-function appendChordLabelTspans(textEl, str) {
+// Detect Android once at load and flag <html> so CSS can target
+// Android-specific flat kerning. Also used by appendChordLabelTspans
+// to emit dx kerning on the SVG ♭ only on Android, where the system
+// music-symbol font has generous side bearings.
+const IS_ANDROID = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+if (IS_ANDROID && typeof document !== 'undefined') {
+  document.documentElement.classList.add('is-android');
+}
+
+// Set an SVG <text> element's content, giving any flat (♭) characters
+// their own tspan so we can force a regular sans-serif font on just
+// that glyph. On Pixel/Android we also pull in the flat with negative
+// dx so the visible whitespace from font-fallback metrics disappears.
+// Desktop/iOS don't need any kerning.
+function setSvgTextWithFlatFix(textEl, str) {
+  // Clear any previous children / textContent first.
+  while (textEl.firstChild) textEl.removeChild(textEl.firstChild);
   const s = String(str || '');
   const parts = s.split(/(♭)/);
   for (const part of parts) {
@@ -1657,11 +1667,23 @@ function appendChordLabelTspans(textEl, str) {
     if (part === '♭') {
       tspan.setAttribute('font-family',
         'Arial, Helvetica, "Segoe UI", Roboto, sans-serif');
+      if (IS_ANDROID) tspan.setAttribute('dx', '-2');
     }
     tspan.textContent = part;
     textEl.appendChild(tspan);
+    if (part === '♭' && IS_ANDROID) {
+      // Pull the character AFTER the flat back by roughly the same
+      // amount so the label doesn't end up with a gap where the
+      // flat's original advance width was.
+      const reset = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+      reset.setAttribute('dx', '-2');
+      reset.textContent = '';
+      textEl.appendChild(reset);
+    }
   }
 }
+// Back-compat alias for the chord label call site.
+const appendChordLabelTspans = setSvgTextWithFlatFix;
 
 // Wrap each Unicode flat (♭) in a <span class="fl"> so CSS can pull
 // it in with negative margins. On some platforms (notably Pixel /
@@ -1804,7 +1826,7 @@ function updateFingerboard(state) {
         ring.style.display = 'none';
       }
       const useAlt = inMeasure && !inScale;
-      text.textContent = (useAlt ? altNames : names)[pc];
+      setSvgTextWithFlatFix(text, (useAlt ? altNames : names)[pc]);
       text.style.display = '';
       text.setAttribute('fill-opacity', '1');
     } else {
@@ -2267,23 +2289,53 @@ function renderChart(song, barsIn, timesigStr) {
       }
       const color = colorFor(pat.keyName);
 
-      // Horizontal line spans the full measure range (from the left edge of
-      // the first measure in this row to the right edge of the last one).
+      // Pull the horizontal line in by a small margin on each side so
+      // two patterns that butt up against each other have a visible
+      // gap between their underlines (instead of looking like one
+      // continuous line of mixed colors).
+      const GAP = 2;
+      const TICK_HEIGHT = 6; // tick extends this many px ABOVE the line only
+      const lineStartX = startX + GAP;
+      const lineEndX   = endX   - GAP;
+
+      // Horizontal underline for the pattern.
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('x1', startX);
+      line.setAttribute('x1', lineStartX);
       line.setAttribute('y1', patternLineY);
-      line.setAttribute('x2', endX);
+      line.setAttribute('x2', lineEndX);
       line.setAttribute('y2', patternLineY);
       line.setAttribute('stroke', color);
       line.setAttribute('stroke-width', 2);
       line.setAttribute('stroke-linecap', 'round');
       rowSvg.appendChild(line);
 
+      // Vertical ticks ONLY at the true start and end of the whole
+      // pattern — not at every row-boundary segment. If a pattern
+      // continues onto a new row, the left tick is suppressed there
+      // (and similarly for the right tick on the row the pattern
+      // continues from). Result: ⌐─────  ──────┐  where the middle
+      // rows have no tick, and only the outermost row-ends carry one.
+      const ticks = [];
+      if (isPatternStart) ticks.push(lineStartX);
+      if (isPatternEnd)   ticks.push(lineEndX);
+      ticks.forEach(tx => {
+        const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        tick.setAttribute('x1', tx);
+        tick.setAttribute('y1', patternLineY - TICK_HEIGHT);
+        tick.setAttribute('x2', tx);
+        tick.setAttribute('y2', patternLineY);
+        tick.setAttribute('stroke', color);
+        tick.setAttribute('stroke-width', 2);
+        tick.setAttribute('stroke-linecap', 'round');
+        rowSvg.appendChild(tick);
+      });
+
       // Key-name text just under the line, aligned with the measure's left
-      // edge — only on the row where the pattern actually starts.
+      // edge — only on the row where the pattern actually starts. Shifted
+      // a few pixels past the left tick so they don't collide.
       if (isPatternStart) {
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        t.setAttribute('x', startX);
+        t.setAttribute('x', lineStartX + 4);
         t.setAttribute('y', patternTextY);
         t.setAttribute('text-anchor', 'start');
         t.setAttribute('font-family', 'serif');
@@ -2294,7 +2346,7 @@ function renderChart(song, barsIn, timesigStr) {
         // black outline around bold glyphs. Force stroke:none so the whole
         // text is filled with `color`.
         t.setAttribute('stroke', 'none');
-        t.textContent = pat.keyName;
+        setSvgTextWithFlatFix(t, pat.keyName);
         rowSvg.appendChild(t);
       }
     });
@@ -3647,104 +3699,139 @@ document.querySelectorAll('#drumSeg button').forEach(b => {
 });
 
 // ===== Song library =====
-// Songs are served from /songs. The manifest at songs/index.json lists the
-// filenames (HTML exports from iReal Pro). To add a song: drop the HTML file
-// in songs/ and add its filename to songs/index.json.
+// All songs come from a single iRealPro playlist export —
+// songs/Songs.html. On load we fetch that file, extract every
+// iRealPro URL embedded in it, and build the song list from the
+// titles encoded in those URLs. To change the songs: export a new
+// playlist from iRealPro as HTML, drop it in as songs/Songs.html.
 
-// A manifest entry is either:
-//   - a string filename (single-song HTML, loads the first song in the file), or
-//   - { "title": "Song Name", "file": "pack.html" } — picks the song whose
-//     iRealPro title exactly matches `title` from a file that may contain
-//     many songs (e.g. an iRealPro playlist export).
-function entryTitle(entry) {
-  if (typeof entry === 'string') return entry.replace(/\.html?$/i, '');
-  return entry.title || entry.file;
-}
-function entryFile(entry) {
-  return typeof entry === 'string' ? entry : entry.file;
-}
-
-async function loadSongEntry(entry) {
-  const file = entryFile(entry);
-  try {
-    const res = await fetch('songs/' + encodeURIComponent(file));
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const text = await res.text();
-    const urls = extractAllIrealURLs(text);
-    if (urls.length === 0) throw new Error('no iRealPro URL in file');
-    let url;
-    if (typeof entry === 'string') {
-      url = urls[0];
-    } else {
-      url = urls.find(u => titleFromIrealURL(u) === entry.title);
-      if (!url) throw new Error('song not found: ' + entry.title);
-    }
-    loadFromURL(url);
-  } catch (e) {
-    document.getElementById('status').textContent =
-      'Failed to load ' + entryTitle(entry) + ': ' + e.message;
-  }
-}
+// Parsed song-library state: each entry is { title, url }. Kept in
+// closure scope by initSongLibrary and referenced by the handlers.
+let librarySongs = [];
 
 async function initSongLibrary() {
-  const sel = document.getElementById('songSelect');
-  if (!sel) { document.getElementById('status').textContent = '#songSelect missing'; return; }
-  let songs;
   try {
-    const res = await fetch('songs/index.json');
+    const res = await fetch('songs/Songs.html');
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    songs = data.songs;
-    if (!Array.isArray(songs) || songs.length === 0) throw new Error('empty manifest');
+    const text = await res.text();
+    let urls = extractAllIrealURLs(text);
+    if (urls.length === 0) throw new Error('no iRealPro URLs in Songs.html');
+    // iRealPro playlist exports always append a stub entry named after
+    // the playlist itself (e.g. "Favorites", "Lansdowne") as the last
+    // URL — it isn't a real song. Drop it.
+    if (urls.length > 1) urls = urls.slice(0, -1);
+    librarySongs = urls
+      .map(url => ({ title: titleFromIrealURL(url), url }))
+      // Present the library alphabetically by title, regardless of the
+      // order in the playlist file. Case-insensitive, natural compare.
+      .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
   } catch (e) {
     document.getElementById('status').textContent =
-      'Could not load songs/index.json: ' + e.message;
+      'Could not load songs/Songs.html: ' + e.message;
     return;
   }
 
-  // Build both controls — the <select> (portrait header) and the <ul>
-  // (landscape sidebar). They mirror the same songs array; switching one
-  // updates the other via selectSongByIndex.
-  sel.innerHTML = '';
   const songListEl = document.getElementById('songList');
   if (songListEl) songListEl.innerHTML = '';
-  songs.forEach((entry, i) => {
-    const opt = document.createElement('option');
-    opt.value = String(i);
-    opt.textContent = entryTitle(entry);
-    sel.appendChild(opt);
+  librarySongs.forEach((entry, i) => {
     if (songListEl) {
       const li = document.createElement('li');
-      li.textContent = entryTitle(entry);
+      li.textContent = entry.title;
       li.dataset.idx = String(i);
       li.setAttribute('role', 'option');
-      li.addEventListener('click', () => selectSongByIndex(i, songs));
+      li.addEventListener('click', () => {
+        selectSongByIndex(i);
+        closeSongPicker();
+      });
       songListEl.appendChild(li);
     }
   });
 
-  sel.addEventListener('change', () => {
-    const idx = parseInt(sel.value, 10);
-    selectSongByIndex(idx, songs);
-  });
-
-  await loadSongEntry(songs[0]);
+  try {
+    loadFromURL(librarySongs[0].url);
+  } catch (e) {
+    document.getElementById('status').textContent =
+      'Failed to load ' + librarySongs[0].title + ': ' + e.message;
+  }
   syncSongSelectionUI(0);
 }
 
-// Shared song-change handler — used by both the <select> and the sidebar
-// list item click. Keeps both UIs in sync and applies all the side-effects
-// the old <select> change handler used to.
-function selectSongByIndex(idx, songs) {
+// Shared song-change handler — used by both the portrait popup list
+// and the landscape sidebar list click.
+function selectSongByIndex(idx) {
   if (playState !== 'stopped') stopPlayback();
   loopIn = null;
   loopOut = null;
   updateLoopControls();
-  const sel = document.getElementById('songSelect');
-  if (sel) sel.value = String(idx);
   syncSongSelectionUI(idx);
-  loadSongEntry(songs[idx]);
+  try {
+    loadFromURL(librarySongs[idx].url);
+  } catch (e) {
+    document.getElementById('status').textContent =
+      'Failed to load ' + librarySongs[idx].title + ': ' + e.message;
+  }
 }
+
+// ----- Song picker popup (portrait) + filter (both layouts) -----
+function isLandscape() {
+  return document.body.classList.contains('layout-landscape');
+}
+function openSongPicker() {
+  const panel = document.getElementById('songListPanel');
+  if (!panel) return;
+  // In landscape the panel is always in the sidebar — no modal open
+  // needed. Focus the filter input so the user can start typing right
+  // away in both modes.
+  if (!isLandscape()) panel.classList.add('open');
+  const filter = document.getElementById('songFilter');
+  if (filter) {
+    // A tiny delay ensures the panel has finished its display flip
+    // before we try to focus (Safari is finicky about focus during
+    // layout changes).
+    setTimeout(() => { filter.focus(); filter.select(); }, 0);
+  }
+}
+function closeSongPicker() {
+  const panel = document.getElementById('songListPanel');
+  if (!panel) return;
+  panel.classList.remove('open');
+}
+function applySongFilter(q) {
+  const needle = (q || '').trim().toLowerCase();
+  document.querySelectorAll('#songList li').forEach(li => {
+    const hit = !needle || li.textContent.toLowerCase().includes(needle);
+    li.hidden = !hit;
+  });
+  const clearBtn = document.getElementById('songFilterClear');
+  if (clearBtn) clearBtn.hidden = !(q && q.length > 0);
+}
+(function bindSongPickerControls() {
+  const btn = document.getElementById('songPickerBtn');
+  if (btn) btn.addEventListener('click', openSongPicker);
+  const closeBtn = document.getElementById('songPickerClose');
+  if (closeBtn) closeBtn.addEventListener('click', closeSongPicker);
+  const filter = document.getElementById('songFilter');
+  if (filter) {
+    filter.addEventListener('input', e => applySongFilter(e.target.value));
+    filter.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        if (filter.value) {
+          filter.value = '';
+          applySongFilter('');
+        } else if (!isLandscape()) {
+          closeSongPicker();
+        }
+      }
+    });
+  }
+  const clearBtn = document.getElementById('songFilterClear');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      const f = document.getElementById('songFilter');
+      if (f) { f.value = ''; applySongFilter(''); f.focus(); }
+    });
+  }
+})();
 
 function syncSongSelectionUI(idx) {
   document.querySelectorAll('#songList li').forEach((li, i) => {
@@ -3790,9 +3877,14 @@ function applyLayoutMode() {
     header.insertBefore(topRow, header.firstChild);
     header.appendChild(optionsPanel);
     fbSection.appendChild(fbPanel);
-    // songListPanel stays in the sidebar element (it's hidden via CSS
-    // when not in landscape mode).
-    sidebar.appendChild(songListPanel);
+    // Pull songListPanel BACK OUT of the sidebar in portrait — if it
+    // stayed inside `<aside id="sidebar" hidden>`, the `display: none`
+    // on the hidden ancestor would defeat the .open overlay class we
+    // use as the portrait modal. #app is the right place: the panel
+    // sits alongside sidebar / mainArea and can float freely when
+    // positioned fixed via CSS.
+    const appEl = document.getElementById('app');
+    if (appEl) appEl.appendChild(songListPanel);
     // Restore the hidden state that the toggle buttons expect.
     const optExp = document.getElementById('optionsToggle').getAttribute('aria-expanded') === 'true';
     optionsPanel.hidden = !optExp;
