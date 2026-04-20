@@ -418,33 +418,19 @@ function findClosestIndex(tones, target) {
 // visually confusing on the staff. If the natural continuation would be
 // such a move, try the opposite direction first.
 function findSmoothContinuation(tones, lastPitch, lastTpc, dir) {
-  const primary = findContinuationIndex(tones, lastPitch, dir);
-  if (lastTpc == null || lastTpc < 0) return primary;
-  const letterOf = (tpc) => (((tpc + 1) % 7) + 7) % 7;
-  const lastLetter = letterOf(lastTpc);
-  const primTpc   = tones[primary.idx].tpc;
-  const primPitch = tones[primary.idx].pitch;
-  if (letterOf(primTpc) === lastLetter && Math.abs(primPitch - lastPitch) === 1) {
-    // Awkward same-letter chromatic step (e.g. F → F#). Don't flip
-    // direction — instead step ONE FURTHER in the current direction
-    // so we skip over the chromatic, preserving the descending /
-    // ascending sweep the user expects between EX_LOW and EX_HIGH.
-    // Direction only flips at the hard cello-range boundaries.
-    let idx = primary.idx + primary.dir;
-    while (idx >= 0 && idx < tones.length) {
-      if (letterOf(tones[idx].tpc) !== lastLetter) {
-        return { idx, dir: primary.dir };
-      }
-      idx += primary.dir;
-    }
-    // No alternative in current direction — fall back to reversing
-    // (keeps the old behavior as a safety net at extreme edges).
-    const reverse = findContinuationIndex(tones, lastPitch, -dir);
-    if (letterOf(tones[reverse.idx].tpc) !== lastLetter) {
-      return { idx: reverse.idx, dir: -dir };
-    }
-  }
-  return primary;
+  // At a chord-scale boundary, just pick the closest tone in the new
+  // scale to lastPitch. `findContinuationIndex` already prefers the
+  // current direction (returns the first tone strictly above lastPitch
+  // when dir=+1, strictly below when dir=-1) and only falls back to
+  // the opposite direction when no tone exists in the current one.
+  //
+  // Earlier versions tried to "skip" a same-letter chromatic step
+  // (C → C#, F → F#) under the assumption it sounded awkward, but
+  // across a chord change that step is just the new key's accidental,
+  // and the closest tone is musically the right landing. The skip
+  // was making the algorithm jump over legitimate close notes (e.g.
+  // EbMaj7/G ending on C, next F#m7 landing on D# instead of C#).
+  return findContinuationIndex(tones, lastPitch, dir);
 }
 
 function findContinuationIndex(tones, lastPitch, dir) {
@@ -1940,10 +1926,6 @@ function renderChart(song, barsIn, timesigStr) {
       // Quarter notes per beat (generated from chord scales).
       const beatPitches = quarterNotes[barIdx] || [];
       const notes = [];
-      // Parallel array to `notes[]` — one entry per rendered stavenote.
-      // Real notes carry {pitch, tpc}; rests are null. Used by the Info
-      // Overlay to label each note in the current measure.
-      const barNoteData = [];
       // Per-measure courtesy-accidental state. Keyed by "letter:octave" (the
       // specific staff position) so a courtesy only fires when the same line
       // or space was altered in the previous bar — not just the same letter
@@ -2007,14 +1989,12 @@ function renderChart(song, barsIn, timesigStr) {
 
           const slotIdx = notes.length;
           notes.push(n);
-          barNoteData.push({ pitch: bp.pitch, tpc: bp.tpc });
           for (let bb = b; bb < b + consume && bb < ts.num; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
           b += consume;
         } else {
           notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
-          barNoteData.push(null);
           b++;
         }
       }
@@ -2084,15 +2064,12 @@ function renderChart(song, barsIn, timesigStr) {
       // Highlight height runs from just above the staff all the way down
       // past the scale label and underline, so the current-measure blue
       // wash visibly covers both the staff and the key label under it.
-      // noteStartX/noteEndX are captured so the Info Overlay can position
-      // its circle at the right beat column inside the measure.
       barElements[barIdx] = {
         rowEl, x, y: staffY, w: width,
         h: patternLineY + 3 - (staffY - 4),
         noteStartX: stave.getNoteStartX(),
         noteEndX: stave.getNoteEndX(),
         noteEls: barNoteEls,
-        noteData: barNoteData,
         beatToNoteSlot
       };
 
@@ -2573,7 +2550,6 @@ function stopPlayback() {
   btn.querySelector('.play-glyph').textContent = '▶';
   btn.classList.remove('playing');
   clearHighlight();
-  clearInfoOverlay();
   clearNoteHighlight();
   updateLoopControls();
 }
@@ -2646,154 +2622,13 @@ function clearNoteHighlight() {
   lastLitNoteEl = null;
 }
 function updateNoteHighlight(barIdx, beat) {
+  // Per-note highlight disabled — the current-measure blue wash is
+  // enough visual guidance, and a second blue tint on the note head
+  // was noisy. Kept as a no-op so the rest of the playback loop can
+  // still call it without a null check.
   if (lastLitNoteEl) lastLitNoteEl.classList.remove('lit');
   lastLitNoteEl = null;
-  const info = barElements[barIdx];
-  if (!info || !info.noteEls || !info.beatToNoteSlot) return;
-  const slot = info.beatToNoteSlot[beat];
-  if (slot < 0) return;
-  const el = info.noteEls[slot];
-  if (!el) return;
-  el.classList.add('lit');
-  lastLitNoteEl = el;
 }
-
-// ===== Fingering =====
-// Map a sounding MIDI pitch to a cello fingering label. Ported from the
-// MuseScore "Ambitus" fingering plugin — each open string (F1=29,
-// C2=36, G2=43, D3=50, A3=57) is a Roman numeral (V, IV, III, II, I);
-// the six semitones above each open string are the finger positions
-// -1, 1, 2, 3, 4, 4+ (the -1 is a "half-extension" one fret below the
-// first-position index finger, 4+ is an extended pinky reaching a
-// half-step above the normal 4th-finger position).
-function midiToFingering(pitch) {
-  const ROMAN   = ['V', 'IV', 'III', 'II', 'I'];
-  const FINGERS = ['', '-1', '1', '2', '3', '4', '4+']; // index 0 unused (open)
-  const OPENS   = [29, 36, 43, 50, 57];
-  for (let s = 0; s < OPENS.length; s++) {
-    const o = OPENS[s];
-    if (pitch >= o && pitch < o + 7) {
-      return pitch === o ? ROMAN[s] : FINGERS[pitch - o];
-    }
-  }
-  return '';
-}
-
-// ===== Info Overlay =====
-// Optional small blue dot drawn adjacent to each note as it plays, so the
-// user can sight-follow the beat without losing the staff notation. The
-// dot is placed above or below the note head — whichever side has less
-// competing text (chord symbols live above the staff, scale labels
-// below).
-let infoOverlayOn = false;
-let infoOverlayEl = null;
-let infoOverlayBarIdx = -1;
-function clearInfoOverlay() {
-  if (infoOverlayEl && infoOverlayEl.parentNode) {
-    infoOverlayEl.parentNode.removeChild(infoOverlayEl);
-  }
-  infoOverlayEl = null;
-  infoOverlayBarIdx = -1;
-}
-// Label every note in the current measure with its note name. Labels
-// sit between the chord symbols and the top of the staff. If a note
-// head is above the top line, its label moves up so it clears the head
-// (possibly overlapping the chord symbol — that's acceptable).
-function updateInfoOverlay(barIdx, beat, pitch, tpc) {
-  if (!infoOverlayOn) { clearInfoOverlay(); return; }
-  // Only rebuild when the measure changes.
-  if (barIdx === infoOverlayBarIdx && infoOverlayEl) return;
-  clearInfoOverlay();
-  const info = barElements[barIdx];
-  if (!info) return;
-  const svg = info.rowEl.querySelector('svg');
-  if (!svg) return;
-  if (!info.noteEls || !info.noteData) return;
-
-  // Screen-rect → SVG user coord helper (handles viewBox scaling).
-  const svgRect = svg.getBoundingClientRect();
-  const vb      = svg.viewBox && svg.viewBox.baseVal;
-  const vbOK    = vb && vb.width > 0 && vb.height > 0;
-  const vbSX    = vbOK ? vb.width  / svgRect.width  : 1;
-  const vbSY    = vbOK ? vb.height / svgRect.height : 1;
-  const vbOX    = vbOK ? vb.x : 0;
-  const vbOY    = vbOK ? vb.y : 0;
-  function rectToUser(r) {
-    return {
-      cx: (r.left + r.width  / 2 - svgRect.left) * vbSX + vbOX,
-      cy: (r.top  + r.height / 2 - svgRect.top ) * vbSY + vbOY,
-      top: (r.top                         - svgRect.top ) * vbSY + vbOY,
-    };
-  }
-
-  // Staff geometry (user coords): top line = info.y + 40.
-  const topLineY      = info.y + 40;
-  // Default label baseline: sits between chord text (above staff) and
-  // the top line. info.y itself is roughly where the chord row sits.
-  const labelDefaultY = info.y + 18;
-  const fontSize      = 22;
-
-  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  g.setAttribute('class', 'info-overlay-labels');
-  g.setAttribute('pointer-events', 'none');
-
-  for (let i = 0; i < info.noteData.length; i++) {
-    const nd = info.noteData[i];
-    if (!nd) continue;                 // skip rests
-    const noteEl = info.noteEls[i];
-    if (!noteEl) continue;
-
-    // X: just the horizontal center of the note's rendered bbox. Y is
-    // computed separately so we can detect high notes that poke above
-    // the top staff line.
-    const rect = noteEl.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) continue;
-    const noteX   = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
-    const noteTop = (rect.top                         - svgRect.top ) * vbSY + vbOY;
-
-    // Default position: labelDefaultY (between chords and the top
-    // staff line). Labels never go lower than that — i.e. for any
-    // note sitting on or below the top line, the label stays at
-    // labelDefaultY, so a row of labels across the measure lines up
-    // cleanly. For notes that poke ABOVE the top line, push the label
-    // up so its bottom edge clears the note head with a bit of gap
-    // (overlap with the chord-symbol row is acceptable).
-    let labelY = labelDefaultY;
-    if (noteTop < topLineY) {
-      // With dominant-baseline="central", the text's bottom sits at
-      // labelY + fontSize/2. Offset so bottom is ~0.3×fs above noteTop.
-      labelY = Math.min(labelDefaultY, noteTop - fontSize * 0.8);
-    }
-
-    const labelStr = midiToFingering(nd.pitch);
-    if (!labelStr) continue;
-    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    text.setAttribute('x', noteX);
-    text.setAttribute('y', labelY);
-    text.setAttribute('text-anchor', 'middle');
-    text.setAttribute('dominant-baseline', 'central');
-    text.setAttribute('font-family', 'sans-serif');
-    text.setAttribute('font-size', fontSize);
-    text.setAttribute('font-weight', 'bold');
-    text.setAttribute('fill', '#2e78ff');
-    text.setAttribute('stroke', 'none');
-    text.setAttribute('style', 'fill: #2e78ff !important; stroke: none !important;');
-    text.textContent = labelStr;
-    g.appendChild(text);
-  }
-
-  svg.appendChild(g);
-  infoOverlayEl    = g;
-  infoOverlayBarIdx = barIdx;
-}
-(function bindInfoOverlaySwitch() {
-  const sw = document.getElementById('infoOverlayToggle');
-  if (!sw) return;
-  sw.addEventListener('change', (e) => {
-    infoOverlayOn = e.target.checked;
-    if (!infoOverlayOn) clearInfoOverlay();
-  });
-})();
 
 // Draw a practice-loop bracket on the specified bar. `side` is "in" (hollow
 // bracket on the left edge) or "out" (thicker bracket on the right edge).
@@ -3171,9 +3006,6 @@ async function startPlayback(song, bars, startBarIdx = 0) {
           measurePitches: ev.measurePitches
         });
         updateNoteHighlight(ev.idx, ev.beat);
-        if (infoOverlayOn) {
-          updateInfoOverlay(ev.idx, ev.beat, ev.info.pitch, ev.info.tpc);
-        }
       }, time);
       return;
     }

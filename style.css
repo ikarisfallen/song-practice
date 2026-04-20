@@ -305,10 +305,6 @@ main {
   display: block;
   width: 100%;
   height: auto;
-  /* Allow the Info Overlay zoom window to paint outside the staff SVG
-     bounds when the current note sits high above or low below the
-     staff — otherwise very high/low notes get cropped. */
-  overflow: visible;
 }
 .staff-row svg * { color: #000; }
 /* Make sure VexFlow's staff-line and barline rects render solid black
@@ -361,24 +357,6 @@ main {
   gap: 6px;
   font-family: serif;
 }
-/* Info Overlay switch lives at the bottom-left of the note-info panel.
-   margin-top:auto inside the fb-left flex column pushes it down so the
-   chord/notes/scale stack sits flush at the top. */
-.info-overlay-switch {
-  margin-top: auto;
-  font-size: 12px;
-  color: #222;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  font-style: normal;
-  padding-top: 4px;
-}
-.info-overlay-switch .switch { background: #9a9a9a; }
-.info-overlay-switch .switch-input:checked + .switch { background: #2e78ff; }
 .fb-chord-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
 .fb-chord-name { font-size: 20px; font-weight: normal; }
 .fb-chord-notes { font-size: 15px; color: #333; }
