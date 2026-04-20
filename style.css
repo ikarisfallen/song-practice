@@ -327,6 +327,15 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
   font-size: 13px;
   min-width: 0;
 }
+/* Circle around the label for the button matching the song's
+   ORIGINAL key (pre-transpose). Only the text span is circled, not
+   the whole cell, so it reads as a marker on that one key. */
+.key-seg .key-label { display: inline-block; padding: 1px 6px; }
+.key-seg button.original .key-label {
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+  padding: 1px 7px;
+}
 /* The row-break boundary crosses the middle of the seg row — the 7th
    button (index 6) is the first of the second row, so the default
    `button + button { border-left }` rule would leave it with an

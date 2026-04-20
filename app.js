@@ -1388,6 +1388,21 @@ function parentMajorPc(eff) {
 // Keys that write with flats (F, B♭, E♭, A♭, D♭, G♭).
 const FLAT_PARENT_PCS = new Set([5, 10, 3, 8, 1, 6]);
 
+// Decide sharp vs flat spelling from a chord root's TPC so that a
+// root written with a sharp stays sharp-spelled in the note-info
+// panel and on the fingerboard, and a root written with a flat stays
+// flat-spelled — regardless of the pitch class's usual preference.
+// Returns true (flats), false (sharps), or null (root is natural —
+// defer to a pc-based decision).
+function useFlatsForTpc(tpc) {
+  if (tpc == null) return null;
+  const idx = (((tpc - 13) % 7) + 7) % 7;
+  const level = (tpc - 13 - idx) / 7;
+  if (level > 0) return false; // sharp → sharps
+  if (level < 0) return true;  // flat → flats
+  return null;
+}
+
 // Relate-scale label: the parent major (or minor key name) for the effective
 // scale at this chord. Matches the style used for the score's bracket labels.
 function relatedScaleLabel(eff, patternKeyName) {
@@ -1395,7 +1410,12 @@ function relatedScaleLabel(eff, patternKeyName) {
   const sig = eff.scale.map(x => x.s).join(',');
   const rootPc = eff.root.pitchClass;
   const parent = parentMajorPc(eff);
-  const useFlats = FLAT_PARENT_PCS.has(parent);
+  // Prefer the spelling that matches how the chord ROOT was written
+  // (D#7 stays sharp-spelled: "D# Mixolydian (G# Major)"; Eb7 stays
+  // flat-spelled: "Eb Mixolydian (Ab Major)"). Only fall back to the
+  // parent-major-based preference when the root is a natural letter.
+  const rootPref = useFlatsForTpc(eff.root.tpc);
+  const useFlats = rootPref != null ? rootPref : FLAT_PARENT_PCS.has(parent);
   const names = useFlats ? PC_NAMES_FLAT : PC_NAMES_SHARP;
   // Melodic minor — named directly on its own root. No parent major in
   // parens because melodic minor doesn't align with any major scale.
@@ -1455,7 +1475,15 @@ function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns)
     const contextPc = pat
       ? (pat.keyMode === 'major' ? pat.keyRoot.pitchClass : (pat.keyRoot.pitchClass + 3) % 12)
       : parentMajorPc(eff);
-    const useFlats = FLAT_PARENT_PCS.has(contextPc);
+    // First check if the chord root's TPC (or the pattern keyRoot's
+    // TPC) gives us an unambiguous sharp/flat preference — matches
+    // how the chord was written (D#7 stays sharp, Eb7 stays flat).
+    // Fall back to the pc-based FLAT_PARENT_PCS decision only when
+    // the root letter is natural.
+    const tpcPref = pat
+      ? useFlatsForTpc(pat.keyRoot.tpc)
+      : useFlatsForTpc(eff.root.tpc);
+    const useFlats = tpcPref != null ? tpcPref : FLAT_PARENT_PCS.has(contextPc);
     const beatsPerChord = Math.max(1, Math.floor(ts.num / ce.chordsInBar));
     const startBeat = ce.chordIdxInBar * beatsPerChord;
     const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1) ? ts.num : startBeat + beatsPerChord;
@@ -3106,38 +3134,28 @@ function highlightBar(idx) {
   // user scrolls down to read a later bar, taps it, and the view
   // yanks back up to center it).
   if (playState !== 'playing') return;
-  // During a practice loop, keep the scroll position the user set up
-  // to view the looped section. Auto-scrolling on every bar would
-  // bounce between the first and last bar of the loop — scrolling the
-  // score up to the top and back down on every wrap — which is jarring
-  // and defeats the point of seeing the loop framed on screen.
-  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
-  if (hasLoop && idx >= loopIn && idx <= loopOut) return;
-  // Center the current row vertically inside the scrollable .chart
-  // container so the user can see the next measure(s) coming up,
-  // rather than the row being pushed to the bottom edge (which was
-  // what `scrollIntoView({block:'center'})` could produce depending
-  // on sizing). We compute the target scrollTop explicitly and only
-  // animate when the row has actually drifted out of a comfortable
-  // center zone.
+  // Auto-scroll only when the current row is NOT fully visible. This
+  // lets small loops (whose rows already fit in the viewport) stay
+  // put without yo-yoing, while still following playback for long
+  // loops or non-looping passages where the current bar moves past
+  // the viewport edge.
   const chartEl = document.getElementById('chart');
   if (!chartEl) return;
   const rowTop    = info.rowEl.offsetTop;          // relative to .chart
   const rowHeight = info.rowEl.offsetHeight;
+  const rowBot    = rowTop + rowHeight;
+  const viewTop   = chartEl.scrollTop;
+  const viewBot   = viewTop + chartEl.clientHeight;
+  const margin    = 4; // small slack so a 1px seam doesn't count as off-screen
+  const fullyVisible = rowTop >= viewTop + margin && rowBot <= viewBot - margin;
+  if (fullyVisible) return;
+  // Scroll the current row into view, biased a bit above the vertical
+  // center so the upcoming row(s) show below it.
   const viewHeight = chartEl.clientHeight;
-  // Bias the current row a bit above the vertical center so more of
-  // the upcoming row(s) are visible below. Uses a fraction of the
-  // viewport height — feels consistent across screen sizes.
   const leadBias = viewHeight * 0.22;
   const targetScrollTop = Math.max(0,
     rowTop + rowHeight / 2 - viewHeight / 2 + leadBias);
-  // Only scroll if the current row isn't already roughly centered —
-  // avoids a jitter of tiny smooth-scrolls on consecutive bars that
-  // live in the same visual row.
-  const drift = Math.abs(chartEl.scrollTop - targetScrollTop);
-  if (drift > 20) {
-    chartEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
-  }
+  chartEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
 }
 
 async function startPlayback(song, bars, startBarIdx = 0) {
@@ -3602,13 +3620,28 @@ function syncKeySegActive(key) {
     b.classList.toggle('active', b.dataset.key === key);
   });
 }
+// Mark the button matching the song's original key with an "original"
+// class so CSS can draw a circle around its label.
+function syncKeySegOriginal(key) {
+  document.querySelectorAll('#keySeg button').forEach(b => {
+    b.classList.toggle('original', b.dataset.key === key);
+  });
+}
 // Rebuild the labels on the key segmented control — append an 'm' to
 // each when the current song is in a minor key so "Cm", "Dm", etc.
-// read as minor options. Major songs keep the bare key name.
+// read as minor options. Major songs keep the bare key name. The
+// label is wrapped in a <span class="key-label"> so CSS can target
+// just the text (e.g. to draw a circle around the original-key
+// button's text without circling the whole segment cell).
 function syncKeySegLabels(isMinor) {
   document.querySelectorAll('#keySeg button').forEach(b => {
     const base = b.dataset.key.replace('b', '♭').replace('#', '♯');
-    b.textContent = isMinor ? base + 'm' : base;
+    const txt  = isMinor ? base + 'm' : base;
+    b.innerHTML = '';
+    const span = document.createElement('span');
+    span.className = 'key-label';
+    span.textContent = txt;
+    b.appendChild(span);
   });
 }
 
@@ -3622,6 +3655,7 @@ function loadFromURL(url) {
   currentKey = originalKey;
   currentIsMinor = normalized.minor;
   syncKeySegLabels(currentIsMinor);
+  syncKeySegOriginal(originalKey);
   syncKeySegActive(currentKey);
   renderChart(song, bars, timesig);
   // Store both the original (untransposed) bars and the currently
