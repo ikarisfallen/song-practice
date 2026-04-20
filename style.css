@@ -315,6 +315,25 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
 .seg button:active { transform: scale(0.97); }
 .tempo-seg { flex: 1; }
 .tempo-seg button { flex: 1; padding: 8px 6px; }
+/* Key transpose control: 12 buttons arranged as 2 rows of 6 so there
+   is room for a trailing "m" on each when the song is in a minor key
+   without the labels crowding. Using flex-wrap so the second six
+   flow onto a new row automatically. */
+.key-seg { flex: 1; flex-wrap: wrap; }
+.key-seg button {
+  flex: 1 1 calc(100% / 6);
+  max-width: calc(100% / 6);
+  padding: 7px 0;
+  font-size: 13px;
+  min-width: 0;
+}
+/* The row-break boundary crosses the middle of the seg row — the 7th
+   button (index 6) is the first of the second row, so the default
+   `button + button { border-left }` rule would leave it with an
+   awkward left divider and no top one. Give wrapped buttons a top
+   divider and drop the left one on row starts. */
+.key-seg button:nth-child(6n+1) { border-left: 0; }
+.key-seg button:nth-child(n+7)  { border-top: 1px solid #334654; }
 .drum-vol { flex: 1; min-width: 60px; accent-color: #3da9fc; }
 .wake-label {
   font-size: 13px; color: #cde; display: inline-flex; align-items: center; gap: 8px;

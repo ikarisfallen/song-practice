@@ -3060,6 +3060,12 @@ function highlightBar(idx) {
   rect.setAttribute('height', info.h + TOP_EXTEND - 4);
   rect.setAttribute('rx', 2);
   svg.appendChild(rect);
+  // Only auto-scroll during playback. When the user manually selects
+  // a bar while paused or stopped, keep the view where they had it —
+  // jumping the scroll position on click is disorienting (e.g. the
+  // user scrolls down to read a later bar, taps it, and the view
+  // yanks back up to center it).
+  if (playState !== 'playing') return;
   // During a practice loop, keep the scroll position the user set up
   // to view the looped section. Auto-scrolling on every bar would
   // bounce between the first and last bar of the loop — scrolling the
@@ -3467,13 +3473,121 @@ function expandIRealRepeats(bars) {
   return out;
 }
 
+// ----- Key transpose -----
+// iRealPro's song.key is a string like "A", "Bb", "C#m" (minor has a
+// trailing "m" or "-"). We track the original key and the currently
+// selected key. Transposition shifts every chord root and bass note
+// by the pitch-class delta between them.
+const KEY_NAMES  = ['A','Bb','B','C','C#','D','Eb','E','F','F#','G','G#'];
+const KEY_TO_PC  = {
+  'A':9, 'Bb':10, 'B':11, 'C':0, 'C#':1, 'D':2,
+  'Eb':3, 'E':4, 'F':5, 'F#':6, 'G':7, 'G#':8
+};
+const FLAT_KEYS  = new Set(['Bb', 'Eb', 'F']);
+const PC_SHARP_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const PC_FLAT_NAMES  = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
+
+// Normalize the iRealPro key string ("C#m", "Bb-", "F#") to one of
+// our 12 canonical button labels and a minor flag. The minor suffix
+// is stripped — we use the TONIC pitch class directly for
+// transposition, so an A minor song selecting "D" transposes up a
+// 4th (A→D), turning Am into Dm.
+function normalizeKey(keyStr) {
+  if (!keyStr) return { key: 'C', minor: false };
+  const m = keyStr.match(/^([A-G][#b]?)(m|-)?/i);
+  if (!m) return { key: 'C', minor: false };
+  let root = m[1][0].toUpperCase() + (m[1][1] || '');
+  // Rewrite uncommon enharmonic spellings to our button labels.
+  const ALIAS = { 'Ab':'G#', 'Db':'C#', 'Gb':'F#' };
+  if (ALIAS[root]) root = ALIAS[root];
+  const minor = !!m[2];
+  if (!(root in KEY_TO_PC)) return { key: 'C', minor };
+  return { key: root, minor };
+}
+
+// Shift a "letter[accidental]..." string by `offset` semitones,
+// picking a new letter+accidental per `useFlats`. Anything after the
+// leading accidental is kept unchanged (e.g. "m7b5" stays "m7b5").
+function shiftNoteName(str, offset, useFlats) {
+  if (!str) return str;
+  const m = str.match(/^([A-G])([#b])?(.*)$/);
+  if (!m) return str;
+  const letter = m[1];
+  const acc    = m[2] || '';
+  const tail   = m[3] || '';
+  const letterPc = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 }[letter];
+  let pc = letterPc;
+  if (acc === '#') pc++;
+  if (acc === 'b') pc--;
+  pc = ((pc + offset) % 12 + 12) % 12;
+  const name = (useFlats ? PC_FLAT_NAMES : PC_SHARP_NAMES)[pc];
+  return name + tail;
+}
+
+// Return a copy of `bars` with every chord root and bass transposed
+// by `offset` semitones. Non-chord cells (rests, slashes, NC) pass
+// through unchanged. The chord's `rest` string may start with a
+// "#"/"b" accidental — we have to pull it off the root side, shift,
+// then reattach any residual accidental.
+function transposeBars(bars, offset, useFlats) {
+  if (offset === 0) return bars;
+  return bars.map(bar => ({
+    ...bar,
+    chords: (bar.chords || []).map(ch => {
+      if (ch.nc || ch.slash) return ch;
+      const restStr = ch.rest || '';
+      const accMatch = restStr.match(/^([#b])(.*)/);
+      const rootWithAcc = ch.root + (accMatch ? accMatch[1] : '');
+      const qualityTail = accMatch ? accMatch[2] : restStr;
+      const shiftedRootName = shiftNoteName(rootWithAcc, offset, useFlats);
+      // Split back into a single-letter root and a rest string whose
+      // leading character may again be "#"/"b".
+      const newLetter = shiftedRootName[0];
+      const newAcc    = shiftedRootName.slice(1); // "" | "#" | "b"
+      return {
+        ...ch,
+        root: newLetter,
+        rest: newAcc + qualityTail,
+        bass: ch.bass ? shiftNoteName(ch.bass, offset, useFlats) : null
+      };
+    })
+  }));
+}
+
+let currentKey = 'C';
+let originalKey = 'C';
+let currentIsMinor = false;
+function syncKeySegActive(key) {
+  document.querySelectorAll('#keySeg button').forEach(b => {
+    b.classList.toggle('active', b.dataset.key === key);
+  });
+}
+// Rebuild the labels on the key segmented control — append an 'm' to
+// each when the current song is in a minor key so "Cm", "Dm", etc.
+// read as minor options. Major songs keep the bare key name.
+function syncKeySegLabels(isMinor) {
+  document.querySelectorAll('#keySeg button').forEach(b => {
+    const base = b.dataset.key.replace('b', '♭').replace('#', '♯');
+    b.textContent = isMinor ? base + 'm' : base;
+  });
+}
+
 function loadFromURL(url) {
   const song = parseIRealSong(url);
   const tokens = tokenize(song.body);
   let { bars, timesig } = buildBars(tokens);
   bars = expandIRealRepeats(bars);
+  const normalized = normalizeKey(song.key);
+  originalKey = normalized.key;
+  currentKey = originalKey;
+  currentIsMinor = normalized.minor;
+  syncKeySegLabels(currentIsMinor);
+  syncKeySegActive(currentKey);
   renderChart(song, bars, timesig);
-  window.currentSong = { song, bars, timesig };
+  // Store both the original (untransposed) bars and the currently
+  // displayed bars. Key changes re-transpose from the original so
+  // repeated key flips don't accumulate rounding errors.
+  window.currentSong = { song, bars, timesig, originalBars: bars };
   document.getElementById('status').textContent = `Loaded: ${song.title} (${bars.length} bars)`;
   // A freshly loaded song should start at the top of the score. The
   // chart container holds the scroll position from the previously
@@ -3482,6 +3596,22 @@ function loadFromURL(url) {
   const chartEl = document.getElementById('chart');
   if (chartEl) chartEl.scrollTop = 0;
 }
+
+function applyKeyChange(targetKey) {
+  if (!window.currentSong) return;
+  if (!(targetKey in KEY_TO_PC)) return;
+  currentKey = targetKey;
+  syncKeySegActive(targetKey);
+  const offset = (KEY_TO_PC[targetKey] - KEY_TO_PC[originalKey] + 12) % 12;
+  const useFlats = FLAT_KEYS.has(targetKey);
+  const bars = transposeBars(window.currentSong.originalBars, offset, useFlats);
+  window.currentSong.bars = bars;
+  renderChart(window.currentSong.song, bars, window.currentSong.timesig);
+}
+
+document.querySelectorAll('#keySeg button').forEach(btn => {
+  btn.addEventListener('click', () => applyKeyChange(btn.dataset.key));
+});
 
 // ===== Event bindings =====
 document.getElementById('playBtn').addEventListener('click', async () => {

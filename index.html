@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=53" />
+<link rel="stylesheet" href="style.css?v=55" />
 </head>
 <body>
 <div id="app">
@@ -46,6 +46,23 @@
           <button type="button" data-ex="chord">Chord Tones</button>
           <button type="button" data-ex="broken3">Broken 3rds</button>
           <button type="button" data-ex="cantus">Cantus Firmus</button>
+        </div>
+      </div>
+      <div class="drum-row">
+        <span class="drum-label">Key</span>
+        <div class="seg key-seg" id="keySeg" role="tablist">
+          <button type="button" data-key="A">A</button>
+          <button type="button" data-key="Bb">B♭</button>
+          <button type="button" data-key="B">B</button>
+          <button type="button" data-key="C">C</button>
+          <button type="button" data-key="C#">C♯</button>
+          <button type="button" data-key="D">D</button>
+          <button type="button" data-key="Eb">E♭</button>
+          <button type="button" data-key="E">E</button>
+          <button type="button" data-key="F">F</button>
+          <button type="button" data-key="F#">F♯</button>
+          <button type="button" data-key="G">G</button>
+          <button type="button" data-key="G#">G♯</button>
         </div>
       </div>
       <div class="drum-row">
@@ -138,6 +155,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=134"></script>
+<script src="app.js?v=137"></script>
 </body>
 </html>
