@@ -2939,18 +2939,16 @@ function applyLoopBoundsToPart() {
     return;
   }
   if (playState === 'paused' && playbackPart) {
-    // Part is built but Transport is paused. It's safe to mutate the Part
-    // directly here, but we also need to snap Tone.Transport.position back
-    // to the audible bar: it's been climbing monotonically through loop
-    // cycles, so just "resume" would leave the Part mapping the stale
-    // Transport time through the new (longer) loop and jumping forward.
-    const totalBars = currentPlaylist ? currentPlaylist.length : 0;
-    playbackPart.loopStart = hasLoop ? `${loopIn}:0:0` : 0;
-    playbackPart.loopEnd = hasLoop
-      ? `${loopOut + 1}:0:0`
-      : (totalBars > 0 ? `${totalBars}:0:0` : playbackPart.loopEnd);
-    const offset = (pauseContext && pauseContext.offset) || 0;
-    Tone.Transport.position = `${offset + resumeBar}:0:0`;
+    // Tone.Part's internal scheduler doesn't cope well with having
+    // its loopStart/loopEnd mutated mid-flight — stale event entries
+    // from the old loop range can double-fire once the bounds change.
+    // Cleanly tear down the paused Part and note the position in
+    // `selectedBar` so the next Play button press re-creates a fresh
+    // Part from that bar. Previously this branch mutated the Part in
+    // place, which could cause two chords to sound on each bar for
+    // the rest of the song after a Clear Loop / Change Loop click.
+    stopPlayback();
+    selectedBar = resumeBar;
   }
 }
 
@@ -3682,16 +3680,20 @@ document.getElementById('playBtn').addEventListener('click', async () => {
 document.getElementById('rewindBtn').addEventListener('click', () => {
   // Back to start. With a Loop In bracket placed, "start" means the loop's
   // beginning so the next play resumes the practice section. Otherwise it
-  // drops the bar selection and resets to the top of the song. Either way,
-  // playback stops — user taps play to resume.
+  // resets the selection to the first bar and scrolls the chart to the
+  // top. Either way, playback stops — user taps play to resume.
   stopPlayback();
   if (loopIn != null) {
     selectedBar = loopIn;
     highlightBar(loopIn);
     refreshFingerboardForBar(loopIn);
   } else {
-    selectedBar = null;
+    selectedBar = 0;
+    highlightBar(0);
+    refreshFingerboardForBar(0);
   }
+  const chartEl = document.getElementById('chart');
+  if (chartEl) chartEl.scrollTop = 0;
   updateLoopControls();
   document.getElementById('status').textContent = 'Ready';
 });
