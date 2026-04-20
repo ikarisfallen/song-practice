@@ -3475,6 +3475,12 @@ function loadFromURL(url) {
   renderChart(song, bars, timesig);
   window.currentSong = { song, bars, timesig };
   document.getElementById('status').textContent = `Loaded: ${song.title} (${bars.length} bars)`;
+  // A freshly loaded song should start at the top of the score. The
+  // chart container holds the scroll position from the previously
+  // loaded song, which can leave the user halfway down an unrelated
+  // chart until they scroll back up themselves.
+  const chartEl = document.getElementById('chart');
+  if (chartEl) chartEl.scrollTop = 0;
 }
 
 // ===== Event bindings =====
