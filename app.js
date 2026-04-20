@@ -340,14 +340,24 @@ function getChordType(chordText) {
   return 'major';
 }
 
-// Collapse the four "awkward" enharmonic spellings — C♭, F♭, E♯, B♯ — to
-// their natural-letter equivalents (B, E, F, C). These come up whenever a
-// scale calculation lands in Gb major / D♭m / F♯ Ionian territory, and
-// players generally read them faster as the natural spelling. Applied up
-// front in tpcToNoteName / tpcToLetterAcc so every downstream renderer
-// (scale labels, chord-tone list, VexFlow note keys) picks up the nicer
-// spelling automatically.
+// Collapse awkward enharmonic spellings to a simpler one on the same
+// pitch class. Two kinds of fixes:
+//  1. Double-accidentals (F##, C##, ... / Cbb, Dbb, ...) — shifted up
+//     or down a letter so the note renders as a single-accidental or
+//     natural spelling (e.g. C## → D, Cbb → B♭). This matters after
+//     Key-transpose, where a scale tone offset from a transposed
+//     root can land in double-accidental territory.
+//  2. The four remaining single-accidental corner cases — C♭, F♭,
+//     E♯, B♯ — collapse to B, E, F, C respectively. Players read
+//     these natural spellings faster.
+// Applied up front in tpcToNoteName / tpcToLetterAcc so every
+// downstream renderer (scale labels, chord-tone list, VexFlow note
+// keys) picks up the nicer spelling automatically.
 function normalizeEnharmonic(tpc) {
+  const idx = (((tpc - 13) % 7) + 7) % 7;
+  const acc = (tpc - 13 - idx) / 7; // -2=bb, -1=b, 0=nat, 1=#, 2=##
+  if (acc >= 2) tpc -= 12;       // e.g. F## → G, C## → D, G## → A
+  else if (acc <= -2) tpc += 12; // e.g. Cbb → B♭, Dbb → C, Ebb → D
   if (tpc === 7)  return 19; // Cb → B
   if (tpc === 6)  return 18; // Fb → E
   if (tpc === 25) return 13; // E# → F
@@ -1852,10 +1862,27 @@ let songRepeats = 1;
 let exerciseMode = 'scale'; // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
 
+// Split the input bars at the first coda (Q) marker and, when the
+// song is set to repeat, emit body*N then coda*1 (not body+coda*N).
+// iRealPro charts show the coda section once at the very bottom of
+// the sheet — it's played only once even when the main body loops
+// several times — so our expanded bar list should reflect that.
 function expandBarsByRepeats(bars, n) {
-  if (n <= 1) return bars.slice();
+  let codaStart = -1;
+  for (let i = 0; i < bars.length - 1; i++) {
+    if (bars[i].markers && bars[i].markers.some(m => m.type === 'coda')) {
+      codaStart = i + 1;
+      break;
+    }
+  }
+  const hasCoda = codaStart >= 0;
+  if (n <= 1 && !hasCoda) return bars.slice();
+  const body = hasCoda ? bars.slice(0, codaStart) : bars;
+  const coda = hasCoda ? bars.slice(codaStart) : [];
+  const reps = Math.max(1, n);
   const out = [];
-  for (let r = 0; r < n; r++) for (let i = 0; i < bars.length; i++) out.push(bars[i]);
+  for (let r = 0; r < reps; r++) for (let i = 0; i < body.length; i++) out.push(body[i]);
+  for (let i = 0; i < coda.length; i++) out.push(coda[i]);
   return out;
 }
 
@@ -1981,13 +2008,28 @@ function renderChart(song, barsIn, timesigStr) {
   const staffHeight  = patternLineY + 10;
 
   const formSize = barsIn.length; // length of one pass of the form
+  // Coda break-points: bar indices that should start a fresh row
+  // because the previous bar carried a coda (Q) marker. iRealPro
+  // renders the coda section on its own line at the bottom of the
+  // chart; matching that layout here means the reader can see the
+  // repeat body and the coda tail as visually distinct sections.
+  const codaBreaks = new Set();
+  bars.forEach((b, i) => {
+    if (b.markers && b.markers.some(m => m.type === 'coda') && i + 1 < bars.length) {
+      codaBreaks.add(i + 1);
+    }
+  });
   let rowStart = 0;
   while (rowStart < bars.length) {
     // Clip each row to the next pass boundary so repeats always break on a
     // new row and get their horizontal separator.
     const passIdx = Math.floor(rowStart / formSize);
     const passBoundary = Math.min(bars.length, (passIdx + 1) * formSize);
-    const rowEnd = Math.min(rowStart + mpl, passBoundary);
+    let rowEnd = Math.min(rowStart + mpl, passBoundary);
+    // Force a row break at any coda boundary inside this row's window.
+    for (let k = rowStart + 1; k < rowEnd; k++) {
+      if (codaBreaks.has(k)) { rowEnd = k; break; }
+    }
     const rowBars = bars.slice(rowStart, rowEnd);
     const isFirstRow = rowStart === 0;
     const clefExtra = isFirstRow ? firstMeasureClefWidth : clefOnlyExtra;
