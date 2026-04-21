@@ -351,6 +351,22 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
 /* Push the "Upper / Half Fingering" switch to the right edge of
    its drum-row so it sits bottom-right of the Options panel. */
 .fingering-label { margin-left: auto; }
+/* Exercise dropdown styling — fills the remaining row space to the
+   right of the "Exercise" label, matching the visual weight of the
+   segmented controls on the other rows. */
+.exercise-select {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #334654;
+  background: #1a2632;
+  color: #cde;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.exercise-select:focus { outline: 2px solid #3da9fc; outline-offset: 0; }
 .switch-input {
   position: absolute; opacity: 0; pointer-events: none;
 }

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=57" />
+<link rel="stylesheet" href="style.css?v=58" />
 </head>
 <body>
 <div id="app">
@@ -41,12 +41,13 @@
     <div id="optionsPanel" class="options-panel" hidden>
       <div class="drum-row">
         <span class="drum-label">Exercise</span>
-        <div class="seg" id="exerciseSeg" role="tablist">
-          <button type="button" data-ex="scale" class="active">Scale Notes</button>
-          <button type="button" data-ex="chord">Chord Tones</button>
-          <button type="button" data-ex="broken3">Broken 3rds</button>
-          <button type="button" data-ex="cantus">Cantus Firmus</button>
-        </div>
+        <select id="exerciseSelect" class="exercise-select">
+          <option value="scale" selected>Scale Notes</option>
+          <option value="chord">Chord Tones</option>
+          <option value="broken3">Broken 3rds</option>
+          <option value="cantus">Cantus Firmus</option>
+          <option value="1235">1235</option>
+        </select>
       </div>
       <div class="drum-row">
         <span class="drum-label">Key</span>
@@ -95,8 +96,8 @@
       <div class="drum-row">
         <span class="drum-label">Size</span>
         <div class="seg" id="sizeSeg" role="tablist">
-          <button type="button" data-size="240" class="active">S</button>
-          <button type="button" data-size="180">M</button>
+          <button type="button" data-size="240">S</button>
+          <button type="button" data-size="180" class="active">M</button>
           <button type="button" data-size="120">L</button>
         </div>
       </div>
@@ -112,14 +113,14 @@
       <div class="drum-row">
         <span class="drum-label">Count-in</span>
         <div class="seg" id="countInSeg" role="tablist">
-          <button type="button" data-count="0" class="active">Off</button>
-          <button type="button" data-count="1">1 bar</button>
+          <button type="button" data-count="0">Off</button>
+          <button type="button" data-count="1" class="active">1 bar</button>
           <button type="button" data-count="2">2 bars</button>
         </div>
       </div>
       <div class="drum-row">
         <label class="wake-label">
-          <input type="checkbox" id="wakeLock" class="switch-input" />
+          <input type="checkbox" id="wakeLock" class="switch-input" checked />
           <span class="switch" aria-hidden="true"></span>
           <span>Keep screen on</span>
         </label>
@@ -160,6 +161,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=154"></script>
+<script src="app.js?v=158"></script>
 </body>
 </html>

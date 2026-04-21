@@ -1209,6 +1209,145 @@ function midiTpcToVexKey(soundingMidi, tpc) {
   return { key, acc, letterIdx: LETTER_IDX[letter], level: altAdjust, octave };
 }
 
+// ===== 1235 (chord-tone eighth-note arpeggio) =====
+// For each chord in the song this generator emits the four chord
+// tones — root, 3rd, 5th and 7th — as eighth notes in ascending
+// order (e.g. D7 → D F# A C). If the chord has a full bar to itself
+// it repeats the pattern an octave higher for the back half. Shorter
+// chord slots shrink the pattern to 1-3-5 (three 8ths) or 1-3 (two
+// 8ths). Successive chords place their root close to the previous
+// chord's last tone to keep the line flowing, and the whole line
+// reverses direction when it hits the cello range ceiling/floor.
+//
+// The returned `results[barIdx]` array has 2× entries per bar
+// (eighth-note resolution). The renderer detects the length and
+// switches to eighth-note engraving + beaming.
+function generate1235EighthNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const stepsPerBar = beatsPerBar * 2;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(stepsPerBar).fill(null));
+  let direction = 1;  // +1 ascending, -1 descending
+  let lastPitch = -1;
+
+  chordEvents.forEach((ce, i) => {
+    // Chord tones come from the chord's OWN scale (so a D7 uses D
+    // Mixolydian and gives us D F# A C even inside a major-key
+    // pattern that would otherwise collapse to parent Ionian for
+    // scale-walking).
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const degreeIdx = [0, 2, 4, 6]; // root, 3rd, 5th, 7th scale degrees
+    const tones = degreeIdx.map(idx => {
+      const scaleDeg = chordScale[idx % chordScale.length];
+      return { semi: scaleDeg.s, tpc: rootTpc + scaleDeg.t };
+    });
+
+    // Allocate eighth-note range for this chord.
+    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
+    const startBeat = ce.chordIdxInBar * beatsPerChord;
+    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
+      ? beatsPerBar : startBeat + beatsPerChord;
+    const startStep = startBeat * 2;
+    const endStep   = endBeat   * 2;
+    const numSteps  = endStep - startStep;
+
+    // 2 steps → 1,3   |   3 steps → 1,3,5   |   4+ steps → 1,3,5,7
+    const toneCount = numSteps <= 2 ? 2 : (numSteps === 3 ? 3 : 4);
+
+    // Find the root pitch for this chord close to lastPitch, biased
+    // in the current direction so we smoothly climb / descend.
+    const rootOctaves = [];
+    for (let oct = 0; oct < 8; oct++) {
+      const p = rootPc + oct * 12;
+      // Leave headroom for the pattern above the root (roughly 10
+      // semitones for 1-3-5-7 spans). When descending, headroom
+      // isn't as important because the ROOT is the topmost note.
+      if (p >= EX_LOW && p <= EX_HIGH - 10) rootOctaves.push(p);
+    }
+    if (rootOctaves.length === 0) {
+      for (let oct = 0; oct < 8; oct++) {
+        const p = rootPc + oct * 12;
+        if (p >= EX_LOW && p <= EX_HIGH) rootOctaves.push(p);
+      }
+    }
+    let rootPitch;
+    if (lastPitch < 0) {
+      // First chord: pick the lowest comfortable octave.
+      rootPitch = rootOctaves[0] || (rootPc + 36);
+    } else {
+      rootOctaves.sort((a, b) => Math.abs(a - lastPitch) - Math.abs(b - lastPitch));
+      rootPitch = rootOctaves[0];
+    }
+
+    // Build ascending chord tones from the root.
+    const pitches = [rootPitch];
+    const tpcs    = [rootTpc];
+    for (let j = 1; j < toneCount; j++) {
+      const targetPc = (rootPc + tones[j].semi) % 12;
+      let p = pitches[j - 1] + 1;
+      while (p <= EX_HIGH + 12) {
+        if (((p % 12) + 12) % 12 === targetPc) break;
+        p++;
+      }
+      pitches.push(p);
+      tpcs.push(tones[j].tpc);
+    }
+    // Shift the pattern down an octave if it overshoots the ceiling.
+    while (pitches[pitches.length - 1] > EX_HIGH && pitches[0] - 12 >= EX_LOW) {
+      for (let j = 0; j < pitches.length; j++) pitches[j] -= 12;
+    }
+
+    // Write the tones into the result buffer at eighth-note slots.
+    for (let j = 0; j < toneCount; j++) {
+      const step = startStep + j;
+      if (step >= endStep) break;
+      results[ce.barIdx][step] = {
+        pitch: pitches[j],
+        tpc: tpcs[j],
+        duration: '8'
+      };
+    }
+
+    // If the chord owns 8 eighth notes (full bar), repeat the pattern
+    // in the second half — an octave UP when ascending, octave DOWN
+    // when descending — so the line keeps moving. If out of range,
+    // just repeat at the same octave instead.
+    if (numSteps >= 8 && toneCount === 4) {
+      const shift = direction > 0 ? 12 : -12;
+      const shifted = pitches.map(p => p + shift);
+      const inRange = shifted.every(p => p >= EX_LOW && p <= EX_HIGH);
+      const usePitches = inRange ? shifted : pitches;
+      for (let j = 0; j < 4; j++) {
+        const step = startStep + 4 + j;
+        if (step >= endStep) break;
+        results[ce.barIdx][step] = {
+          pitch: usePitches[j],
+          tpc: tpcs[j],
+          duration: '8'
+        };
+      }
+      lastPitch = usePitches[3];
+    } else {
+      lastPitch = pitches[toneCount - 1];
+    }
+
+    // Flip direction when we brush up against the range limits.
+    if (lastPitch >= EX_HIGH - 4) direction = -1;
+    else if (lastPitch <= EX_LOW + 4) direction = 1;
+  });
+
+  return { results, chordEvents, patterns, effective, subdivisions: 2 };
+}
+
 // ===== Cello fingerboard =====
 // 5-string cello tuned F C G D A. Each string has 7 positions (0-6 semitones
 // from the open string). The panel renders an SVG diagram where circles appear
@@ -1449,7 +1588,12 @@ function relatedScaleLabel(eff, patternKeyName) {
 }
 
 function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns) {
-  const beatInfo = bars.map(() => new Array(ts.num).fill(null));
+  // Match the generator's time resolution — quarter-note generators
+  // produce ts.num slots per bar; the 1235 generator produces 2×.
+  const firstFilled = quarterNotes.find(a => a && a.length);
+  const stepsPerBar = firstFilled ? firstFilled.length : ts.num;
+  const subdiv      = Math.max(1, Math.round(stepsPerBar / ts.num));
+  const beatInfo = bars.map(() => new Array(stepsPerBar).fill(null));
   // Which pattern (if any) claims each chord event
   const patternByIdx = {};
   patterns.forEach(p => {
@@ -1487,7 +1631,11 @@ function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns)
     const beatsPerChord = Math.max(1, Math.floor(ts.num / ce.chordsInBar));
     const startBeat = ce.chordIdxInBar * beatsPerChord;
     const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1) ? ts.num : startBeat + beatsPerChord;
-    for (let b = startBeat; b < endBeat; b++) {
+    // Convert beat range to step range so higher-resolution generators
+    // (e.g. 1235 eighth notes) fill their extra slots too.
+    const startStep = startBeat * subdiv;
+    const endStep   = endBeat   * subdiv;
+    for (let b = startStep; b < endStep; b++) {
       const bp = quarterNotes[ce.barIdx][b];
       beatInfo[ce.barIdx][b] = {
         pitch: bp ? bp.pitch : null,
@@ -1885,7 +2033,7 @@ let measuresPerLine = 2;
 // corresponds to a smaller measureWidth, giving a big-notes look at
 // any Per line count. Tight internal spacing is fine for sparse
 // exercises like Cantus Firmus.
-let chartSize = 240;
+let chartSize = 180;
 let songRepeats = 1;
 let exerciseMode = 'scale'; // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
@@ -1989,6 +2137,7 @@ function renderChart(song, barsIn, timesigStr) {
   const gen = exerciseMode === 'chord' ? generate1357QuarterNotes
             : exerciseMode === 'broken3' ? generateBroken3rdsQuarterNotes
             : exerciseMode === 'cantus' ? generateCantusFirmusQuarterNotes
+            : exerciseMode === '1235' ? generate1235EighthNotes
             : generateQuarterNotes;
   const { results: quarterNotes, chordEvents, patterns, effective } = gen(bars, ts);
   // Per-bar/per-beat info for the fingerboard panel, keyed by expanded-bar idx.
@@ -2164,22 +2313,28 @@ function renderChart(song, barsIn, timesigStr) {
       let isFirstNoteOfBar = true;
       let lastNoteOfBar = null;
 
-      // Walk the bar's beat slots. For beats whose pitch object has an
-      // explicit `duration` (Cantus Firmus emits 'w'/'h.'/'h'/'q'), render
-      // one long note and consume the subsequent beats it covers.
-      // Pitch-but-no-duration slots render as quarters (the default for all
-      // the other generators). Null slots become quarter rests.
-      const DUR_TO_BEATS = { 'w': 4, 'h.': 3, 'h': 2, 'q': 1 };
-      // For each beat in this bar, which entry of `notes[]` covers it?
+      // Detect subdivision from the generator's output. Quarter-note
+      // generators return one slot per beat (length == ts.num); the
+      // 1235 generator returns eighth notes (length == 2 * ts.num).
+      const stepsPerBar = beatPitches.length || ts.num;
+      const subdiv      = Math.max(1, Math.round(stepsPerBar / ts.num));
+      const defaultDur  = subdiv === 2 ? '8'  : 'q';
+      const restDur     = subdiv === 2 ? '8r' : 'qr';
+      // Steps-per-duration for both resolutions. A quarter = 2 steps
+      // at 8th resolution, 1 step at quarter resolution, etc.
+      const DUR_TO_STEPS = subdiv === 2
+        ? { 'w': 8, 'h.': 6, 'h': 4, 'q': 2, '8': 1 }
+        : { 'w': 4, 'h.': 3, 'h': 2, 'q': 1 };
+      // For each step in this bar, which entry of `notes[]` covers it?
       // Cantus firmus writes one long note across multiple beats, so the
-      // same slot index can be referenced by several beats. Rests get -1.
-      const beatToNoteSlot = new Array(ts.num).fill(-1);
+      // same slot index can be referenced by several steps. Rests get -1.
+      const beatToNoteSlot = new Array(stepsPerBar).fill(-1);
       let b = 0;
-      while (b < ts.num) {
+      while (b < stepsPerBar) {
         const bp = beatPitches[b];
         if (bp) {
-          const dur = bp.duration || 'q';
-          const consume = DUR_TO_BEATS[dur] || 1;
+          const dur = bp.duration || defaultDur;
+          const consume = DUR_TO_STEPS[dur] || 1;
           const { key, letterIdx, level, octave } = midiTpcToVexKey(bp.pitch, bp.tpc);
           const posKey = letterIdx + ':' + octave;
           // Stem direction: on/above middle line of the staff → stem down,
@@ -2216,12 +2371,12 @@ function renderChart(song, barsIn, timesigStr) {
           const slotIdx = notes.length;
           notes.push(n);
           barNoteData.push({ pitch: bp.pitch });
-          for (let bb = b; bb < b + consume && bb < ts.num; bb++) {
+          for (let bb = b; bb < b + consume && bb < stepsPerBar; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
           b += consume;
         } else {
-          notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
+          notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: restDur }));
           barNoteData.push(null);
           b++;
         }
@@ -2231,6 +2386,12 @@ function renderChart(song, barsIn, timesigStr) {
       const voice = new VF.Voice({ num_beats: ts.num, beat_value: ts.denom, resolution: VF.RESOLUTION });
       voice.setStrict(false);
       voice.addTickables(notes);
+      // Generate beams BEFORE voice.draw — the Beam object attaches
+      // to each note and tells it to render with a beam bar instead
+      // of its own flag. Doing this after draw leaves each 8th note
+      // with its flag already painted plus the beam on top.
+      let barBeams = [];
+      if (subdiv === 2) barBeams = VF.Beam.generateBeams(notes);
       const noteStart = stave.getNoteStartX();
       const noteEnd = stave.getNoteEndX();
       new VF.Formatter().joinVoices([voice]).format([voice], noteEnd - noteStart - 10);
@@ -2239,6 +2400,7 @@ function renderChart(song, barsIn, timesigStr) {
       // we can slice off the newly-added ones.
       const beforeCount = rowEl.querySelectorAll('.vf-stavenote').length;
       voice.draw(context, stave);
+      barBeams.forEach(beam => beam.setContext(context).draw());
       const allStaveNotes = rowEl.querySelectorAll('.vf-stavenote');
       const barNoteEls = Array.from(allStaveNotes).slice(beforeCount);
 
@@ -2655,7 +2817,7 @@ let realHihat, brushSweep, brushTap;
 const realLoops = {};  // key "ballad-4/4" → { player, sourceBpm }
 let currentRealLoop = null;
 let drumMode = 'ride'; // 'hat' | 'ride' | 'click'
-let countInBars = 0;  // 0, 1, or 2 measures of click before the song starts
+let countInBars = 1;  // 0, 1, or 2 measures of click before the song starts
 let playbackPart;
 let playState = 'stopped'; // 'stopped' | 'playing' | 'paused'
 let pauseContext = null;   // { offset, beatsPerBar } captured at startPlayback; used by resume
@@ -3404,17 +3566,27 @@ async function startPlayback(song, bars, startBarIdx = 0) {
     const absBar = barNum;
     events.push({ time: absBar + ':0:0', type: 'barStart', idx: entry.idx });
 
-    // Schedule a fingerboard-update event per beat so the panel follows the
-    // current quarter note + scale as the song plays. measurePitches
-    // captures every quarter note played in this bar so the fingerboard can
-    // emphasize just those positions while the bar is active.
+    // Schedule a fingerboard-update event per note slot so the panel
+    // follows the current note + scale as the song plays. The array
+    // length tells us the time resolution — quarter notes (= beatsPerBar)
+    // or eighths (= 2 × beatsPerBar for the 1235 exercise). Each slot
+    // maps to a Transport time (beat:sixteenth).
     if (lastBeatInfo && lastBeatInfo[entry.idx]) {
+      const stepsThisBar = lastBeatInfo[entry.idx].length;
+      const stepsPerBeat = Math.max(1, Math.round(stepsThisBar / beatsPerBar));
+      const sixteenthsPerStep = 4 / stepsPerBeat; // 4 = sixteenths-per-beat
       const measurePitches = lastBeatInfo[entry.idx]
         .map(b => b && b.pitch)
         .filter(p => p != null);
-      for (let b = 0; b < beatsPerBar; b++) {
-        const info = lastBeatInfo[entry.idx][b];
-        if (info) events.push({ time: `${absBar}:${b}:0`, type: 'beat', idx: entry.idx, beat: b, info, measurePitches });
+      for (let s = 0; s < stepsThisBar; s++) {
+        const info = lastBeatInfo[entry.idx][s];
+        if (!info) continue;
+        const beat = Math.floor(s / stepsPerBeat);
+        const sixteenth = (s % stepsPerBeat) * sixteenthsPerStep;
+        events.push({
+          time: `${absBar}:${beat}:${sixteenth}`,
+          type: 'beat', idx: entry.idx, beat, info, measurePitches
+        });
       }
     }
 
@@ -3820,15 +3992,24 @@ function syncKeySegOriginal(key) {
     b.classList.toggle('original', b.dataset.key === key);
   });
 }
-// Rebuild the labels on the key segmented control — append an 'm' to
-// each when the current song is in a minor key so "Cm", "Dm", etc.
-// read as minor options. Major songs keep the bare key name. The
-// label is wrapped in a <span class="key-label"> so CSS can target
+// Rebuild the labels on the key segmented control.
+//  - Minor songs: append 'm' (Cm, Dm, etc.) and display sharp
+//    variants for C#, F#, G#.
+//  - Major songs: no 'm' suffix, and enharmonically swap the three
+//    "sharp" buttons to flats (C# → Db, F# → Gb, G# → Ab) so the
+//    row reads as the flat-side key names conventionally used for
+//    major keys with those tonics.
+// The underlying `data-key` stays the same (the source of truth for
+// transpose math); only the displayed label changes.
+// The label sits inside a <span class="key-label"> so CSS can target
 // just the text (e.g. to draw a circle around the original-key
 // button's text without circling the whole segment cell).
+const KEY_MAJOR_FLAT_ALIAS = { 'C#': 'Db', 'F#': 'Gb', 'G#': 'Ab' };
 function syncKeySegLabels(isMinor) {
   document.querySelectorAll('#keySeg button').forEach(b => {
-    const base = b.dataset.key.replace('b', '♭').replace('#', '♯');
+    const key = b.dataset.key;
+    const displayKey = isMinor ? key : (KEY_MAJOR_FLAT_ALIAS[key] || key);
+    const base = displayKey.replace('b', '♭').replace('#', '♯');
     const txt  = isMinor ? base + 'm' : base;
     b.innerHTML = '';
     const span = document.createElement('span');
@@ -3870,7 +4051,12 @@ function applyKeyChange(targetKey) {
   currentKey = targetKey;
   syncKeySegActive(targetKey);
   const offset = (KEY_TO_PC[targetKey] - KEY_TO_PC[originalKey] + 12) % 12;
-  const useFlats = FLAT_KEYS.has(targetKey);
+  // Spelling preference: always flat for Bb/Eb/F. For major songs
+  // only, also flat for C#/F#/G# (because those keys display as
+  // Db/Gb/Ab in major — the flat side of the enharmonic pair).
+  // Minor songs keep sharps for C#/F#/G# (C# minor uses sharps, etc.)
+  const useFlats = FLAT_KEYS.has(targetKey)
+    || (!currentIsMinor && (targetKey === 'C#' || targetKey === 'F#' || targetKey === 'G#'));
   const bars = transposeBars(window.currentSong.originalBars, offset, useFlats);
   window.currentSong.bars = bars;
   renderChart(window.currentSong.song, bars, window.currentSong.timesig);
@@ -4005,6 +4191,16 @@ document.addEventListener('visibilitychange', () => {
     acquireWakeLock();
   }
 });
+// Wake Lock defaults to ON in the HTML, but `navigator.wakeLock.request`
+// requires a user gesture on most browsers. Attach a one-shot listener
+// for the first click/tap so the lock takes effect automatically the
+// moment the user interacts with the page (tapping Play, selecting a
+// song, etc.) — no need to toggle the switch themselves.
+document.addEventListener('pointerdown', function firstTouch() {
+  const sw = document.getElementById('wakeLock');
+  if (sw && sw.checked && !wakeLockSentinel) acquireWakeLock();
+  document.removeEventListener('pointerdown', firstTouch);
+}, { capture: true });
 
 function rerenderCurrent() {
   if (!window.currentSong) return;
@@ -4076,19 +4272,20 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
 // Exercise picker — regenerates the quarter notes with the selected
 // algorithm (scale-walker vs. 1-3-5-7 arpeggio). If playback is running,
 // restart so the audible notes match the re-rendered score.
-document.querySelectorAll('#exerciseSeg button').forEach(b => {
-  b.addEventListener('click', async () => {
-    document.querySelectorAll('#exerciseSeg button').forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    const ex = b.dataset.ex;
-    exerciseMode = (ex === 'chord' || ex === 'broken3' || ex === 'cantus') ? ex : 'scale';
+(function bindExerciseSelect() {
+  const sel = document.getElementById('exerciseSelect');
+  if (!sel) return;
+  sel.addEventListener('change', async () => {
+    const ex = sel.value;
+    exerciseMode = (ex === 'chord' || ex === 'broken3' || ex === 'cantus' || ex === '1235')
+      ? ex : 'scale';
     rerenderCurrent();
     if (playState === 'playing' && window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
     }
   });
-});
+})();
 
 document.querySelectorAll('#drumSeg button').forEach(b => {
   b.addEventListener('click', async () => {
@@ -4190,16 +4387,10 @@ function openSongPicker() {
   const panel = document.getElementById('songListPanel');
   if (!panel) return;
   // In landscape the panel is always in the sidebar — no modal open
-  // needed. Focus the filter input so the user can start typing right
-  // away in both modes.
+  // needed. We DO NOT auto-focus the filter input: on mobile that
+  // pops up the on-screen keyboard immediately and covers most of
+  // the song list, forcing the user to dismiss it just to browse.
   if (!isLandscape()) panel.classList.add('open');
-  const filter = document.getElementById('songFilter');
-  if (filter) {
-    // A tiny delay ensures the panel has finished its display flip
-    // before we try to focus (Safari is finicky about focus during
-    // layout changes).
-    setTimeout(() => { filter.focus(); filter.select(); }, 0);
-  }
 }
 function closeSongPicker() {
   const panel = document.getElementById('songListPanel');
