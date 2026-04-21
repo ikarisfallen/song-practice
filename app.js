@@ -3134,27 +3134,36 @@ function highlightBar(idx) {
   // user scrolls down to read a later bar, taps it, and the view
   // yanks back up to center it).
   if (playState !== 'playing') return;
-  // Auto-scroll only when the current row is NOT fully visible. This
-  // lets small loops (whose rows already fit in the viewport) stay
-  // put without yo-yoing, while still following playback for long
-  // loops or non-looping passages where the current bar moves past
-  // the viewport edge.
+  // Keep the current row AND at least the next row visible below it.
+  // We want the player to see what's coming up, so we scroll any time
+  // there isn't enough empty space under the current row for another
+  // row of similar height. For small loops the current row already
+  // sits well above the bottom edge and no scroll happens; for
+  // progress through a song or long loops, this scrolls as soon as
+  // the next row would start being cropped.
   const chartEl = document.getElementById('chart');
   if (!chartEl) return;
   const rowTop    = info.rowEl.offsetTop;          // relative to .chart
   const rowHeight = info.rowEl.offsetHeight;
   const rowBot    = rowTop + rowHeight;
   const viewTop   = chartEl.scrollTop;
-  const viewBot   = viewTop + chartEl.clientHeight;
-  const margin    = 4; // small slack so a 1px seam doesn't count as off-screen
-  const fullyVisible = rowTop >= viewTop + margin && rowBot <= viewBot - margin;
-  if (fullyVisible) return;
-  // Scroll the current row into view, biased a bit above the vertical
-  // center so the upcoming row(s) show below it.
   const viewHeight = chartEl.clientHeight;
-  const leadBias = viewHeight * 0.22;
-  const targetScrollTop = Math.max(0,
-    rowTop + rowHeight / 2 - viewHeight / 2 + leadBias);
+  const viewBot   = viewTop + viewHeight;
+  const margin    = 4; // slack so a 1px seam doesn't force a scroll
+  // Measure how much room we have below the current row. If it's at
+  // least one more row's height (plus a small margin), the next row
+  // is visible — leave the scroll alone. Also don't scroll if the
+  // current row is off the TOP (the user must have scrolled manually);
+  // in that case we pull it back into view.
+  const spaceBelow = viewBot - rowBot;
+  const currentTopOk = rowTop >= viewTop + margin;
+  const nextRowFits  = spaceBelow >= rowHeight + margin;
+  if (currentTopOk && nextRowFits) return;
+  // Scroll so the current row sits ~30% down from the top of the
+  // viewport — that way the upper portion shows recently-played rows
+  // and the lower ~70% shows the current + upcoming rows.
+  const topOffset = viewHeight * 0.30;
+  const targetScrollTop = Math.max(0, rowTop - topOffset);
   chartEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
 }
 
