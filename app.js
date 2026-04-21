@@ -463,6 +463,27 @@ function chordToCanonical(ch) {
   return ch.root + (ch.rest || '');
 }
 
+// Given a bar of `chordsInBar` chords across `beatsPerBar` beats, return
+// the [startBeat, endBeat) range the chord at `chordIdxInBar` occupies.
+//
+// iRealPro convention: when the beat count doesn't divide evenly (e.g. 3
+// chords in a 4-beat bar), the EARLIER chords absorb the extra beats,
+// not the last one. So 3 chords / 4 beats → 2 + 1 + 1 (first gets the
+// extra beat), matching how the lead sheet is engraved — e.g. Dream A
+// Little Dream's "GMaj7 Eb7 D7" bar reads GMaj7 on beats 1-2, Eb7 on
+// beat 3, D7 on beat 4 rather than 1-1-(2).
+function chordBeatRange(chordsInBar, chordIdxInBar, beatsPerBar) {
+  const n = Math.max(1, chordsInBar);
+  const base = Math.floor(beatsPerBar / n);
+  const extra = beatsPerBar - base * n;
+  let startBeat = 0;
+  for (let i = 0; i < chordIdxInBar; i++) {
+    startBeat += (i < extra) ? base + 1 : base;
+  }
+  const len = (chordIdxInBar < extra) ? base + 1 : base;
+  return { startBeat, endBeat: startBeat + len };
+}
+
 // Build a flat list of chord events from bars. Kcl/repeat-prev bars inherit
 // the source bar's chords so patterns still register correctly.
 function buildChordEventList(bars) {
@@ -770,11 +791,8 @@ function generateQuarterNotes(bars, ts) {
     }
     if (tones.length === 0) return;
 
-    // Beat range for this chord event
-    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
-    const startBeat = ce.chordIdxInBar * beatsPerChord;
-    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
-      ? beatsPerBar : startBeat + beatsPerChord;
+    // Beat range for this chord event (iRealPro spacing convention).
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
 
     for (let b = startBeat; b < endBeat; b++) {
       let p = tones[toneIdx].pitch;
@@ -864,10 +882,7 @@ function generateCantusFirmusQuarterNotes(bars, ts) {
     // duration. A single chord in a 4/4 bar = whole note; two chords = two
     // half notes; 4/4 with 3 chords splits as quarter+half or similar
     // depending on where the chord boundaries fall.
-    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
-    const startBeat = ce.chordIdxInBar * beatsPerChord;
-    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
-      ? beatsPerBar : startBeat + beatsPerChord;
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
     const beatCount = endBeat - startBeat;
     const duration = beatCount >= 4 ? 'w'
                    : beatCount === 3 ? 'h.'
@@ -952,10 +967,7 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
     }
     if (tones.length === 0) return;
 
-    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
-    const startBeat = ce.chordIdxInBar * beatsPerChord;
-    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
-      ? beatsPerBar : startBeat + beatsPerChord;
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
 
     for (let b = startBeat; b < endBeat; b++) {
       let noteIdx;
@@ -1020,10 +1032,8 @@ function generate1357QuarterNotes(bars, ts) {
 
   // Number of quarter-note slots each chord event gets.
   const quartersPerEvent = chordEvents.map(ce => {
-    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
-    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
-      ? beatsPerBar : (ce.chordIdxInBar + 1) * beatsPerChord;
-    return endBeat - ce.chordIdxInBar * beatsPerChord;
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    return endBeat - startBeat;
   });
 
   let descending = true;           // start by descending from top of range
@@ -1167,8 +1177,7 @@ function generate1357QuarterNotes(bars, ts) {
     }
 
     // Write the generated notes into results[barIdx][beat].
-    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
-    const startBeat = ce.chordIdxInBar * beatsPerChord;
+    const { startBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
     for (let q = 0; q < notes.length; q++) {
       const b = startBeat + q;
       if (b >= beatsPerBar) break;
@@ -1210,14 +1219,20 @@ function midiTpcToVexKey(soundingMidi, tpc) {
 }
 
 // ===== 1235 (chord-tone eighth-note arpeggio) =====
-// For each chord in the song this generator emits the four chord
-// tones — root, 3rd, 5th and 7th — as eighth notes in ascending
-// order (e.g. D7 → D F# A C). If the chord has a full bar to itself
-// it repeats the pattern an octave higher for the back half. Shorter
-// chord slots shrink the pattern to 1-3-5 (three 8ths) or 1-3 (two
-// 8ths). Successive chords place their root close to the previous
-// chord's last tone to keep the line flowing, and the whole line
-// reverses direction when it hits the cello range ceiling/floor.
+// For each chord the generator emits four ascending chord-tone eighth
+// notes — 1, 2, 3, 5 (e.g. C7 → C D E G). Shorter chord slots shrink
+// the pattern: 2 steps → 1,2   3 steps → 1,2,3   4+ steps → 1,2,3,5.
+// A chord that owns a full bar plays its pattern once and rests for
+// the back half — no second-half octave shift.
+//
+// Root-octave selection:
+//   - Target the middle of the cello range (≈ MIDI 37) so the whole
+//     line sits comfortably on the staff.
+//   - When possible, pick the octave whose root falls between the
+//     PREVIOUS pattern's root and fifth — so the prior 1-2-3-5
+//     "encloses" this chord's 1, giving stepwise voice-leading.
+//   - If no candidate is enclosed, fall back to the octave closest
+//     to the range midpoint.
 //
 // The returned `results[barIdx]` array has 2× entries per bar
 // (eighth-note resolution). The renderer detects the length and
@@ -1234,12 +1249,17 @@ function generate1235EighthNotes(bars, ts) {
   });
 
   const results = bars.map(() => new Array(stepsPerBar).fill(null));
-  let direction = 1;  // +1 ascending, -1 descending
-  let lastPitch = -1;
+  // Pattern spans root → root+7 semitones (for 1-2-3-5). To center the
+  // whole arpeggio on the cello's MIDI midpoint (~41), aim the root at
+  // 41 - 3.5 ≈ 37 (a little below D2 sounding).
+  const RANGE_MID_ROOT = 37;
+  // Upper bound for the root: leave room for the fifth on top (7 semis).
+  const ROOT_MAX = EX_HIGH - 7;
+  let prevPitches = null;
 
-  chordEvents.forEach((ce, i) => {
+  chordEvents.forEach((ce) => {
     // Chord tones come from the chord's OWN scale (so a D7 uses D
-    // Mixolydian and gives us D F# A C even inside a major-key
+    // Mixolydian and gives us D E F# A even inside a major-key
     // pattern that would otherwise collapse to parent Ionian for
     // scale-walking).
     const chordScale = exGetScale(chordToCanonical(ce.chord));
@@ -1251,41 +1271,48 @@ function generate1235EighthNotes(bars, ts) {
       return { semi: scaleDeg.s, tpc: rootTpc + scaleDeg.t };
     });
 
-    // Allocate eighth-note range for this chord.
-    const beatsPerChord = Math.max(1, Math.floor(beatsPerBar / ce.chordsInBar));
-    const startBeat = ce.chordIdxInBar * beatsPerChord;
-    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1)
-      ? beatsPerBar : startBeat + beatsPerChord;
+    // Allocate eighth-note range for this chord (iRealPro spacing:
+    // for 3 chords in a 4-beat bar, first chord gets beats 1-2).
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
     const startStep = startBeat * 2;
     const endStep   = endBeat   * 2;
     const numSteps  = endStep - startStep;
 
-    // 2 steps → 1,3   |   3 steps → 1,3,5   |   4+ steps → 1,3,5,7
+    // 2 steps → 1,2   |   3 steps → 1,2,3   |   4+ steps → 1,2,3,5
     const toneCount = numSteps <= 2 ? 2 : (numSteps === 3 ? 3 : 4);
 
-    // Find the root pitch for this chord close to lastPitch, biased
-    // in the current direction so we smoothly climb / descend.
-    const rootOctaves = [];
+    // All octaves of this root that fit in the cello range with room
+    // for the fifth on top.
+    const candidates = [];
     for (let oct = 0; oct < 8; oct++) {
       const p = rootPc + oct * 12;
-      // Leave headroom for the pattern above the root (roughly 10
-      // semitones for 1-3-5-7 spans). When descending, headroom
-      // isn't as important because the ROOT is the topmost note.
-      if (p >= EX_LOW && p <= EX_HIGH - 10) rootOctaves.push(p);
+      if (p >= EX_LOW && p <= ROOT_MAX) candidates.push(p);
     }
-    if (rootOctaves.length === 0) {
+    if (candidates.length === 0) {
+      // Relax the upper bound if nothing fits (very high root + fifth).
       for (let oct = 0; oct < 8; oct++) {
         const p = rootPc + oct * 12;
-        if (p >= EX_LOW && p <= EX_HIGH) rootOctaves.push(p);
+        if (p >= EX_LOW && p <= EX_HIGH) candidates.push(p);
       }
     }
+
     let rootPitch;
-    if (lastPitch < 0) {
-      // First chord: pick the lowest comfortable octave.
-      rootPitch = rootOctaves[0] || (rootPc + 36);
+    if (!prevPitches) {
+      // First chord: pick the octave closest to the cello midpoint.
+      candidates.sort((a, b) => Math.abs(a - RANGE_MID_ROOT) - Math.abs(b - RANGE_MID_ROOT));
+      rootPitch = candidates[0] || (rootPc + 36);
     } else {
-      rootOctaves.sort((a, b) => Math.abs(a - lastPitch) - Math.abs(b - lastPitch));
-      rootPitch = rootOctaves[0];
+      // Prefer candidates enclosed by the previous pattern's 1..5 span
+      // so voice-leading stays inside the prior chord's footprint.
+      const prevRoot = prevPitches[0];
+      const prevTop  = prevPitches[prevPitches.length - 1];
+      const enclosed = candidates.filter(p => p >= prevRoot && p <= prevTop);
+      const pool = enclosed.length ? enclosed : candidates.slice();
+      // Among the chosen pool, pick whichever is closest to the cello
+      // midpoint. That keeps the line centered even when consecutive
+      // roots move by wide intervals.
+      pool.sort((a, b) => Math.abs(a - RANGE_MID_ROOT) - Math.abs(b - RANGE_MID_ROOT));
+      rootPitch = pool[0] || (rootPc + 36);
     }
 
     // Build ascending chord tones from the root.
@@ -1301,10 +1328,6 @@ function generate1235EighthNotes(bars, ts) {
       pitches.push(p);
       tpcs.push(tones[j].tpc);
     }
-    // Shift the pattern down an octave if it overshoots the ceiling.
-    while (pitches[pitches.length - 1] > EX_HIGH && pitches[0] - 12 >= EX_LOW) {
-      for (let j = 0; j < pitches.length; j++) pitches[j] -= 12;
-    }
 
     // Write the tones into the result buffer at eighth-note slots.
     for (let j = 0; j < toneCount; j++) {
@@ -1317,32 +1340,29 @@ function generate1235EighthNotes(bars, ts) {
       };
     }
 
-    // If the chord owns 8 eighth notes (full bar), repeat the pattern
-    // in the second half — an octave UP when ascending, octave DOWN
-    // when descending — so the line keeps moving. If out of range,
-    // just repeat at the same octave instead.
+    // When a single chord owns the entire bar (4+ beat slot with all
+    // four chord tones), repeat the 1-2-3-5 pattern in the back half
+    // so the player actually plays eight eighth notes. The RENDERER
+    // shows a simile slash in the back half instead of redrawing the
+    // notes (see `beatPitches.simile` handling in renderChart) — so
+    // the chart stays uncluttered while playback plays the pattern
+    // twice.
     if (numSteps >= 8 && toneCount === 4) {
-      const shift = direction > 0 ? 12 : -12;
-      const shifted = pitches.map(p => p + shift);
-      const inRange = shifted.every(p => p >= EX_LOW && p <= EX_HIGH);
-      const usePitches = inRange ? shifted : pitches;
       for (let j = 0; j < 4; j++) {
         const step = startStep + 4 + j;
         if (step >= endStep) break;
         results[ce.barIdx][step] = {
-          pitch: usePitches[j],
+          pitch: pitches[j],
           tpc: tpcs[j],
           duration: '8'
         };
       }
-      lastPitch = usePitches[3];
-    } else {
-      lastPitch = pitches[toneCount - 1];
+      // Tag the bar so the renderer knows to collapse the repeat into
+      // a simile mark. Stored as a property on the per-bar array.
+      results[ce.barIdx].simileStart = startStep + 4;
     }
 
-    // Flip direction when we brush up against the range limits.
-    if (lastPitch >= EX_HIGH - 4) direction = -1;
-    else if (lastPitch <= EX_LOW + 4) direction = 1;
+    prevPitches = pitches;
   });
 
   return { results, chordEvents, patterns, effective, subdivisions: 2 };
@@ -1628,9 +1648,7 @@ function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns)
       ? useFlatsForTpc(pat.keyRoot.tpc)
       : useFlatsForTpc(eff.root.tpc);
     const useFlats = tpcPref != null ? tpcPref : FLAT_PARENT_PCS.has(contextPc);
-    const beatsPerChord = Math.max(1, Math.floor(ts.num / ce.chordsInBar));
-    const startBeat = ce.chordIdxInBar * beatsPerChord;
-    const endBeat = (ce.chordIdxInBar === ce.chordsInBar - 1) ? ts.num : startBeat + beatsPerChord;
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, ts.num);
     // Convert beat range to step range so higher-resolution generators
     // (e.g. 1235 eighth notes) fill their extra slots too.
     const startStep = startBeat * subdiv;
@@ -2309,7 +2327,19 @@ function renderChart(song, barsIn, timesigStr) {
       }
 
       // Quarter notes per beat (generated from chord scales).
-      const beatPitches = quarterNotes[barIdx] || [];
+      const rawBeatPitches = quarterNotes[barIdx] || [];
+      // When the generator tagged this bar as a simile-repeat (a single
+      // chord owning a full bar, pattern repeated for playback), drop
+      // the duplicate back-half entries for rendering. The empty-slot
+      // coalescer then emits a single half-rest there, and we overlay
+      // a simile glyph on top after the voice draws.
+      const simileStart = rawBeatPitches.simileStart;
+      const beatPitches = (simileStart != null)
+        ? rawBeatPitches.map((bp, idx) => idx >= simileStart ? null : bp)
+        : rawBeatPitches;
+      // Slot index of the half-rest that will cover the simile area.
+      // Populated below when the coalescer emits that rest.
+      let simileRestSlot = -1;
       const notes = [];
       // Parallel to `notes[]`: pitch per rendered note slot (null for
       // rests). Used by the fingering overlay so we can look up MIDI
@@ -2390,9 +2420,45 @@ function renderChart(song, barsIn, timesigStr) {
           }
           b += consume;
         } else {
-          notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: restDur }));
-          barNoteData.push(null);
-          b++;
+          // Coalesce a run of empty eighth-note slots into the fewest
+          // rests possible — avoids rendering 4 eighth rests when half
+          // a bar is silent (e.g. after a 1-2-3-5 pattern). Find how
+          // many consecutive empty steps start here, then peel off the
+          // largest standard rest that fits without crossing a half-bar
+          // (beat) boundary.
+          let run = 0;
+          while (b + run < stepsPerBar && !beatPitches[b + run]) run++;
+          // Rests, largest first, measured in eighth-note steps (subdiv=2)
+          // or quarter-note steps (subdiv=1). Half-bar alignment prevents
+          // a half-rest spanning beats 2-3 across the middle of the bar.
+          const restOptions = subdiv === 2
+            ? [ { dur: 'h', steps: 4 }, { dur: 'q', steps: 2 }, { dur: '8', steps: 1 } ]
+            : [ { dur: 'h', steps: 2 }, { dur: 'q', steps: 1 } ];
+          const halfBarSteps = stepsPerBar / 2;
+          while (run > 0) {
+            // Biggest rest that (a) fits in remaining run, (b) doesn't
+            // cross the midpoint of the bar if starting in the first
+            // half, and (c) starts on a boundary its duration requires.
+            let chosen = restOptions[restOptions.length - 1]; // fallback
+            for (const opt of restOptions) {
+              if (opt.steps > run) continue;
+              // Half rests must start on beat 1 or beat 3 (step 0 or halfBarSteps).
+              if (opt.dur === 'h' && (b % halfBarSteps) !== 0) continue;
+              // Don't span across the half-bar boundary.
+              if (b < halfBarSteps && b + opt.steps > halfBarSteps) continue;
+              chosen = opt;
+              break;
+            }
+            if (simileStart != null && b === simileStart) {
+              // Remember which rendered slot holds the simile rest so
+              // we can hide it and draw the slash glyph on top later.
+              simileRestSlot = notes.length;
+            }
+            notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: chosen.dur + 'r' }));
+            barNoteData.push(null);
+            b += chosen.steps;
+            run -= chosen.steps;
+          }
         }
       }
       // Carry the last note of this bar to the next bar for the courtesy check.
@@ -2405,7 +2471,16 @@ function renderChart(song, barsIn, timesigStr) {
       // of its own flag. Doing this after draw leaves each 8th note
       // with its flag already painted plus the beam on top.
       let barBeams = [];
-      if (subdiv === 2) barBeams = VF.Beam.generateBeams(notes);
+      if (subdiv === 2) {
+        // Explicit groups of 4 eighth notes (= a half note each), so a
+        // 4/4 bar of eighths beams as 4+4. Rests naturally break beams,
+        // so a bar of "4 eighths + 4 rests" produces a single 4-note
+        // beam followed by the rests — exactly the engraving we want
+        // for a chord's 1-2-3-5 followed by half-bar silence.
+        barBeams = VF.Beam.generateBeams(notes, {
+          groups: [new VF.Fraction(4, 8)]
+        });
+      }
       const noteStart = stave.getNoteStartX();
       const noteEnd = stave.getNoteEndX();
       new VF.Formatter().joinVoices([voice]).format([voice], noteEnd - noteStart - 10);
@@ -2417,6 +2492,46 @@ function renderChart(song, barsIn, timesigStr) {
       barBeams.forEach(beam => beam.setContext(context).draw());
       const allStaveNotes = rowEl.querySelectorAll('.vf-stavenote');
       const barNoteEls = Array.from(allStaveNotes).slice(beforeCount);
+
+      // If this bar is a simile-repeat, hide the half-rest and draw a
+      // "%"-style simile glyph centered on the staff: a thick diagonal
+      // slash through the middle line, with one dot in the upper-left
+      // corner and one in the lower-right corner (perpendicular to
+      // the slash — together they read as a percent sign).
+      if (simileStart != null && simileRestSlot >= 0 && barNoteEls[simileRestSlot]) {
+        const restEl = barNoteEls[simileRestSlot];
+        restEl.setAttribute('visibility', 'hidden');
+        const svgEl = rowEl.querySelector('svg');
+        const simileX = noteStart + (noteEnd - noteStart) * 0.75;
+        // Ask the stave itself for the middle-line y — VexFlow offsets
+        // the stave internally so staffY isn't directly usable here.
+        const midY = stave.getYForLine(2);
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', 'simile-mark');
+        // Thick diagonal slash, lower-left to upper-right, spanning
+        // roughly two staff spaces.
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', simileX - 11);
+        line.setAttribute('y1', midY + 11);
+        line.setAttribute('x2', simileX + 11);
+        line.setAttribute('y2', midY - 11);
+        line.setAttribute('stroke', '#000');
+        line.setAttribute('stroke-width', '4.5');
+        line.setAttribute('stroke-linecap', 'round');
+        g.appendChild(line);
+        // Dots: upper-left (negative x, negative y) and lower-right
+        // (positive x, positive y) of the slash — the two corners the
+        // slash leaves empty — forming a percent sign.
+        [[-7, -7], [+7, +7]].forEach(([dx, dy]) => {
+          const d = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          d.setAttribute('cx', simileX + dx);
+          d.setAttribute('cy', midY + dy);
+          d.setAttribute('r', '2.4');
+          d.setAttribute('fill', '#000');
+          g.appendChild(d);
+        });
+        svgEl.appendChild(g);
+      }
 
       // Manual chord symbol labels above the staff, evenly spaced over the note area.
       const svg = rowEl.querySelector('svg');
@@ -2437,11 +2552,14 @@ function renderChart(song, barsIn, timesigStr) {
       const labelAreaW = noteEnd - noteStart;
       {
         const n = Math.max(1, displayChords.length);
+        const beatsPerBarLabel = ts.num;
         displayChords.forEach((ch, ci) => {
-          // Chord label is anchored at the beat the chord falls on — chord ci
-          // of n starts at fraction ci/n of the note area (so a single chord
-          // sits at the left, two chords at beats 1 and 3, etc.)
-          const cx = labelAreaX0 + (ci / n) * labelAreaW;
+          // Chord label is anchored at the beat the chord actually falls on.
+          // Use the same uneven-bar allocation the generators use so a
+          // "GMaj7 Eb7 D7" bar reads with GMaj7 above beat 1, Eb7 above
+          // beat 3, and D7 above beat 4 — not evenly spaced at 0, 1/3, 2/3.
+          const { startBeat } = chordBeatRange(n, ci, beatsPerBarLabel);
+          const cx = labelAreaX0 + (startBeat / beatsPerBarLabel) * labelAreaW;
           const cy = staffY - 6;
           const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
           t.setAttribute('x', cx);
@@ -2530,15 +2648,20 @@ function renderChart(song, barsIn, timesigStr) {
       const isPatternEnd = iLast === patLast;
       // Position the line at the specific chord within each bar — otherwise
       // a V-I that straddles a bar line looks like it covers the whole bar.
+      // Translate chord indexes within a bar to beat positions using the
+      // same uneven-bar allocation as the generators, so pattern underlines
+      // line up with the chord labels (e.g. Eb7 on beat 3 of a 3-chord bar).
       let startX = leftBar.noteStartX;
       if (isPatternStart && firstCE.chordsInBar > 1) {
-        const w = (leftBar.noteEndX - leftBar.noteStartX) / firstCE.chordsInBar;
-        startX = leftBar.noteStartX + firstCE.chordIdxInBar * w;
+        const barW = leftBar.noteEndX - leftBar.noteStartX;
+        const { startBeat } = chordBeatRange(firstCE.chordsInBar, firstCE.chordIdxInBar, ts.num);
+        startX = leftBar.noteStartX + (startBeat / ts.num) * barW;
       }
       let endX = rightBar.noteEndX;
       if (isPatternEnd && lastCE.chordsInBar > 1) {
-        const w = (rightBar.noteEndX - rightBar.noteStartX) / lastCE.chordsInBar;
-        endX = rightBar.noteStartX + (lastCE.chordIdxInBar + 1) * w;
+        const barW = rightBar.noteEndX - rightBar.noteStartX;
+        const { endBeat } = chordBeatRange(lastCE.chordsInBar, lastCE.chordIdxInBar, ts.num);
+        endX = rightBar.noteStartX + (endBeat / ts.num) * barW;
       }
       const color = colorFor(pat.keyName);
 
@@ -3190,6 +3313,19 @@ function appendFingeringLabel(parent, x, y, txt, color) {
   });
 })();
 
+// Piano embellishment (extra randomized stabs). Defaults to on; when
+// off, the piano plays a single stab on the downbeat of each chord
+// and nothing else.
+let embellishOn = true;
+(function bindEmbellishSwitch() {
+  const sw = document.getElementById('embellishToggle');
+  if (!sw) return;
+  embellishOn = sw.checked;
+  sw.addEventListener('change', (e) => {
+    embellishOn = e.target.checked;
+  });
+})();
+
 // ===== Current-note highlight in the score =====
 // Paint the currently-playing note's stavenote group blue so the reader
 // can track it, same way the scale diagram in the note-info panel lights
@@ -3604,17 +3740,55 @@ async function startPlayback(song, bars, startBarIdx = 0) {
       }
     }
 
-    // One stab per chord symbol, placed at the same beat as the chord
-    // sits visually in the measure.
+    // Piano comping:
+    //   - Always stab on the chord's downbeat (beat 1 of the chord),
+    //     using the same uneven-bar allocation as the chord labels so
+    //     GMaj7 stabs on beat 1 and D7 stabs on beat 4 in a
+    //     "GMaj7 Eb7 D7" bar.
+    //   - Occasionally layer a second stab somewhere else inside the
+    //     chord's span — on a downbeat most of the time, or on the
+    //     swung "and" of the preceding beat for a little jazz push.
     const chords = (bar.chords || []).filter(c => !c.slash && !c.nc);
     chords.forEach((ch, ci) => {
-      const beat = ci * beatsPerBar / chords.length;
-      const wholeBeat = Math.floor(beat);
-      const sixteenth = Math.round((beat - wholeBeat) * 4);
+      const { startBeat, endBeat } = chordBeatRange(chords.length, ci, beatsPerBar);
+      const chordBeats = endBeat - startBeat;
+
+      // Mandatory stab on the chord's "1".
+      const wb0 = Math.floor(startBeat);
+      const sb0 = Math.round((startBeat - wb0) * 4);
       events.push({
-        time: `${absBar}:${wholeBeat}:${sixteenth}`,
+        time: `${absBar}:${wb0}:${sb0}`,
         type: 'comp', ch, dur: '4n'
       });
+
+      // Optional extra stab — sparse, and never right on top of the "1".
+      //   - Gated by the "Embellish" UI switch: off → downbeat only.
+      //   - Requires the chord to own at least 3 beats, so there's room
+      //     to place the extra stab TWO or more beats after the downbeat
+      //     (i.e. no same-beat-as-the-1 or next-beat-after-the-1 hits).
+      //   - Fires ~40% of eligible chords.
+      //   - Of those, ~20% anticipate the target beat with a swung
+      //     upbeat (lands on the "and" of the preceding beat).
+      if (embellishOn && chordBeats >= 3 && Math.random() < 0.4) {
+        // extraOffset ∈ [2, chordBeats - 1] — keeps the extra stab
+        // comfortably far from the downbeat.
+        const extraOffset = 2 + Math.floor(Math.random() * (chordBeats - 2));
+        const targetBeat = startBeat + extraOffset;
+        if (Math.random() < 0.2) {
+          // Swung anticipation on the "and" of the preceding beat
+          // (sixteenth ≈ 2.67 → 2/3 of the way through the beat).
+          const anticipBeat = targetBeat - 1;
+          events.push({
+            time: `${absBar}:${anticipBeat}:2.67`,
+            type: 'comp', ch, dur: '8n'
+          });
+        } else {
+          events.push({
+            time: `${absBar}:${targetBeat}:0`,
+            type: 'comp', ch, dur: '4n'
+          });
+        }
+      }
     });
 
     // Drums — patterns adapt to the current time signature (4/4, 3/4, etc.)
