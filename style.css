@@ -348,6 +348,9 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
   font-size: 13px; color: #cde; display: inline-flex; align-items: center; gap: 8px;
   user-select: none; cursor: pointer;
 }
+/* Push the "Upper / Half Fingering" switch to the right edge of
+   its drum-row so it sits bottom-right of the Options panel. */
+.fingering-label { margin-left: auto; }
 .switch-input {
   position: absolute; opacity: 0; pointer-events: none;
 }

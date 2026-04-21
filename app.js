@@ -2148,6 +2148,10 @@ function renderChart(song, barsIn, timesigStr) {
       // Quarter notes per beat (generated from chord scales).
       const beatPitches = quarterNotes[barIdx] || [];
       const notes = [];
+      // Parallel to `notes[]`: pitch per rendered note slot (null for
+      // rests). Used by the fingering overlay so we can look up MIDI
+      // pitches for each note-head in the bar.
+      const barNoteData = [];
       // Per-measure courtesy-accidental state. Keyed by "letter:octave" (the
       // specific staff position) so a courtesy only fires when the same line
       // or space was altered in the previous bar — not just the same letter
@@ -2211,12 +2215,14 @@ function renderChart(song, barsIn, timesigStr) {
 
           const slotIdx = notes.length;
           notes.push(n);
+          barNoteData.push({ pitch: bp.pitch });
           for (let bb = b; bb < b + consume && bb < ts.num; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
           b += consume;
         } else {
           notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: 'qr' }));
+          barNoteData.push(null);
           b++;
         }
       }
@@ -2294,6 +2300,7 @@ function renderChart(song, barsIn, timesigStr) {
         noteStartX: stave.getNoteStartX(),
         noteEndX: stave.getNoteEndX(),
         noteEls: barNoteEls,
+        noteData: barNoteData,
         beatToNoteSlot
       };
 
@@ -2805,6 +2812,7 @@ function stopPlayback() {
   btn.classList.remove('playing');
   clearHighlight();
   clearNoteHighlight();
+  clearFingeringOverlay();
   updateLoopControls();
   updateChordNav();
 }
@@ -2867,6 +2875,144 @@ function resumePlayback() {
 function clearHighlight() {
   document.querySelectorAll('svg .hi-overlay').forEach(el => el.remove());
 }
+
+// ===== Fingering overlay =====
+// 1st-position cello fingering table, ported from the MuseScore
+// `cellofingering.qml` plugin. Key = sounding MIDI pitch, value =
+// finger label. Each string spans 7 semitones:
+//   open (Roman numeral), -1 extension, 1, 2, 3, 4, 4+ (pinky
+//   extension up a half step).
+const FINGERING = {
+  29:'V',  30:'-1', 31:'1', 32:'2', 33:'3', 34:'4', 35:'4+',
+  36:'IV', 37:'-1', 38:'1', 39:'2', 40:'3', 41:'4', 42:'4+',
+  43:'III',44:'-1', 45:'1', 46:'2', 47:'3', 48:'4', 49:'4+',
+  50:'II', 51:'-1', 52:'1', 53:'2', 54:'3', 55:'4', 56:'4+',
+  57:'I',  58:'-1', 59:'1', 60:'2', 61:'3', 62:'4', 63:'4+'
+};
+
+let fingeringOn = false;
+let fingeringOverlayEl = null;
+let fingeringOverlayBarIdx = -1;
+
+function clearFingeringOverlay() {
+  if (fingeringOverlayEl && fingeringOverlayEl.parentNode) {
+    fingeringOverlayEl.parentNode.removeChild(fingeringOverlayEl);
+  }
+  fingeringOverlayEl = null;
+  fingeringOverlayBarIdx = -1;
+}
+
+// Paint upper / half fingering labels above each note in the given
+// bar. Labels stack — upper 1st on top, half below. For notes that
+// sit on or below the top staff line (top line = written A3 = MIDI
+// 57, here info.y + 40 in viewBox units), labels use a fixed Y just
+// above the staff. For higher notes using ledger lines, the labels
+// are pushed further up so they clear the note head + ledger lines.
+function updateFingeringOverlay(barIdx) {
+  if (!fingeringOn) { clearFingeringOverlay(); return; }
+  if (barIdx == null || barIdx < 0) { clearFingeringOverlay(); return; }
+  if (barIdx === fingeringOverlayBarIdx && fingeringOverlayEl) return;
+  clearFingeringOverlay();
+  const info = barElements[barIdx];
+  if (!info || !info.noteEls || !info.noteData) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
+
+  // Screen-rect → SVG user-space coord helper (handles viewBox).
+  const svgRect = svg.getBoundingClientRect();
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const vbOK = vb && vb.width > 0 && vb.height > 0;
+  const vbSX = vbOK ? vb.width  / svgRect.width  : 1;
+  const vbSY = vbOK ? vb.height / svgRect.height : 1;
+  const vbOX = vbOK ? vb.x : 0;
+  const vbOY = vbOK ? vb.y : 0;
+
+  const topLineY = info.y + 40; // top of the 5-line staff
+  const LABEL_Y  = info.y + 22; // default label Y when note is on/below staff
+  const LIFT_GAP = 14;          // extra space above ledger-line notes
+
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('class', 'fingering-overlay');
+  g.setAttribute('pointer-events', 'none');
+  // Append the group to the SVG FIRST so getBBox() on the text
+  // elements returns actual rendered dimensions (it returns zeros on
+  // detached SVG nodes). We need those dimensions to size the white
+  // backdrop rects that sit behind each label.
+  svg.appendChild(g);
+
+  for (let i = 0; i < info.noteData.length; i++) {
+    const nd = info.noteData[i];
+    if (!nd) continue; // rest
+    const noteEl = info.noteEls[i];
+    if (!noteEl) continue;
+    const label = FINGERING[nd.pitch];
+    if (!label) continue;
+    const rect = noteEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const noteX   = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
+    const noteTop = (rect.top                         - svgRect.top ) * vbSY + vbOY;
+
+    // Note on/below top staff line → fixed Y above the staff.
+    // Note above top line (ledger lines) → lift above the note head.
+    const labelY = noteTop < topLineY ? noteTop - LIFT_GAP : LABEL_Y;
+    appendFingeringLabel(g, noteX, labelY, label, '#2e78ff');
+  }
+
+  fingeringOverlayEl = g;
+  fingeringOverlayBarIdx = barIdx;
+}
+
+function appendFingeringLabel(parent, x, y, txt, color) {
+  const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  t.setAttribute('x', x);
+  t.setAttribute('y', y);
+  t.setAttribute('text-anchor', 'middle');
+  t.setAttribute('dominant-baseline', 'central');
+  t.setAttribute('font-family', 'sans-serif');
+  t.setAttribute('font-size', 14);
+  t.setAttribute('font-weight', 'bold');
+  t.setAttribute('fill', color || '#000');
+  t.setAttribute('stroke', 'none');
+  t.textContent = txt;
+  parent.appendChild(t);
+  // Measure the rendered text (parent must already be in the DOM for
+  // this to work) and drop a white rect behind it so the label reads
+  // clearly when it overlaps chord symbols above the staff.
+  let bbox = null;
+  try { bbox = t.getBBox(); } catch (e) {}
+  if (bbox && bbox.width > 0 && bbox.height > 0) {
+    const padX = 3;
+    const padY = 1;
+    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    bg.setAttribute('x', bbox.x - padX);
+    bg.setAttribute('y', bbox.y - padY);
+    bg.setAttribute('width',  bbox.width  + padX * 2);
+    bg.setAttribute('height', bbox.height + padY * 2);
+    bg.setAttribute('fill', '#fff');
+    bg.setAttribute('stroke', 'none');
+    parent.insertBefore(bg, t);
+  }
+}
+
+// Bind the Upper / Half Fingering switch and kick off an initial
+// overlay paint on the selected / playing bar when turned on.
+(function bindFingeringSwitch() {
+  const sw = document.getElementById('fingeringToggle');
+  if (!sw) return;
+  sw.addEventListener('change', (e) => {
+    fingeringOn = e.target.checked;
+    if (!fingeringOn) {
+      clearFingeringOverlay();
+      return;
+    }
+    // Decide which bar to label: the currently playing bar if we're
+    // playing, otherwise the user's selected bar.
+    const target = (playState === 'playing' && currentPlayingBar != null)
+      ? currentPlayingBar
+      : selectedBar;
+    if (target != null) updateFingeringOverlay(target);
+  });
+})();
 
 // ===== Current-note highlight in the score =====
 // Paint the currently-playing note's stavenote group blue so the reader
@@ -3092,6 +3238,21 @@ function selectBar(idx) {
   updateLoopControls();
   if (playState === 'playing') {
     if (!window.currentSong) return;
+    // Inside an active loop, just move the Transport's playhead to
+    // the clicked bar and keep the existing Part running. Rebuilding
+    // the Part via startPlayback was landing on the wrong bar inside
+    // the loop range — the new Part's scheduler interacts oddly with
+    // a Transport.position that already sits inside its loop window.
+    // Seeking works reliably because the Part stays continuous; only
+    // the clock jumps.
+    if (hasLoop && idx >= loopIn && idx <= loopOut
+        && playbackPart && pauseContext) {
+      const pauseOffset = pauseContext.offset || 0;
+      Tone.Transport.position = `${pauseOffset + idx}:0:0`;
+      currentPlayingBar = idx;
+      Tone.Draw.schedule(() => highlightBar(idx), Tone.now());
+      return;
+    }
     const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
     // Fire-and-forget: startPlayback is async only for initAudio(), which
     // has already resolved by the time we're playing. The first barStart /
@@ -3111,6 +3272,9 @@ function selectBar(idx) {
 }
 function highlightBar(idx) {
   clearHighlight();
+  // Refresh the Upper/Half fingering overlay so it follows the
+  // current bar (or user-selected bar when paused/stopped).
+  updateFingeringOverlay(idx);
   const info = barElements[idx];
   if (!info) return;
   const svg = info.rowEl.querySelector('svg');
@@ -3723,18 +3887,16 @@ document.getElementById('playBtn').addEventListener('click', async () => {
   if (!window.currentSong) return;
   const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
   // Pick a starting bar:
-  //   - a complete Loop In / Loop Out pair wins (pinned to loopIn unless the
-  //     user's selection already sits inside the loop range)
+  //   - a complete Loop In / Loop Out pair wins → always start at
+  //     loopIn (the first bar of the practice loop). If the user
+  //     wants to start from a different bar inside the loop, they
+  //     can click that bar during playback — the click seeks to it.
   //   - otherwise a tapped bar
   //   - otherwise the top
   const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
   let startAt;
   if (hasLoop) {
-    if (selectedBar != null && selectedBar >= loopIn && selectedBar <= loopOut) {
-      startAt = selectedBar;
-    } else {
-      startAt = loopIn;
-    }
+    startAt = loopIn;
   } else {
     startAt = selectedBar != null ? selectedBar : 0;
   }
