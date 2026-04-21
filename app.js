@@ -1245,7 +1245,7 @@ function generate1235EighthNotes(bars, ts) {
     const chordScale = exGetScale(chordToCanonical(ce.chord));
     const rootPc = ce.root.pitchClass;
     const rootTpc = ce.root.tpc;
-    const degreeIdx = [0, 2, 4, 6]; // root, 3rd, 5th, 7th scale degrees
+    const degreeIdx = [0, 1, 2, 4]; // 1, 2, 3, 5 — e.g. C7 → C D E G
     const tones = degreeIdx.map(idx => {
       const scaleDeg = chordScale[idx % chordScale.length];
       return { semi: scaleDeg.s, tpc: rootTpc + scaleDeg.t };
@@ -2169,11 +2169,17 @@ function renderChart(song, barsIn, timesigStr) {
   let prevLastNote = null; // { posKey, level } | null
 
   const mpl = measuresPerLine;
-  const measureWidth = chartSize;
+  // Eighth-note exercises (1235) pack 8 notes per bar with lots of
+  // accidentals — give them ~1.6x the per-bar width so VexFlow's
+  // formatter isn't forced to overflow the stave on the right.
+  const measureWidth = Math.round(chartSize * (exerciseMode === '1235' ? 1.6 : 1));
   const leftPadding = 14;
   const rightPadding = 14;
   const firstMeasureClefWidth = 68; // bass clef + 8vb + time sig on line 1
-  const clefOnlyExtra = 44; // bass clef + 8vb on other lines
+  // Previously reserved width for the bass clef on continuation rows.
+  // We now omit the clef on every row after the first and redistribute
+  // this width across the row's bars as extra note space.
+  const clefOnlyExtra = 44;
   const staffY = 26;
   // VexFlow's bass-clef staff lines end up at y ≈ 66 (top) .. 106 (bottom).
   // The lowest F the generator can produce (written F2 via the 8vb clef) sits
@@ -2209,11 +2215,16 @@ function renderChart(song, barsIn, timesigStr) {
     }
     const rowBars = bars.slice(rowStart, rowEnd);
     const isFirstRow = rowStart === 0;
-    const clefExtra = isFirstRow ? firstMeasureClefWidth : clefOnlyExtra;
+    // Only the first row shows the bass clef. Continuation rows omit it
+    // entirely; the width that used to hold the clef is redistributed to
+    // the row's measures as additional note space.
+    const clefExtra = isFirstRow ? firstMeasureClefWidth : 0;
+    const extraPerBar = isFirstRow ? 0 : Math.floor(clefOnlyExtra / mpl);
+    const barWidth = measureWidth + extraPerBar;
     // Always size the row as if it were a full MPL row so short rows (last
     // row, end-of-pass) keep the same per-bar width as full rows and the
     // remainder of the staff sits as empty space to the right.
-    const rowWidth = leftPadding + clefExtra + mpl * measureWidth + rightPadding;
+    const rowWidth = leftPadding + clefExtra + mpl * barWidth + rightPadding;
 
     const rowEl = document.createElement('div');
     rowEl.className = 'staff-row';
@@ -2240,15 +2251,18 @@ function renderChart(song, barsIn, timesigStr) {
     rowBars.forEach((bar, i) => {
       const barIdx = rowStart + i;
       const isFirstInRow = i === 0;
-      const width = measureWidth + (isFirstInRow ? clefExtra : 0);
+      const width = barWidth + (isFirstInRow ? clefExtra : 0);
       // left_bar/right_bar default to true in VexFlow, which draws grey
       // vertical edges at the stave's left and right — the "border" around
       // each measure. Turn them off; we manage measure boundaries via
       // Barline modifiers only (and only for repeats / final / double).
       const stave = new VF.Stave(x, staffY, width, { left_bar: false, right_bar: false });
-      if (isFirstInRow) {
+      // Clef + time signature only on the very first measure of the score.
+      // Continuation rows skip the clef to keep the reading surface dense
+      // and to make more note space available inside each bar.
+      if (isFirstRow && isFirstInRow) {
         stave.addClef('bass', undefined, '8vb');
-        if (isFirstRow) stave.addTimeSignature(ts.str);
+        stave.addTimeSignature(ts.str);
       }
       // Barlines
       // Begin barline only for repeat starts — otherwise we'd draw a line
