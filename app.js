@@ -3134,36 +3134,56 @@ function highlightBar(idx) {
   // user scrolls down to read a later bar, taps it, and the view
   // yanks back up to center it).
   if (playState !== 'playing') return;
-  // Keep the current row AND at least the next row visible below it.
-  // We want the player to see what's coming up, so we scroll any time
-  // there isn't enough empty space under the current row for another
-  // row of similar height. For small loops the current row already
-  // sits well above the bottom edge and no scroll happens; for
-  // progress through a song or long loops, this scrolls as soon as
-  // the next row would start being cropped.
   const chartEl = document.getElementById('chart');
   if (!chartEl) return;
   const rowTop    = info.rowEl.offsetTop;          // relative to .chart
-  const rowHeight = info.rowEl.offsetHeight;
-  const rowBot    = rowTop + rowHeight;
   const viewTop   = chartEl.scrollTop;
   const viewHeight = chartEl.clientHeight;
-  const viewBot   = viewTop + viewHeight;
-  const margin    = 4; // slack so a 1px seam doesn't force a scroll
-  // Measure how much room we have below the current row. If it's at
-  // least one more row's height (plus a small margin), the next row
-  // is visible — leave the scroll alone. Also don't scroll if the
-  // current row is off the TOP (the user must have scrolled manually);
-  // in that case we pull it back into view.
-  const spaceBelow = viewBot - rowBot;
-  const currentTopOk = rowTop >= viewTop + margin;
-  const nextRowFits  = spaceBelow >= rowHeight + margin;
-  if (currentTopOk && nextRowFits) return;
-  // Scroll so the current row sits ~30% down from the top of the
-  // viewport — that way the upper portion shows recently-played rows
-  // and the lower ~70% shows the current + upcoming rows.
+
+  // If a practice loop is active AND the entire loop span fits in
+  // the currently-available chart viewport (which already accounts
+  // for the Note Info / fingerboard panel when it's open, since
+  // clientHeight shrinks accordingly), keep the loop framed and
+  // don't chase individual bar rows. If the loop isn't currently
+  // visible, scroll once to bring the whole range on screen, then
+  // leave it alone as bars cycle.
+  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+  if (hasLoop) {
+    const firstBar = barElements[loopIn];
+    const lastBar  = barElements[loopOut];
+    if (firstBar && lastBar && firstBar.rowEl && lastBar.rowEl) {
+      const loopTop  = firstBar.rowEl.offsetTop;
+      const loopBot  = lastBar.rowEl.offsetTop + lastBar.rowEl.offsetHeight;
+      const loopSpan = loopBot - loopTop;
+      if (loopSpan <= viewHeight - 8) {
+        const loopFullyVisible =
+          loopTop >= viewTop + 4 && loopBot <= viewTop + viewHeight - 4;
+        if (loopFullyVisible) return;
+        // Center the loop in the viewport.
+        const padding = Math.max(0, (viewHeight - loopSpan) / 2);
+        const target = Math.max(0, loopTop - padding);
+        if (Math.abs(target - viewTop) >= 20) {
+          chartEl.scrollTo({ top: target, behavior: 'smooth' });
+        }
+        return;
+      }
+      // Fall through: loop is bigger than the viewport — use the
+      // normal per-row follow-scroll.
+    }
+  }
+
+  // Default behavior: keep the current row ~30% down from the top so
+  // the player can see ~70% of viewport's worth of upcoming rows.
+  // Same target works whether playback is advancing forward or a
+  // long loop just wrapped back to an earlier row — if a wrap takes
+  // us above the current view, the target scrollTop drops below the
+  // viewTop and the chart scrolls up to bring the now-current row
+  // back on screen. Only fires when drift exceeds a small threshold
+  // to avoid per-bar jitter.
   const topOffset = viewHeight * 0.30;
   const targetScrollTop = Math.max(0, rowTop - topOffset);
+  const drift = targetScrollTop - viewTop;
+  if (Math.abs(drift) < 30) return;
   chartEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
 }
 
@@ -3934,7 +3954,12 @@ let librarySongs = [];
 
 async function initSongLibrary() {
   try {
-    const res = await fetch('songs/Songs.html');
+    // `cache: 'no-store'` bypasses browser + CDN caches so a freshly
+    // pushed Songs.html shows up immediately. Without this, GitHub
+    // Pages (or any static host) could keep serving the previous
+    // version for up to 10 minutes after a deploy, which looks like
+    // "my new song didn't appear on my phone".
+    const res = await fetch('songs/Songs.html', { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const text = await res.text();
     let urls = extractAllIrealURLs(text);
