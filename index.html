@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="stylesheet" href="style.css?v=58" />
+<link rel="stylesheet" href="style.css?v=59" />
 </head>
 <body>
 <div id="app">
@@ -43,10 +43,12 @@
         <span class="drum-label">Exercise</span>
         <select id="exerciseSelect" class="exercise-select">
           <option value="scale" selected>Scale Notes</option>
+          <option value="triads">Triads</option>
           <option value="chord">Chord Tones</option>
           <option value="broken3">Broken 3rds</option>
           <option value="cantus">Cantus Firmus</option>
           <option value="1235">1235</option>
+          <option value="3579">3579</option>
         </select>
       </div>
       <div class="drum-row">
@@ -75,6 +77,19 @@
         </div>
       </div>
       <div class="drum-row">
+        <span class="drum-label">Count-in</span>
+        <div class="seg" id="countInSeg" role="tablist">
+          <button type="button" data-count="0">Off</button>
+          <button type="button" data-count="1" class="active">1 bar</button>
+          <button type="button" data-count="2">2 bars</button>
+        </div>
+        <label class="wake-label embellish-label">
+          <input type="checkbox" id="embellishToggle" class="switch-input" checked />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Embellish Piano</span>
+        </label>
+      </div>
+      <div class="drum-row">
         <span class="drum-label">Drums</span>
         <div class="seg" id="drumSeg" role="tablist">
           <button type="button" data-mode="ride" class="active">Real</button>
@@ -84,7 +99,7 @@
         <input type="range" id="drumVol" class="drum-vol" min="0" max="100" value="75" aria-label="Drum volume" />
       </div>
       <div class="drum-row">
-        <span class="drum-label">Per line</span>
+        <span class="drum-label">Bars / Line</span>
         <div class="seg" id="mplSeg" role="tablist">
           <button type="button" data-mpl="1">1</button>
           <button type="button" data-mpl="2" class="active">2</button>
@@ -92,8 +107,6 @@
           <button type="button" data-mpl="6">6</button>
           <button type="button" data-mpl="8">8</button>
         </div>
-      </div>
-      <div class="drum-row">
         <span class="drum-label">Size</span>
         <div class="seg" id="sizeSeg" role="tablist">
           <button type="button" data-size="240">S</button>
@@ -111,23 +124,15 @@
         </div>
       </div>
       <div class="drum-row">
-        <span class="drum-label">Count-in</span>
-        <div class="seg" id="countInSeg" role="tablist">
-          <button type="button" data-count="0">Off</button>
-          <button type="button" data-count="1" class="active">1 bar</button>
-          <button type="button" data-count="2">2 bars</button>
-        </div>
-      </div>
-      <div class="drum-row">
         <label class="wake-label">
           <input type="checkbox" id="wakeLock" class="switch-input" checked />
           <span class="switch" aria-hidden="true"></span>
           <span>Stay awake</span>
         </label>
-        <label class="wake-label embellish-label">
-          <input type="checkbox" id="embellishToggle" class="switch-input" checked />
+        <label class="wake-label play-score-label">
+          <input type="checkbox" id="playScoreToggle" class="switch-input" />
           <span class="switch" aria-hidden="true"></span>
-          <span>Embellish</span>
+          <span>Play Score</span>
         </label>
         <label class="wake-label fingering-label">
           <input type="checkbox" id="fingeringToggle" class="switch-input" />
@@ -166,6 +171,6 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
-<script src="app.js?v=176"></script>
+<script src="app.js?v=194"></script>
 </body>
 </html>
