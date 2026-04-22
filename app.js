@@ -941,34 +941,48 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
         while (sp > EX_HIGH) sp -= 12;
         baseIdx = findClosestIndex(tones, sp);
       } else if (virtualBasePitch >= 0) {
-        baseIdx = findClosestIndex(tones, virtualBasePitch);
+        // Find the closest new-scale tone to the virtual next-base pitch.
+        // When two tones are equidistant from virtualBasePitch (a true
+        // tie — e.g. virtual Ab sitting exactly between G and A in C
+        // mixolydian), break the tie toward the CURRENT travel direction:
+        // ascending prefers the higher tie, descending prefers the lower.
+        // That keeps the broken-3rds zigzag flowing in its established
+        // direction across chord boundaries rather than jumping over the
+        // virtual base.
+        //
+        // Examples this resolves on Green Dolphin Street:
+        //   - EbMaj7 ending ascending Ab-F-G-Bb (direction=+1 after the
+        //     range-boundary flip): virtual Ab ties G/A in C mix → picks
+        //     A → pairs A-C, Bb-D for a natural ascending continuation.
+        //   - Ebm7 ending descending Eb-C (direction=-1): virtual Db
+        //     ties C/D in F mix → picks C (same pitch as lastPitch), the
+        //     conflict branch below then nudges to upper-neighbor D for
+        //     the Eb-C-D-Bb enclosure.
+        let bestIdx = 0, bestDiff = Math.abs(tones[0].pitch - virtualBasePitch);
+        for (let i = 1; i < tones.length; i++) {
+          const d = Math.abs(tones[i].pitch - virtualBasePitch);
+          if (d < bestDiff) { bestDiff = d; bestIdx = i; }
+          else if (d === bestDiff) {
+            if (direction > 0 && tones[i].pitch > tones[bestIdx].pitch) bestIdx = i;
+            else if (direction < 0 && tones[i].pitch < tones[bestIdx].pitch) bestIdx = i;
+          }
+        }
+        baseIdx = bestIdx;
         // If the virtual next base lands on the LITERAL last note we just
         // played, nudge off so we don't sound the same pitch twice in a
-        // row across the barline. Prefer stepping in the OPPOSITE of
-        // `direction` — that's a proper enclosure / neighbor approach
-        // (upper neighbor when descending, lower when ascending) — and
-        // only fall back to stepping further in the current direction
-        // if the opposite-direction neighbor also conflicts or is out
-        // of range.
-        //
-        // We only check `lastPitch`, NOT `lastBasePitch`. A match with
-        // lastBasePitch means the pitch was played TWO notes ago, which
-        // is not an immediate repeat and is musically fine — guarding
-        // against it caused spurious nudges at chord boundaries (e.g.
-        // Green Dolphin's "EbMaj7 → C7" where Ab-F-G-Bb ends with
-        // lastBase=G, virtualBase=Ab in C mix ties between G and A,
-        // closest picks G, which matched lastBasePitch and was wrongly
-        // nudged down to F instead of the desired G).
-        //
-        // Example where this fires correctly: Ebm7 ending Eb→C, new
-        // chord F7/Eb → virtual Db ties C and D, closest picks C,
-        // C === lastPitch so upper-neighbor D is picked, yielding
-        // Eb-C-D-Bb across the barline.
+        // row across the barline. Prefer the opposite-of-direction
+        // neighbor (enclosure / upper-neighbor when descending, lower
+        // when ascending); fall back to stepping further in the current
+        // direction if the opposite-direction neighbor also conflicts
+        // or is out of range. We only check `lastPitch`, NOT
+        // `lastBasePitch` — a match with lastBasePitch means the pitch
+        // was played two notes ago, which is not an immediate repeat
+        // and is musically fine.
         const conflicts = (idx) => idx < 0 || idx >= tones.length ||
           tones[idx].pitch === lastPitch;
         if (conflicts(baseIdx)) {
-          const up = baseIdx - direction; // enclosure / upper-neighbor when descending
-          const down = baseIdx + direction; // continue zig-zag further in current direction
+          const up = baseIdx - direction;
+          const down = baseIdx + direction;
           if (!conflicts(up)) baseIdx = up;
           else if (!conflicts(down)) baseIdx = down;
           else if (down >= 0 && down < tones.length) baseIdx = down;
@@ -978,7 +992,19 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
         baseIdx = cont.idx;
         direction = cont.dir;
       }
-      phase = 0; // every chord change starts on a fresh base note
+      // NOTE: We intentionally do NOT reset `phase = 0` here. Preserving
+      // phase across chord boundaries lets the zigzag continue naturally
+      // when a chord change lands mid-pair (phase=1, a 3rd still pending).
+      // In 4/4 with full-bar chords, every pair completes and phase is 0
+      // at the boundary anyway — so preservation is a no-op. In 3/4 or
+      // any partial-chord span where phase ends odd, preservation avoids
+      // the "every chord starts on a base note" behavior that was causing
+      // identical bars in a row (e.g. Alice in Wonderland's minor 251
+      // `Bm7b5 | E7b9 | Am7` in 3/4: lastPitch=F2 going into each bar
+      // → virtual F2 maps to F2 exact in each scale → conflict-nudged to
+      // G2/G#2 → every bar plays `G* E F`). Preserving phase=1 instead
+      // makes the first beat of each new chord play the pending 3rd
+      // relative to the newly-mapped baseIdx, varying the line.
     }
     if (tones.length === 0) return;
 
