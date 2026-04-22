@@ -3685,7 +3685,7 @@ function midiToName(m) {
 }
 
 // ===== Tone.js playback =====
-let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut;
+let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut, pianoOut;
 let realHihat, brushSweep, brushTap;
 let guitar; // Sampler used by the "Play Score" switch.
 // Real drum loops, looped via the Transport. Each entry records the source
@@ -3709,6 +3709,10 @@ async function initAudio() {
   await Tone.start();
   const reverb = new Tone.Reverb({ decay: 2.2, wet: 0.18 }).toDestination();
 
+  // Piano comping bus — Piano-row volume slider controls this gain.
+  const initPianoVol = parseInt(document.getElementById('pianoVol').value, 10) / 100;
+  pianoOut = new Tone.Gain(isFinite(initPianoVol) ? initPianoVol : 0.4).connect(reverb);
+
   // Salamander Grand Piano samples hosted by the Tone.js project
   piano = new Tone.Sampler({
     urls: {
@@ -3722,8 +3726,11 @@ async function initAudio() {
     },
     release: 1.2,
     baseUrl: 'https://tonejs.github.io/audio/salamander/',
-    volume: -6
-  }).connect(reverb);
+    // Base sampler volume lifted ~3 dB (≈ 40% louder in linear gain)
+    // so the Piano slider at 40% sits at a comfortable level without
+    // needing to move the slider.
+    volume: -3
+  }).connect(pianoOut);
 
   // Clean electric (jazz) guitar sampler for the "Play Score" switch.
   // Uses the nbrosowsky/tonejs-instruments guitar-electric pack.
@@ -3756,9 +3763,13 @@ async function initAudio() {
 
   document.getElementById('status').textContent = 'Loading samples…';
 
-  // Shared drum bus so a single slider controls all drum volumes
+  // Shared drum bus so a single slider controls all drum volumes.
+  // Applied through a 0.9 trim — brings the drums down ~10% relative
+  // to the slider reading so the 40% default sits at a more balanced
+  // level against the piano without requiring the user to move the
+  // slider. The listener below mirrors this scaling.
   const initVol = parseInt(document.getElementById('drumVol').value, 10) / 100;
-  drumsOut = new Tone.Gain(isFinite(initVol) ? initVol : 0.75).toDestination();
+  drumsOut = new Tone.Gain((isFinite(initVol) ? initVol : 0.4) * 0.9).toDestination();
 
   const hatFilter = new Tone.Filter({ type: 'highpass', frequency: 7000, Q: 0.8 }).connect(drumsOut);
   hat = new Tone.NoiseSynth({
@@ -5399,7 +5410,13 @@ document.querySelectorAll('#repeatSeg button').forEach(b => {
 
 document.getElementById('drumVol').addEventListener('input', e => {
   const v = parseInt(e.target.value, 10) / 100;
-  if (drumsOut) drumsOut.gain.rampTo(v, 0.05);
+  // Same 0.9 trim as the init path so drag-changes match the default.
+  if (drumsOut) drumsOut.gain.rampTo(v * 0.9, 0.05);
+});
+
+document.getElementById('pianoVol').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10) / 100;
+  if (pianoOut) pianoOut.gain.rampTo(v, 0.05);
 });
 
 // Options panel toggle
