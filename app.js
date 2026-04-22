@@ -1320,7 +1320,10 @@ function parseMusicXML(doc) {
     const d = el.querySelector('duration');
     if (!d) return 0;
     const ticks = parseInt(d.textContent, 10) || 0;
-    return divisions > 0 ? (ticks * 2 / divisions) : 0; // 2 = eighths per quarter
+    // 24th-note resolution: 6 steps per quarter. This accommodates
+    // triplets (quarter triplet = 4 steps, 8th triplet = 2 steps) as
+    // whole integers alongside standard durations (quarter = 6, 8th = 3).
+    return divisions > 0 ? (ticks * 6 / divisions) : 0;
   }
 
   function readPitch(pitchEl) {
@@ -1379,13 +1382,45 @@ function parseMusicXML(doc) {
               if (type === 'start') tieStart = true;
               else if (type === 'stop') tieStop = true;
             });
+            // Tuplet bracket markers (start/stop) from <notations><tuplet>.
+            // Middle members of a tuplet carry neither flag.
+            let tupletStart = false, tupletStop = false;
+            el.querySelectorAll('notations > tuplet').forEach(t => {
+              const type = t.getAttribute('type');
+              if (type === 'start') tupletStart = true;
+              else if (type === 'stop') tupletStop = true;
+            });
+            // `<time-modification>` tells us the ratio (e.g. 3:2 for
+            // triplets). Its presence means this note is part of a
+            // tuplet — even the middle members carry the modification.
+            const tm = el.querySelector('time-modification');
+            let tupletActual = null, tupletNormal = null;
+            if (tm) {
+              const a = tm.querySelector('actual-notes');
+              const n = tm.querySelector('normal-notes');
+              if (a && n) {
+                tupletActual = parseInt(a.textContent, 10) || null;
+                tupletNormal = parseInt(n.textContent, 10) || null;
+              }
+            }
+            // Display type (quarter, eighth, etc.) — needed for tuplets
+            // because the raw `duration` ticks don't match a standard
+            // note value (a quarter triplet has 2/3 of a quarter's
+            // duration but renders as a quarter glyph).
+            const typeEl = el.querySelector('type');
+            const displayType = typeEl ? (typeEl.textContent || '').trim() : null;
             notes.push({
               stepStart: Math.round(cursor),
               durationSteps: dSteps,
               midi: p.midi,
               tpc: p.tpc,
               tieStart,
-              tieStop
+              tieStop,
+              tupletStart,
+              tupletStop,
+              tupletActual,
+              tupletNormal,
+              displayType
             });
           }
           cursor += dSteps;
@@ -1436,7 +1471,9 @@ function midiToHeadNotes(midi) {
   }
   const seq = Array.from(topByTick.values()).sort((a, b) => a.ticks - b.ticks);
   const ppq = (midi.header && midi.header.ppq) || 480;
-  const ticksPerStep = ppq / 2;
+  // 24th-note resolution matches the MusicXML head parser so both
+  // pipelines feed the same downstream rendering/scheduling path.
+  const ticksPerStep = ppq / 6;
   // Key-based enharmonic guess (MIDI has no spelling info).
   const SHARP_TPCS = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19];
   const FLAT_TPCS  = [14,  9, 16, 11, 18, 13,  8, 15, 10, 17, 12, 19];
@@ -1480,7 +1517,11 @@ async function loadSongMidi(title) {
 // score is available for this song.
 function generateHeadFromScore(bars, ts) {
   const beatsPerBar = ts.num;
-  const stepsPerBar = beatsPerBar * 2; // 8th-note resolution
+  // 24th-note resolution (6 steps per quarter). Fine enough to express
+  // triplets (quarter triplet = 4 steps, 8th triplet = 2 steps) as
+  // integers alongside standard durations (quarter = 6, 8th = 3). The
+  // renderer and scheduler detect subdiv=6 from stepsPerBar / beatsPerBar.
+  const stepsPerBar = beatsPerBar * 6;
   const chordEvents = buildChordEventList(bars);
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
@@ -1492,7 +1533,7 @@ function generateHeadFromScore(bars, ts) {
   const results = bars.map(() => new Array(stepsPerBar).fill(null));
   const head = window.currentSong && window.currentSong.head;
   if (!head || !head.notes || !head.notes.length) {
-    return { results, chordEvents, patterns, effective, subdivisions: 2 };
+    return { results, chordEvents, patterns, effective, subdivisions: 6 };
   }
 
   // Apply the current Key-seg transposition to the loaded melody.
@@ -1553,6 +1594,11 @@ function generateHeadFromScore(bars, ts) {
       durationSteps: n.durationSteps,
       tieStart: n.tieStart,
       tieStop: n.tieStop,
+      tupletStart: n.tupletStart,
+      tupletStop: n.tupletStop,
+      tupletActual: n.tupletActual,
+      tupletNormal: n.tupletNormal,
+      displayType: n.displayType,
       midi, tpc
     };
   });
@@ -1568,13 +1614,17 @@ function generateHeadFromScore(bars, ts) {
   //   `chunkTiesForward`: this chunk ties to the next chunk of the
   //     same note (more-bars-to-come), OR — on the very last chunk
   //     of the note — this note had an explicit XML tieStart.
+  // Standard durations at 24th-note resolution: whole = 24, dotted-
+  // half = 18, half = 12, dotted-quarter = 9, quarter = 6, eighth = 3.
+  // (16ths would be 1.5 — non-integer at this resolution — but the Head
+  // path doesn't currently emit them.)
   const DUR_FITS = [
-    { dur: 'w',  steps: 8 },
-    { dur: 'h.', steps: 6 },
-    { dur: 'h',  steps: 4 },
-    { dur: 'q.', steps: 3 },
-    { dur: 'q',  steps: 2 },
-    { dur: '8',  steps: 1 }
+    { dur: 'w',  steps: 24 },
+    { dur: 'h.', steps: 18 },
+    { dur: 'h',  steps: 12 },
+    { dur: 'q.', steps: 9 },
+    { dur: 'q',  steps: 6 },
+    { dur: '8',  steps: 3 }
   ];
   function emitChunk(barIdx, startStep, stepsInBar, pitch, tpc, tieFromPrevChunk, chunkTiesForward) {
     if (barIdx < 0 || barIdx >= bars.length) return;
@@ -1599,7 +1649,45 @@ function generateHeadFromScore(bars, ts) {
     }
   }
 
+  // Map MusicXML <type> values to VexFlow duration tokens. Needed for
+  // tuplet members because their raw <duration> doesn't equal a standard
+  // note value — only <type> reveals the glyph (quarter triplets render
+  // as quarter-note glyphs, 8th triplets as 8th-note glyphs).
+  const TYPE_TO_VF = {
+    'whole': 'w', 'half': 'h', 'quarter': 'q', 'eighth': '8', '16th': '16', '32nd': '32'
+  };
+
   transposedNotes.forEach(note => {
+    // Tuplet members bypass the bar-splitting / tie-chunking logic.
+    // A tuplet is always contained within one bar and emits a single
+    // slot per note — the renderer groups consecutive tuplet slots
+    // into a VF.Tuplet. `stepsConsumed` carries the actual step
+    // footprint (e.g. 4 for a quarter triplet at subdiv=6) since it
+    // doesn't match the glyph's standard step count.
+    if (note.tupletActual && note.tupletNormal && note.displayType) {
+      const stepsConsumed = Math.max(1, Math.round(note.durationSteps));
+      const vfDur = TYPE_TO_VF[note.displayType] || 'q';
+      const barIdx = Math.floor(note.stepStart / stepsPerBar);
+      const stepInBar = note.stepStart - barIdx * stepsPerBar;
+      if (barIdx < 0 || barIdx >= bars.length) return;
+      if (results[barIdx][stepInBar]) return;
+      results[barIdx][stepInBar] = {
+        pitch: note.midi,
+        tpc: note.tpc,
+        duration: vfDur,
+        stepsConsumed,
+        tieFromPrev: !!note.tieStop,
+        tieToNext: !!note.tieStart,
+        tuplet: {
+          start: !!note.tupletStart,
+          stop: !!note.tupletStop,
+          actual: note.tupletActual,
+          normal: note.tupletNormal
+        }
+      };
+      return;
+    }
+
     const totalSteps = Math.max(1, Math.round(note.durationSteps));
     // Walk across bar boundaries. When a note extends past the end
     // of its bar, split it: emit one chunk for the remainder of the
@@ -1629,7 +1717,7 @@ function generateHeadFromScore(bars, ts) {
     }
   });
 
-  return { results, chordEvents, patterns, effective, subdivisions: 2 };
+  return { results, chordEvents, patterns, effective, subdivisions: 6 };
 }
 
 // ===== Chord-tone eighth-note arpeggio factory =====
@@ -2772,6 +2860,10 @@ function renderChart(song, barsIn, timesigStr) {
     let pendingTieFromBar = null; // { note: VF.StaveNote }
     // Ties (within-bar and cross-bar) to draw after all bars render.
     const rowTies = [];
+    // Tuplet groups (e.g. quarter triplets) collected per row. Each
+    // entry is { notes: [VF.StaveNote, ...], ratio: { actual, normal } }
+    // and gets wrapped in a VF.Tuplet + drawn after the voice.
+    const rowTuplets = [];
     rowBars.forEach((bar, i) => {
       const barIdx = rowStart + i;
       const isFirstInRow = i === 0;
@@ -2866,16 +2958,21 @@ function renderChart(song, barsIn, timesigStr) {
 
       // Detect subdivision from the generator's output. Quarter-note
       // generators return one slot per beat (length == ts.num); the
-      // 1235 generator returns eighth notes (length == 2 * ts.num).
+      // 1235 generator returns eighth notes (length == 2 * ts.num);
+      // the Head generator uses 24ths (length == 6 * ts.num) so
+      // triplets fit as integer step counts.
       const stepsPerBar = beatPitches.length || ts.num;
       const subdiv      = Math.max(1, Math.round(stepsPerBar / ts.num));
-      const defaultDur  = subdiv === 2 ? '8'  : 'q';
-      const restDur     = subdiv === 2 ? '8r' : 'qr';
-      // Steps-per-duration for both resolutions. A quarter = 2 steps
-      // at 8th resolution, 1 step at quarter resolution, etc.
-      const DUR_TO_STEPS = subdiv === 2
-        ? { 'w': 8, 'h.': 6, 'h': 4, 'q.': 3, 'q': 2, '8': 1 }
-        : { 'w': 4, 'h.': 3, 'h': 2, 'q.': 1.5, 'q': 1 };
+      const defaultDur  = subdiv >= 2 ? '8' : 'q';
+      const restDur     = subdiv >= 2 ? '8r' : 'qr';
+      // Steps-per-duration for each resolution. A quarter = 2 steps
+      // at 8th resolution, 6 steps at 24th resolution, 1 step at
+      // quarter resolution.
+      const DUR_TO_STEPS = subdiv === 6
+        ? { 'w': 24, 'h.': 18, 'h': 12, 'q.': 9, 'q': 6, '8': 3 }
+        : subdiv === 2
+        ? { 'w': 8,  'h.': 6,  'h': 4,  'q.': 3, 'q': 2, '8': 1 }
+        : { 'w': 4,  'h.': 3,  'h': 2,  'q.': 1.5, 'q': 1 };
       // For each step in this bar, which entry of `notes[]` covers it?
       // Cantus firmus writes one long note across multiple beats, so the
       // same slot index can be referenced by several steps. Rests get -1.
@@ -2885,12 +2982,22 @@ function renderChart(song, barsIn, timesigStr) {
       // tieFromPrev can be paired with it). The row-scoped
       // `pendingTieFromBar` covers the cross-bar case.
       let pendingTieInBar = null;
+      // Tuplet bookkeeping: when a slot is flagged `tuplet.start`, we
+      // collect subsequent tuplet notes into this array until we see
+      // `tuplet.stop`, then build a VF.Tuplet that wraps them so VexFlow
+      // renders the "3" bracket and proportional spacing.
+      let currentTupletNotes = null;
+      let currentTupletRatio = null;
       let b = 0;
       while (b < stepsPerBar) {
         const bp = beatPitches[b];
         if (bp) {
           const dur = bp.duration || defaultDur;
-          const consume = DUR_TO_STEPS[dur] || 1;
+          // Tuplet members carry an explicit `stepsConsumed` because
+          // their glyph's standard step count (e.g. 6 for a quarter at
+          // subdiv=6) doesn't match their actual footprint (4 for a
+          // quarter triplet). Non-tuplet notes fall back to the lookup.
+          const consume = bp.stepsConsumed || DUR_TO_STEPS[dur] || 1;
           const { key, letterIdx, level, octave } = midiTpcToVexKey(bp.pitch, bp.tpc);
           const posKey = letterIdx + ':' + octave;
           // Stem direction: on/above middle line of the staff → stem down,
@@ -2966,6 +3073,32 @@ function renderChart(song, barsIn, timesigStr) {
           for (let bb = b; bb < b + consume && bb < stepsPerBar; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
+          // Tuplet collection: accumulate consecutive tuplet members
+          // into a group, then construct the VF.Tuplet as soon as the
+          // stop marker arrives. Construction (not just drawing) has to
+          // happen BEFORE voice.draw runs so VexFlow's tick multiplier
+          // (normal/actual) is applied to every member before the
+          // Formatter positions them. The bracket gets drawn later,
+          // after voice.draw, via `rowTuplets`.
+          if (bp.tuplet) {
+            if (bp.tuplet.start) {
+              currentTupletNotes = [n];
+              currentTupletRatio = { actual: bp.tuplet.actual, normal: bp.tuplet.normal };
+            } else if (currentTupletNotes) {
+              currentTupletNotes.push(n);
+            }
+            if (bp.tuplet.stop && currentTupletNotes) {
+              const ratio = currentTupletRatio || { actual: 3, normal: 2 };
+              const tupletObj = new VF.Tuplet(currentTupletNotes, {
+                num_notes: ratio.actual,
+                notes_occupied: ratio.normal,
+                bracketed: true
+              });
+              rowTuplets.push({ tuplet: tupletObj });
+              currentTupletNotes = null;
+              currentTupletRatio = null;
+            }
+          }
           b += consume;
         } else {
           // Coalesce a run of empty eighth-note slots into the fewest
@@ -2976,12 +3109,14 @@ function renderChart(song, barsIn, timesigStr) {
           // (beat) boundary.
           let run = 0;
           while (b + run < stepsPerBar && !beatPitches[b + run]) run++;
-          // Rests, largest first, measured in eighth-note steps (subdiv=2)
-          // or quarter-note steps (subdiv=1). Half-bar alignment prevents
-          // a half-rest spanning beats 2-3 across the middle of the bar.
-          const restOptions = subdiv === 2
-            ? [ { dur: 'h', steps: 4 }, { dur: 'q', steps: 2 }, { dur: '8', steps: 1 } ]
-            : [ { dur: 'h', steps: 2 }, { dur: 'q', steps: 1 } ];
+          // Rests, largest first, measured in steps at the active
+          // subdivision. Half-bar alignment prevents a half-rest
+          // spanning beats 2-3 across the middle of the bar.
+          const restOptions = subdiv === 6
+            ? [ { dur: 'h', steps: 12 }, { dur: 'q', steps: 6 }, { dur: '8', steps: 3 } ]
+            : subdiv === 2
+            ? [ { dur: 'h', steps: 4  }, { dur: 'q', steps: 2 }, { dur: '8', steps: 1 } ]
+            : [ { dur: 'h', steps: 2  }, { dur: 'q', steps: 1 } ];
           const halfBarSteps = stepsPerBar / 2;
           while (run > 0) {
             // Biggest rest that (a) fits in remaining run, (b) doesn't
@@ -3025,7 +3160,7 @@ function renderChart(song, barsIn, timesigStr) {
       // of its own flag. Doing this after draw leaves each 8th note
       // with its flag already painted plus the beam on top.
       let barBeams = [];
-      if (subdiv === 2) {
+      if (subdiv >= 2) {
         // Beam group size depends on the time signature:
         //   4/4 → 4 eighth notes per beam (4+4 across the bar), so a
         //         "4 eighths + 4 rests" bar produces a single 4-note
@@ -3048,6 +3183,16 @@ function renderChart(song, barsIn, timesigStr) {
       const beforeCount = rowEl.querySelectorAll('.vf-stavenote').length;
       voice.draw(context, stave);
       barBeams.forEach(beam => beam.setContext(context).draw());
+      // Draw any tuplet brackets whose members live in this bar. The
+      // VF.Tuplet objects were constructed during the slot loop (so
+      // their tick multipliers fed into the Formatter) but drawing
+      // must happen after voice.draw so the bracket overlays the
+      // notes.
+      rowTuplets.forEach(t => {
+        if (t._drawn) return;
+        t.tuplet.setContext(context).draw();
+        t._drawn = true;
+      });
       const allStaveNotes = rowEl.querySelectorAll('.vf-stavenote');
       const barNoteEls = Array.from(allStaveNotes).slice(beforeCount);
 
@@ -4434,8 +4579,21 @@ async function startPlayback(song, bars, startBarIdx = 0) {
       // sampler can trigger ONCE at the tie-start with a sustain
       // covering the whole chain instead of re-attacking on every
       // tied piece.
-      const DUR_STEPS = { 'w': 8, 'h.': 6, 'h': 4, 'q.': 3, 'q': 2, '8': 1 };
-      const stepsForChunk = (info) => DUR_STEPS[info && info.duration] || 1;
+      // Map VexFlow duration tokens → step counts at the active
+      // resolution. Head/tuplet-capable bars use 24ths (stepsPerBeat=6),
+      // the 1235/3579 generators use 8ths (stepsPerBeat=2), and quarter
+      // generators use 1. Tuplet notes carry `stepsConsumed` explicitly
+      // since their actual footprint differs from the glyph's standard.
+      const DUR_STEPS = stepsPerBeat === 6
+        ? { 'w': 24, 'h.': 18, 'h': 12, 'q.': 9, 'q': 6, '8': 3 }
+        : stepsPerBeat === 2
+        ? { 'w': 8,  'h.': 6,  'h': 4,  'q.': 3, 'q': 2, '8': 1 }
+        : { 'w': 4,  'h.': 3,  'h': 2,  'q.': 2, 'q': 1, '8': 1 };
+      const stepsForChunk = (info) => {
+        if (!info) return 1;
+        if (info.stepsConsumed) return info.stepsConsumed;
+        return DUR_STEPS[info.duration] || 1;
+      };
       // Scan forward through slots (possibly crossing bars) from a
       // given (barNum, slot) until we reach the end of a tied chain.
       // Returns the chain's total length in steps.
