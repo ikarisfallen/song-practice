@@ -229,32 +229,28 @@ function buildBars(tokens) {
   return { bars, timesig: timesig || '44' };
 }
 
-// Expand repeats, DC/DS, codas into a flat playback sequence of bars
+// Expand simple repeats and D.C./D.S. al Coda into a flat playback
+// sequence of bars. "D.C. al Fine" is NOT handled here — it's
+// already flattened at load time by expandDCAlFine() so the bars
+// passed in literally include the ABA structure.
 function expandForPlayback(bars) {
-  // Find positions
-  let startRepeat = 0;
-  let coda = -1, segno = -1, fine = -1;
+  let coda = -1, segno = -1;
   bars.forEach((b, i) => {
     if (b.markers.some(m => m.type === 'coda')) coda = i;
     if (b.markers.some(m => m.type === 'segno')) segno = i;
-    if (b.markers.some(m => m.type === 'comment' && /fine/i.test(m.text))) fine = i;
   });
 
   const out = [];
-  let dcAlCoda = false, dsAlCoda = false, dcAlFine = false;
-  let repeatStart = 0;
+  let dcAlCoda = false, dsAlCoda = false;
 
   for (let i = 0; i < bars.length; i++) {
     const b = bars[i];
-    if (b.leftBar === 'repeatStart') repeatStart = out.length;
 
-    // Handle comments to set DC/DS flags for after this bar
     b.markers.forEach(m => {
       if (m.type !== 'comment') return;
-      const t = m.text.toLowerCase();
+      const t = (m.text || '').toLowerCase();
       if (t.includes('d.c. al coda') || t.includes('dc al coda')) dcAlCoda = true;
       if (t.includes('d.s. al coda') || t.includes('ds al coda')) dsAlCoda = true;
-      if (t.includes('d.c. al fine') || t.includes('dc al fine')) dcAlFine = true;
     });
 
     out.push({ bar: b, idx: i });
@@ -266,26 +262,23 @@ function expandForPlayback(bars) {
       for (let j = s; j <= i; j++) out.push({ bar: bars[j], idx: j });
     }
 
-    // After bar, check DC/DS/Fine
-    if (dcAlFine && fine >= 0) {
-      for (let j = 0; j <= fine; j++) out.push({ bar: bars[j], idx: j });
-      dcAlFine = false;
-      break;
-    }
+    // D.C. / D.S. al Coda fire mid-loop: the coda tail at the end
+    // of the chart is the branch target for the post-jump "al Coda"
+    // leg, not part of the linear first pass.
     if (dcAlCoda && coda >= 0) {
       for (let j = 0; j < coda; j++) out.push({ bar: bars[j], idx: j });
-      // then jump to coda and continue
       for (let j = coda; j < bars.length; j++) out.push({ bar: bars[j], idx: j });
       dcAlCoda = false;
-      break;
+      return out;
     }
     if (dsAlCoda && segno >= 0 && coda >= 0) {
       for (let j = segno; j < coda; j++) out.push({ bar: bars[j], idx: j });
       for (let j = coda; j < bars.length; j++) out.push({ bar: bars[j], idx: j });
       dsAlCoda = false;
-      break;
+      return out;
     }
   }
+
   return out;
 }
 
@@ -949,14 +942,36 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
         baseIdx = findClosestIndex(tones, sp);
       } else if (virtualBasePitch >= 0) {
         baseIdx = findClosestIndex(tones, virtualBasePitch);
-        // If the virtual next base lands on the same pitch we just played
-        // (either the last base OR the last 3rd — i.e. the literal last
-        // note of the previous bar), step one more scale degree in the
-        // current direction so we don't sound the same pitch twice in a
-        // row across the barline.
-        if (tones[baseIdx].pitch === lastPitch || tones[baseIdx].pitch === lastBasePitch) {
-          const adv = baseIdx + direction;
-          if (adv >= 0 && adv < tones.length) baseIdx = adv;
+        // If the virtual next base lands on the LITERAL last note we just
+        // played, nudge off so we don't sound the same pitch twice in a
+        // row across the barline. Prefer stepping in the OPPOSITE of
+        // `direction` — that's a proper enclosure / neighbor approach
+        // (upper neighbor when descending, lower when ascending) — and
+        // only fall back to stepping further in the current direction
+        // if the opposite-direction neighbor also conflicts or is out
+        // of range.
+        //
+        // We only check `lastPitch`, NOT `lastBasePitch`. A match with
+        // lastBasePitch means the pitch was played TWO notes ago, which
+        // is not an immediate repeat and is musically fine — guarding
+        // against it caused spurious nudges at chord boundaries (e.g.
+        // Green Dolphin's "EbMaj7 → C7" where Ab-F-G-Bb ends with
+        // lastBase=G, virtualBase=Ab in C mix ties between G and A,
+        // closest picks G, which matched lastBasePitch and was wrongly
+        // nudged down to F instead of the desired G).
+        //
+        // Example where this fires correctly: Ebm7 ending Eb→C, new
+        // chord F7/Eb → virtual Db ties C and D, closest picks C,
+        // C === lastPitch so upper-neighbor D is picked, yielding
+        // Eb-C-D-Bb across the barline.
+        const conflicts = (idx) => idx < 0 || idx >= tones.length ||
+          tones[idx].pitch === lastPitch;
+        if (conflicts(baseIdx)) {
+          const up = baseIdx - direction; // enclosure / upper-neighbor when descending
+          const down = baseIdx + direction; // continue zig-zag further in current direction
+          if (!conflicts(up)) baseIdx = up;
+          else if (!conflicts(down)) baseIdx = down;
+          else if (down >= 0 && down < tones.length) baseIdx = down;
         }
       } else {
         const cont = findSmoothContinuation(tones, lastPitch, lastTpc, direction);
@@ -1221,6 +1236,374 @@ function midiTpcToVexKey(soundingMidi, tpc) {
   const key = letter.toLowerCase() + acc + '/' + octave;
   const LETTER_IDX = { F: 0, C: 1, G: 2, D: 3, A: 4, E: 5, B: 6 };
   return { key, acc, letterIdx: LETTER_IDX[letter], level: altAdjust, octave };
+}
+
+// ===== Head (from MusicXML or MIDI file) =====
+// Common note shape produced by both parsers so the generator
+// doesn't need to know which source it came from:
+//   { stepStart: int,      // 0 = bar 0 beat 1, in eighth-note units
+//     durationSteps: num,  // length in eighth notes (may be fractional)
+//     midi: int,           // sounding MIDI pitch
+//     tpc: int,            // tonal pitch class (explicit spelling)
+//     tieStart: bool,      // this note ties INTO the next one
+//     tieStop: bool }      // this note continues a prior tie
+
+// Try MusicXML first (explicit spelling + ties), fall back to MIDI.
+// Returns { notes: [...] } or null.
+async function loadSongHead(title) {
+  if (!title) return null;
+  const xml = await loadSongMusicXML(title);
+  if (xml) return xml;
+  const midi = await loadSongMidi(title);
+  if (midi) return midiToHeadNotes(midi);
+  return null;
+}
+
+async function loadSongMusicXML(title) {
+  try {
+    const url = `songs/${encodeURIComponent(title)}.musicxml`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const text = await response.text();
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.querySelector('parsererror')) return null;
+    return parseMusicXML(doc);
+  } catch (e) {
+    return null;
+  }
+}
+
+// Parse a MusicXML document into a flat list of melody notes. Uses
+// the first <part>, voice 1, first staff. Chord notes (<chord/>)
+// collapse to the top voice — we keep the highest MIDI at each
+// simultaneous position.
+function parseMusicXML(doc) {
+  const STEP_TO_SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+  const STEP_TO_TPC  = { C: 14, D: 16, E: 18, F: 13, G: 15, A: 17, B: 19 };
+  const score = doc.querySelector('score-partwise') || doc.querySelector('score-timewise');
+  if (!score) return null;
+  const part = score.querySelector('part');
+  if (!part) return null;
+
+  const notes = [];
+  let divisions = 1;   // ticks per quarter-note (from <attributes>)
+  let absStep = 0;     // position at start of the CURRENT measure, in 8th notes
+  let cursor = 0;      // absolute position in 8th notes (measure-relative = cursor - absStep)
+
+  function readDurationSteps(el) {
+    const d = el.querySelector('duration');
+    if (!d) return 0;
+    const ticks = parseInt(d.textContent, 10) || 0;
+    return divisions > 0 ? (ticks * 2 / divisions) : 0; // 2 = eighths per quarter
+  }
+
+  function readPitch(pitchEl) {
+    if (!pitchEl) return null;
+    const stepEl   = pitchEl.querySelector('step');
+    const octaveEl = pitchEl.querySelector('octave');
+    if (!stepEl || !octaveEl) return null;
+    const step = stepEl.textContent.trim();
+    const alterEl = pitchEl.querySelector('alter');
+    const alter = alterEl ? parseInt(alterEl.textContent, 10) : 0;
+    const octave = parseInt(octaveEl.textContent, 10);
+    const base = STEP_TO_SEMI[step];
+    const tpcBase = STEP_TO_TPC[step];
+    if (base == null || tpcBase == null || isNaN(octave)) return null;
+    return {
+      midi: (octave + 1) * 12 + base + alter,
+      tpc:  tpcBase + 7 * alter
+    };
+  }
+
+  const measures = part.querySelectorAll('measure');
+  for (const measure of measures) {
+    // Update divisions if declared in this measure.
+    const div = measure.querySelector('attributes > divisions');
+    if (div) divisions = parseInt(div.textContent, 10) || divisions;
+
+    cursor = absStep;
+    let measureEnd = absStep;
+
+    for (const el of Array.from(measure.children)) {
+      const tag = el.tagName;
+      if (tag === 'note') {
+        const voiceEl = el.querySelector('voice');
+        const voice = voiceEl ? parseInt(voiceEl.textContent, 10) : 1;
+        if (voice !== 1) continue; // only the primary voice
+        const isRest = el.querySelector('rest') !== null;
+        const isChord = el.querySelector('chord') !== null;
+        const dSteps = readDurationSteps(el);
+
+        if (isChord) {
+          // Simultaneous with previous note → top-voice collapse.
+          if (!isRest && notes.length > 0) {
+            const p = readPitch(el.querySelector('pitch'));
+            const prev = notes[notes.length - 1];
+            if (p && p.midi > prev.midi) { prev.midi = p.midi; prev.tpc = p.tpc; }
+          }
+          // Don't advance cursor for chord-linked notes.
+        } else if (isRest) {
+          cursor += dSteps;
+        } else {
+          const p = readPitch(el.querySelector('pitch'));
+          if (p) {
+            let tieStart = false, tieStop = false;
+            el.querySelectorAll('tie').forEach(t => {
+              const type = t.getAttribute('type');
+              if (type === 'start') tieStart = true;
+              else if (type === 'stop') tieStop = true;
+            });
+            notes.push({
+              stepStart: Math.round(cursor),
+              durationSteps: dSteps,
+              midi: p.midi,
+              tpc: p.tpc,
+              tieStart,
+              tieStop
+            });
+          }
+          cursor += dSteps;
+        }
+        if (cursor > measureEnd) measureEnd = cursor;
+      } else if (tag === 'backup') {
+        cursor -= readDurationSteps(el);
+      } else if (tag === 'forward') {
+        cursor += readDurationSteps(el);
+        if (cursor > measureEnd) measureEnd = cursor;
+      }
+    }
+
+    absStep = measureEnd;
+  }
+
+  return { notes };
+}
+
+// Convert a parsed @tonejs/midi Midi object to the same note shape
+// used by the MusicXML parser. Picks the best "melody" track using
+// the same scoring as before and collapses chord voicings to the
+// top note at each tick.
+function midiToHeadNotes(midi) {
+  if (!midi || !midi.tracks) return null;
+  function scoreTrack(t) {
+    const name = (t.name || '').toLowerCase();
+    let score = 0;
+    if (/\b(melody|lead|solo|head|theme|tune|soprano)\b/.test(name)) score += 10000;
+    if (/\b(bass|drum|chord|comp|accompan|harmony|piano|guitar|pad|strings?)\b/.test(name)) score -= 5000;
+    const byTick = new Map();
+    for (const n of t.notes) byTick.set(n.ticks, (byTick.get(n.ticks) || 0) + 1);
+    let poly = 0;
+    for (const c of byTick.values()) if (c > 1) poly += (c - 1);
+    score -= (poly / Math.max(1, t.notes.length)) * 1000;
+    score += t.notes.length;
+    return score;
+  }
+  const candidates = midi.tracks.filter(t => t.notes && t.notes.length > 0 && t.channel !== 9);
+  candidates.sort((a, b) => scoreTrack(b) - scoreTrack(a));
+  const track = candidates[0];
+  if (!track) return null;
+  // Top-voice collapse.
+  const topByTick = new Map();
+  for (const n of track.notes) {
+    const prev = topByTick.get(n.ticks);
+    if (!prev || n.midi > prev.midi) topByTick.set(n.ticks, n);
+  }
+  const seq = Array.from(topByTick.values()).sort((a, b) => a.ticks - b.ticks);
+  const ppq = (midi.header && midi.header.ppq) || 480;
+  const ticksPerStep = ppq / 2;
+  // Key-based enharmonic guess (MIDI has no spelling info).
+  const SHARP_TPCS = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19];
+  const FLAT_TPCS  = [14,  9, 16, 11, 18, 13,  8, 15, 10, 17, 12, 19];
+  const keyForPref = currentKey || 'C';
+  const treatAsFlat =
+    FLAT_KEYS.has(keyForPref) ||
+    (!currentIsMinor && (keyForPref === 'C#' || keyForPref === 'F#' || keyForPref === 'G#'));
+  const tpcMap = treatAsFlat ? FLAT_TPCS : SHARP_TPCS;
+  const notes = seq.map(n => ({
+    stepStart: Math.round(n.ticks / ticksPerStep),
+    durationSteps: (n.durationTicks || ticksPerStep) / ticksPerStep,
+    midi: n.midi,
+    tpc: tpcMap[((n.midi % 12) + 12) % 12],
+    // MIDI has no explicit ties — let the bar-crossing splitter add
+    // them as needed. An extra "original-note ties forward" signal
+    // isn't available from MIDI.
+    tieStart: false,
+    tieStop: false
+  }));
+  return { notes };
+}
+
+// Legacy wrapper kept for call sites still using the old name.
+async function loadSongMidi(title) {
+  if (typeof Midi === 'undefined' || !title) return null;
+  try {
+    const url = `songs/${encodeURIComponent(title)}.mid`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const buffer = await response.arrayBuffer();
+    return new Midi(buffer);
+  } catch (e) {
+    return null;
+  }
+}
+
+// "Head" exercise — reads the melody from window.currentSong.head
+// (loaded in loadFromURL via loadSongHead — MusicXML preferred, MIDI
+// fallback) and places each note in its corresponding bar +
+// eighth-note slot. Falls back to silence (a chart of rests) if no
+// score is available for this song.
+function generateHeadFromScore(bars, ts) {
+  const beatsPerBar = ts.num;
+  const stepsPerBar = beatsPerBar * 2; // 8th-note resolution
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(stepsPerBar).fill(null));
+  const head = window.currentSong && window.currentSong.head;
+  if (!head || !head.notes || !head.notes.length) {
+    return { results, chordEvents, patterns, effective, subdivisions: 2 };
+  }
+
+  // Apply the current Key-seg transposition to the loaded melody.
+  // The notes in `head` are stored at the song's ORIGINAL key (as
+  // imported from the MusicXML/MIDI file); every key change recomputes
+  // the transposed version here rather than mutating the cached data.
+  //
+  // Strategy:
+  //   1. Apply the semitone shift for the key change (0..11 up —
+  //      direction is irrelevant because step 2 picks the octave).
+  //   2. Scan the ENTIRE transposed melody for its lowest pitch.
+  //   3. Add/subtract 12 × N (any integer, positive or negative)
+  //      such that the lowest pitch lands AS LOW AS POSSIBLE while
+  //      still being ≥ F1 (EX_LOW = 29). That both pulls runaway-
+  //      high transpositions back down and lifts below-range notes
+  //      up when the original file itself has pitches under F1.
+  //   4. Apply the combined shift (keyShift + octaveCorrection) to
+  //      every note and re-spell TPCs for the target key.
+  const rawOffset = (KEY_TO_PC[currentKey] - KEY_TO_PC[originalKey] + 12) % 12;
+  const useFlats = FLAT_KEYS.has(currentKey)
+    || (!currentIsMinor && (currentKey === 'C#' || currentKey === 'F#' || currentKey === 'G#'));
+  const SHARP_TPCS = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19];
+  const FLAT_TPCS  = [14,  9, 16, 11, 18, 13,  8, 15, 10, 17, 12, 19];
+  const tpcMapForTranspose = useFlats ? FLAT_TPCS : SHARP_TPCS;
+  // Total shift (key change + octave correction) applied UNIFORMLY
+  // to every note of the head. No per-note octave displacement —
+  // the whole melody moves together.
+  //
+  //   No key change (rawOffset === 0): zero shift. The MusicXML
+  //     source octaves are preserved as-is, even if some notes
+  //     fall below F1. The user places notes where they want in
+  //     the source file and we respect that.
+  //
+  //   Key change: transpose by rawOffset, then shift the whole
+  //     melody down in whole-octave steps to land as low as
+  //     possible while still keeping EVERY note ≥ F1. If the raw
+  //     transpose leaves any note below F1, shift up instead.
+  let totalShift = 0;
+  if (rawOffset !== 0) {
+    let minAfter = Infinity;
+    for (const n of head.notes) {
+      const p = n.midi + rawOffset;
+      if (p < minAfter) minAfter = p;
+    }
+    const octShift = Math.ceil((EX_LOW - minAfter) / 12) * 12;
+    totalShift = rawOffset + octShift;
+  }
+  const transposedNotes = head.notes.map(n => {
+    const midi = n.midi + totalShift;
+    const pc = ((midi % 12) + 12) % 12;
+    // Preserve the ORIGINAL note's explicit spelling when the key
+    // hasn't changed (rawOffset === 0) — the MusicXML-sourced TPC is
+    // more precise than what a key-based lookup can infer.
+    // Otherwise the target key's sharp/flat preference wins.
+    const tpc = rawOffset === 0 ? n.tpc : tpcMapForTranspose[pc];
+    return {
+      stepStart: n.stepStart,
+      durationSteps: n.durationSteps,
+      tieStart: n.tieStart,
+      tieStop: n.tieStop,
+      midi, tpc
+    };
+  });
+
+  // Break `stepsInBar` starting at `startStep` of `barIdx` into one
+  // or more slot entries, using the longest standard duration that
+  // fits at each position. Chains them with `tieFromPrev` /
+  // `tieToNext` flags so the renderer can draw ties between pieces.
+  //   `tieFromPrevChunk`: this chunk is the continuation of a prior
+  //     chunk of the same note (cross-bar split, or cross-chunk
+  //     within the bar), OR this note had an explicit XML tieStop
+  //     when it's the first chunk of the first bar.
+  //   `chunkTiesForward`: this chunk ties to the next chunk of the
+  //     same note (more-bars-to-come), OR — on the very last chunk
+  //     of the note — this note had an explicit XML tieStart.
+  const DUR_FITS = [
+    { dur: 'w',  steps: 8 },
+    { dur: 'h.', steps: 6 },
+    { dur: 'h',  steps: 4 },
+    { dur: 'q.', steps: 3 },
+    { dur: 'q',  steps: 2 },
+    { dur: '8',  steps: 1 }
+  ];
+  function emitChunk(barIdx, startStep, stepsInBar, pitch, tpc, tieFromPrevChunk, chunkTiesForward) {
+    if (barIdx < 0 || barIdx >= bars.length) return;
+    let remaining = stepsInBar;
+    let cur = startStep;
+    let first = true;
+    while (remaining > 0) {
+      const opt = DUR_FITS.find(f => f.steps <= remaining);
+      if (!opt) break;
+      if (results[barIdx][cur]) break; // slot occupied — stop
+      const isLastInChunk = (remaining === opt.steps);
+      results[barIdx][cur] = {
+        pitch,
+        tpc,
+        duration: opt.dur,
+        tieFromPrev: first ? tieFromPrevChunk : true,
+        tieToNext: !isLastInChunk || chunkTiesForward
+      };
+      cur += opt.steps;
+      remaining -= opt.steps;
+      first = false;
+    }
+  }
+
+  transposedNotes.forEach(note => {
+    const totalSteps = Math.max(1, Math.round(note.durationSteps));
+    // Walk across bar boundaries. When a note extends past the end
+    // of its bar, split it: emit one chunk for the remainder of the
+    // current bar, then continue into the next bar(s) with ties.
+    let curStep = note.stepStart;
+    let remaining = totalSteps;
+    let firstBar = true;
+    while (remaining > 0) {
+      const barIdx = Math.floor(curStep / stepsPerBar);
+      if (barIdx >= bars.length) break;
+      const stepInBar = curStep - barIdx * stepsPerBar;
+      const thisBarChunk = Math.min(remaining, stepsPerBar - stepInBar);
+      const isLastBarOfNote = (thisBarChunk === remaining);
+      emitChunk(
+        barIdx, stepInBar, thisBarChunk,
+        note.midi, note.tpc,
+        // tieFromPrevChunk: continuation of a cross-bar split, OR
+        // first-chunk-of-first-bar with an explicit XML tieStop.
+        firstBar ? !!note.tieStop : true,
+        // chunkTiesForward: more bars to emit, OR last chunk of note
+        // with an explicit XML tieStart.
+        !isLastBarOfNote || !!note.tieStart
+      );
+      curStep += thisBarChunk;
+      remaining -= thisBarChunk;
+      firstBar = false;
+    }
+  });
+
+  return { results, chordEvents, patterns, effective, subdivisions: 2 };
 }
 
 // ===== Chord-tone eighth-note arpeggio factory =====
@@ -1707,6 +2090,16 @@ function buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns)
       beatInfo[ce.barIdx][b] = {
         pitch: bp ? bp.pitch : null,
         tpc: bp ? bp.tpc : null,
+        // Carry the note's duration (as a VexFlow-style string, e.g.
+        // 'q.', 'h') through so the playback scheduler can add up
+        // per-chunk durations across a tied chain.
+        duration: bp ? bp.duration : null,
+        // Carry tie flags through so the playback scheduler can
+        // treat a tied chain as a single sustained note (attack
+        // once at the start, release at the end) instead of
+        // re-attacking on every tied piece.
+        tieFromPrev: bp ? !!bp.tieFromPrev : false,
+        tieToNext:   bp ? !!bp.tieToNext   : false,
         scalePcs,
         chordTonesByPc: tones.byPc,
         chordSymbol,
@@ -2193,6 +2586,23 @@ function renderChart(song, barsIn, timesigStr) {
   const VF = Vex.Flow;
   const ts = parseTimesig(timesigStr);
 
+  // "Head" exercise with no matching .musicxml / .mid in the songs/
+  // folder → short-circuit with a clear "No head found" message
+  // instead of rendering empty staves that would confuse the user.
+  // `headLoaded` guards against flashing the message during the
+  // async fetch — only show it once the load actually resolved
+  // with no data.
+  if (exerciseMode === 'head'
+      && window.currentSong
+      && window.currentSong.headLoaded
+      && !window.currentSong.head) {
+    const msg = document.createElement('div');
+    msg.className = 'no-head-message';
+    msg.textContent = 'No head found';
+    chartEl.appendChild(msg);
+    return;
+  }
+
   // Expand by song repeats and generate quarter notes across the whole thing.
   // Exercise mode switches which generator we use:
   //   - "scale"   → walk the current chord's scale (one note per beat)
@@ -2201,7 +2611,8 @@ function renderChart(song, barsIn, timesigStr) {
   //                 the scale (MuseScore ExerciseBuilder "Broken 3rds")
   //   - "cantus"  → one descending scale tone per chord (Cantus Firmus)
   const bars = expandBarsByRepeats(barsIn, songRepeats);
-  const gen = exerciseMode === 'chord' ? generate1357QuarterNotes
+  const gen = exerciseMode === 'head' ? generateHeadFromScore
+            : exerciseMode === 'chord' ? generate1357QuarterNotes
             : exerciseMode === 'triads' ? generateTriadsQuarterNotes
             : exerciseMode === 'broken3' ? generateBroken3rdsQuarterNotes
             : exerciseMode === 'cantus' ? generateCantusFirmusQuarterNotes
@@ -2238,10 +2649,12 @@ function renderChart(song, barsIn, timesigStr) {
   let prevLastNote = null; // { posKey, level } | null
 
   const mpl = measuresPerLine;
-  // Eighth-note exercises (1235 / 3579) pack 8 notes per bar with
-  // lots of accidentals — give them ~1.6x the per-bar width so
-  // VexFlow's formatter isn't forced to overflow the stave on the right.
-  const eighthNoteExercise = exerciseMode === '1235' || exerciseMode === '3579';
+  // Eighth-note exercises (1235 / 3579 / Head) pack up to 8 notes per
+  // bar with lots of accidentals — give them ~1.6x the per-bar width
+  // so VexFlow's formatter isn't forced to overflow the stave on the
+  // right.
+  const eighthNoteExercise =
+    exerciseMode === '1235' || exerciseMode === '3579' || exerciseMode === 'head';
   const measureWidth = Math.round(chartSize * (eighthNoteExercise ? 1.6 : 1));
   const leftPadding = 14;
   const rightPadding = 14;
@@ -2272,6 +2685,14 @@ function renderChart(song, barsIn, timesigStr) {
       codaBreaks.add(i + 1);
     }
   });
+  // Cross-ROW tie state. When a row finishes with an unmatched
+  // outgoing tie (its last tied note had tieToNext and nothing in
+  // that row consumed it), we stash the note + its row's drawing
+  // context here. The next row's first note — if it's flagged
+  // tieFromPrev — consumes this and triggers a pair of "partial"
+  // ties: an outgoing slur off the right edge of the previous row
+  // and an incoming slur coming in from the left edge of the next.
+  let crossRowPending = null; // { note: VF.StaveNote, context }
   let rowStart = 0;
   while (rowStart < bars.length) {
     // Clip each row to the next pass boundary so repeats always break on a
@@ -2318,6 +2739,13 @@ function renderChart(song, barsIn, timesigStr) {
 
     let x = leftPadding;
     const barPosInRow = []; // { barIdx, noteStartX, noteEndX } for pattern overlays
+    // Cross-bar tie state: the most recent note in this row that was
+    // flagged `tieToNext`. When the next bar's first note is flagged
+    // `tieFromPrev`, we connect them with a StaveTie drawn on the row's
+    // shared context.
+    let pendingTieFromBar = null; // { note: VF.StaveNote }
+    // Ties (within-bar and cross-bar) to draw after all bars render.
+    const rowTies = [];
     rowBars.forEach((bar, i) => {
       const barIdx = rowStart + i;
       const isFirstInRow = i === 0;
@@ -2420,12 +2848,17 @@ function renderChart(song, barsIn, timesigStr) {
       // Steps-per-duration for both resolutions. A quarter = 2 steps
       // at 8th resolution, 1 step at quarter resolution, etc.
       const DUR_TO_STEPS = subdiv === 2
-        ? { 'w': 8, 'h.': 6, 'h': 4, 'q': 2, '8': 1 }
-        : { 'w': 4, 'h.': 3, 'h': 2, 'q': 1 };
+        ? { 'w': 8, 'h.': 6, 'h': 4, 'q.': 3, 'q': 2, '8': 1 }
+        : { 'w': 4, 'h.': 3, 'h': 2, 'q.': 1.5, 'q': 1 };
       // For each step in this bar, which entry of `notes[]` covers it?
       // Cantus firmus writes one long note across multiple beats, so the
       // same slot index can be referenced by several steps. Rests get -1.
       const beatToNoteSlot = new Array(stepsPerBar).fill(-1);
+      // Tie bookkeeping: track the most recent note in THIS bar that
+      // was flagged tieToNext (so the next note emitted with
+      // tieFromPrev can be paired with it). The row-scoped
+      // `pendingTieFromBar` covers the cross-bar case.
+      let pendingTieInBar = null;
       let b = 0;
       while (b < stepsPerBar) {
         const bp = beatPitches[b];
@@ -2439,7 +2872,17 @@ function renderChart(song, barsIn, timesigStr) {
           // we render an octave up (8vb), so written MIDI = sounding + 12.
           // Therefore sounding MIDI >= 38 (D2) → stem down.
           const stemDir = bp.pitch >= 38 ? VF.Stem.DOWN : VF.Stem.UP;
-          const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: dur, stem_direction: stemDir });
+          // VexFlow 4's StaveNote doesn't accept dotted durations
+          // ("q.", "h.") directly — dots are separate modifiers.
+          // Strip trailing dots, remember the count, construct the
+          // note with the undotted duration, then attach dot(s).
+          let noteDur = dur;
+          let dotCount = 0;
+          while (noteDur.endsWith('.')) { dotCount++; noteDur = noteDur.slice(0, -1); }
+          const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: noteDur, stem_direction: stemDir });
+          if (dotCount > 0 && VF.Dot && VF.Dot.buildAndAttach) {
+            VF.Dot.buildAndAttach([n], { all: true });
+          }
 
           // Decide whether to show an accidental on this note.
           const keyDefault = 0;
@@ -2464,6 +2907,32 @@ function renderChart(song, barsIn, timesigStr) {
           }
           lastNoteOfBar = { posKey, level };
           isFirstNoteOfBar = false;
+
+          // Tie wiring: if this note consumes the tail of a previous
+          // tied note (tieFromPrev), pair it with whichever tie is
+          // pending — same bar first, cross-bar within row second,
+          // cross-row (partial-tie pair) third.
+          if (bp.tieFromPrev) {
+            if (pendingTieInBar) {
+              rowTies.push({ first: pendingTieInBar, last: n });
+            } else if (pendingTieFromBar) {
+              rowTies.push({ first: pendingTieFromBar, last: n });
+              pendingTieFromBar = null;
+            } else if (crossRowPending) {
+              // Cross-row tie: queue an outgoing partial tie on the
+              // PREVIOUS row (drawn on that row's context) and an
+              // incoming partial tie on THIS row (drawn on this
+              // row's context after voice.draw runs).
+              rowTies.push({
+                first: crossRowPending.note,
+                last: null,
+                altContext: crossRowPending.context
+              });
+              rowTies.push({ first: null, last: n });
+              crossRowPending = null;
+            }
+          }
+          pendingTieInBar = bp.tieToNext ? n : null;
 
           const slotIdx = notes.length;
           notes.push(n);
@@ -2518,6 +2987,10 @@ function renderChart(song, barsIn, timesigStr) {
       }
       // Carry the last note of this bar to the next bar for the courtesy check.
       prevLastNote = lastNoteOfBar;
+      // Carry the pending cross-bar tie. If this bar's last tie-flagged
+      // note wasn't consumed within the bar, it waits for the first
+      // note of the next bar (same row) to pair with.
+      pendingTieFromBar = pendingTieInBar;
       const voice = new VF.Voice({ num_beats: ts.num, beat_value: ts.denom, resolution: VF.RESOLUTION });
       voice.setStrict(false);
       voice.addTickables(notes);
@@ -2667,6 +3140,33 @@ function renderChart(song, barsIn, timesigStr) {
 
       x += width;
     });
+
+    // Draw all queued ties. Three shapes:
+    //   - Within-bar / cross-bar (first + last both set) → single
+    //     tie drawn on this row's context.
+    //   - Outgoing partial (first set, last null, altContext is the
+    //     previous row's context) → slur off the right edge of the
+    //     previous row.
+    //   - Incoming partial (first null, last set) → slur coming in
+    //     from the left edge of this row to the note.
+    rowTies.forEach(t => {
+      if (!t.first && !t.last) return;
+      const tie = new VF.StaveTie({
+        first_note: t.first,
+        last_note: t.last,
+        first_indices: [0],
+        last_indices: [0]
+      });
+      tie.setContext(t.altContext || context).draw();
+    });
+
+    // If this row ended with an unmatched tieToNext note, stash it
+    // as the pending cross-row tie so the next row's first note can
+    // consume it. Replaces any previous crossRowPending (if that one
+    // wasn't consumed, the intended tie was malformed — drop it).
+    crossRowPending = pendingTieFromBar
+      ? { note: pendingTieFromBar, context }
+      : null;
 
     // Bar click handling: listen on the row container instead of stamping
     // invisible <rect>s into the SVG for each bar. That keeps the DOM clean
@@ -3174,6 +3674,20 @@ async function initAudio() {
     }).connect(drumsOut),
     beats: 16 // 4 bars of 4/4
   };
+  realLoops['ballad-3/4'] = {
+    player: new Tone.Player({
+      url: 'drums/ballad-3-4-80bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 12 // 4 bars of 3/4
+  };
+  realLoops['medium-3/4'] = {
+    player: new Tone.Player({
+      url: 'drums/medium-3-4-120bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 12 // 4 bars of 3/4
+  };
   realLoops['medium-4/4'] = {
     player: new Tone.Player({
       url: 'drums/medium-4-4-120bpm.mp3',
@@ -3187,6 +3701,13 @@ async function initAudio() {
       loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
     }).connect(drumsOut),
     beats: 16 // 4 bars of 4/4
+  };
+  realLoops['up-3/4'] = {
+    player: new Tone.Player({
+      url: 'drums/up-3-4-180bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 12 // 4 bars of 3/4
   };
 
   await Tone.loaded();
@@ -3878,17 +4399,64 @@ async function startPlayback(song, bars, startBarIdx = 0) {
       const stepsThisBar = lastBeatInfo[entry.idx].length;
       const stepsPerBeat = Math.max(1, Math.round(stepsThisBar / beatsPerBar));
       const sixteenthsPerStep = 4 / stepsPerBeat; // 4 = sixteenths-per-beat
+      const secondsPerStep = (60 / currentTempo) / stepsPerBeat;
       const measurePitches = lastBeatInfo[entry.idx]
         .map(b => b && b.pitch)
         .filter(p => p != null);
+      // How many steps this slot's individual chunk occupies. Used to
+      // add up total duration across a tied chain so the Play-Score
+      // sampler can trigger ONCE at the tie-start with a sustain
+      // covering the whole chain instead of re-attacking on every
+      // tied piece.
+      const DUR_STEPS = { 'w': 8, 'h.': 6, 'h': 4, 'q.': 3, 'q': 2, '8': 1 };
+      const stepsForChunk = (info) => DUR_STEPS[info && info.duration] || 1;
+      // Scan forward through slots (possibly crossing bars) from a
+      // given (barNum, slot) until we reach the end of a tied chain.
+      // Returns the chain's total length in steps.
+      function chainSteps(barNum, startSlot) {
+        const first = lastBeatInfo[playlist[barNum].idx][startSlot];
+        let total = stepsForChunk(first);
+        let curInfo = first;
+        let curBarNum = barNum;
+        let curSlot = startSlot;
+        while (curInfo.tieToNext) {
+          curSlot += stepsForChunk(curInfo);
+          let curBarInfo = lastBeatInfo[playlist[curBarNum].idx];
+          if (curSlot >= curBarInfo.length) {
+            curBarNum++;
+            if (curBarNum >= playlist.length) break;
+            curBarInfo = lastBeatInfo[playlist[curBarNum].idx];
+            curSlot = 0;
+          }
+          const nextInfo = curBarInfo[curSlot];
+          if (!nextInfo || !nextInfo.tieFromPrev) break;
+          total += stepsForChunk(nextInfo);
+          curInfo = nextInfo;
+        }
+        return total;
+      }
       for (let s = 0; s < stepsThisBar; s++) {
         const info = lastBeatInfo[entry.idx][s];
         if (!info) continue;
         const beat = Math.floor(s / stepsPerBeat);
         const sixteenth = (s % stepsPerBeat) * sixteenthsPerStep;
+        // Attack-duration logic:
+        //   tieFromPrev  → no new attack; this event still fires so the
+        //                  fingerboard / highlight update, but Play Score
+        //                  stays silent because the note is already
+        //                  sounding.
+        //   tieToNext    → scan forward through the chain, sum up the
+        //                  total steps, sustain through it.
+        //   otherwise    → play this chunk's own duration.
+        let attackDurSec = 0;
+        if (info.pitch != null && !info.tieFromPrev) {
+          const totalSteps = info.tieToNext ? chainSteps(barNum, s) : stepsForChunk(info);
+          attackDurSec = totalSteps * secondsPerStep;
+        }
         events.push({
           time: `${absBar}:${beat}:${sixteenth}`,
-          type: 'beat', idx: entry.idx, beat, info, measurePitches
+          type: 'beat', idx: entry.idx, beat, info, measurePitches,
+          attackDurSec
         });
       }
     }
@@ -4042,12 +4610,16 @@ async function startPlayback(song, bars, startBarIdx = 0) {
       // step is a rest. The score is engraved 8vb (written = sounding
       // + 12); play the WRITTEN pitch so what you hear matches the
       // note you see on the staff.
-      if (playScoreOn && guitar && guitar.loaded && ev.info.pitch != null) {
+      // Play Score: trigger the sampler only when this event carries
+      // an attack (attackDurSec > 0). Tied notes split across slots
+      // get attackDurSec=0 on continuations and the chain's full
+      // sustain duration on the tie-start, so the whole tied note
+      // sounds as a single sustained pluck instead of re-attacking
+      // on every slot.
+      if (playScoreOn && guitar && guitar.loaded
+          && ev.info.pitch != null && ev.attackDurSec > 0) {
         const name = midiToName(ev.info.pitch + 12);
-        // Note duration tracks the exercise resolution so consecutive
-        // notes don't overlap: eighth for 1235/3579, quarter otherwise.
-        const dur = (exerciseMode === '1235' || exerciseMode === '3579') ? '8n' : '4n';
-        guitar.triggerAttackRelease(name, dur, time, 0.7);
+        guitar.triggerAttackRelease(name, ev.attackDurSec, time, 0.7);
       }
       Tone.Draw.schedule(() => {
         updateFingerboard({
@@ -4174,6 +4746,34 @@ async function loadFromHTMLText(text) {
   if (urls.length === 0) { alert('No iRealPro song URL found in file.'); return; }
   return loadFromURL(urls[0]);
 }
+// Expand a "D.C. al Fine" chart into ABA bars in place. After this
+// runs, the score literally contains section A a second time (from
+// bar 0 up to and including the Fine bar) appended to the end —
+// so the renderer shows ABA and the exercise generators produce
+// fresh notes for the second A pass (their running state —
+// direction, last pitch, enclosure — continues naturally through
+// the repeat instead of restarting from bar 0's starting conditions).
+// Called AFTER expandIRealRepeats so {…} first/second-ending
+// brackets are already flat.
+function expandDCAlFine(bars) {
+  const FINE_ONLY_RE = /^\s*fine\s*\.?\s*$/i;
+  let fineIdx = -1;
+  let hasDCAlFine = false;
+  bars.forEach((b, i) => {
+    (b.markers || []).forEach(m => {
+      if (m.type !== 'comment') return;
+      const text = (m.text || '').trim();
+      if (FINE_ONLY_RE.test(text)) fineIdx = i;
+      const lc = text.toLowerCase();
+      if (lc.includes('d.c. al fine') || lc.includes('dc al fine')) hasDCAlFine = true;
+    });
+  });
+  if (!hasDCAlFine || fineIdx < 0) return bars;
+  const out = bars.slice();
+  for (let j = 0; j <= fineIdx; j++) out.push(bars[j]);
+  return out;
+}
+
 // Expand iReal Pro repeat markers ({ ... }) into two literal copies of the
 // bars so the chord sequence shows twice and the quarter-note walker can
 // continue through the second pass with different notes. Non-repeated bars
@@ -4373,6 +4973,11 @@ function loadFromURL(url) {
   const tokens = tokenize(song.body);
   let { bars, timesig } = buildBars(tokens);
   bars = expandIRealRepeats(bars);
+  // Flatten D.C. al Fine so the score literally contains ABA —
+  // this lets the renderer show the second A pass and lets the
+  // exercise generators continue their running state (direction,
+  // last pitch, enclosure) through the repeat with fresh notes.
+  bars = expandDCAlFine(bars);
   const normalized = normalizeKey(song.key);
   originalKey = normalized.key;
   currentKey = originalKey;
@@ -4384,8 +4989,28 @@ function loadFromURL(url) {
   // Store both the original (untransposed) bars and the currently
   // displayed bars. Key changes re-transpose from the original so
   // repeated key flips don't accumulate rounding errors.
-  window.currentSong = { song, bars, timesig, originalBars: bars };
+  window.currentSong = {
+    song, bars, timesig,
+    originalBars: bars,
+    head: null,
+    // `headLoaded` stays false during the async fetch so the
+    // "No head found" banner doesn't flash while we're still
+    // waiting for the file. Set to true once the load resolves,
+    // regardless of whether a head was found.
+    headLoaded: false
+  };
   document.getElementById('status').textContent = `Loaded: ${song.title} (${bars.length} bars)`;
+  // Try to load a matching score file from the songs/ folder for the
+  // "Head" exercise. Prefers <title>.musicxml (explicit spelling +
+  // ties); falls back to <title>.mid if no XML is present. Fire-and-
+  // forget: the render that just ran used whatever data was already
+  // cached; we re-render once the load settles if Head is selected.
+  loadSongHead(song.title).then(head => {
+    if (!window.currentSong || window.currentSong.song !== song) return; // user changed songs
+    window.currentSong.head = head;
+    window.currentSong.headLoaded = true;
+    if (exerciseMode === 'head') rerenderCurrent();
+  });
   // A freshly loaded song should start at the top of the score. The
   // chart container holds the scroll position from the previously
   // loaded song, which can leave the user halfway down an unrelated
@@ -4626,7 +5251,7 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   if (!sel) return;
   sel.addEventListener('change', async () => {
     const ex = sel.value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
+    exerciseMode = (ex === 'head' || ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
       ? ex : 'scale';
     rerenderCurrent();
     if (playState === 'playing' && window.currentSong) {
@@ -4697,6 +5322,15 @@ async function initSongLibrary() {
       li.setAttribute('role', 'option');
       li.addEventListener('click', () => {
         selectSongByIndex(i);
+        // In portrait mode the picker is a modal over the chart — clear
+        // the filter when the user commits to a song so the next open
+        // starts fresh (no stale search hiding most of the library).
+        // In landscape the list is a persistent sidebar, so we leave the
+        // filter alone.
+        if (!isLandscape()) {
+          const f = document.getElementById('songFilter');
+          if (f && f.value) { f.value = ''; applySongFilter(''); }
+        }
         closeSongPicker();
       });
       songListEl.appendChild(li);

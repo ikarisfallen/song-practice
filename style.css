@@ -409,6 +409,19 @@ main {
   border-radius: 6px;
   overflow-y: auto;
 }
+/* "No head found" placeholder shown when the Head exercise is picked
+   for a song that has no matching .musicxml / .mid file in songs/.
+   Vertically + horizontally centered in the chart area. */
+.no-head-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 22px;
+  font-style: italic;
+  color: #888;
+  text-align: center;
+}
 .staff-row {
   position: relative;
   margin-bottom: 2px;
