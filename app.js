@@ -3097,8 +3097,11 @@ function renderChart(song, barsIn, timesigStr) {
           // notehead position (getAbsoluteX / getYs) instead of
           // relying on DOM bounding-rect geometry — the latter
           // includes the accidental glyph and throws off centering
-          // on sharps/flats.
-          barNoteData.push({ pitch: bp.pitch, tpc: bp.tpc, staveNote: n });
+          // on sharps/flats. `duration` lets the overlay detect
+          // hollow noteheads (whole / half) so it can swap to a
+          // white-circle-on-black-text scheme that reads against a
+          // transparent notehead.
+          barNoteData.push({ pitch: bp.pitch, tpc: bp.tpc, staveNote: n, duration: noteDur });
           for (let bb = b; bb < b + consume && bb < stepsPerBar; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
@@ -4138,25 +4141,43 @@ function updateFingeringOverlay(barIdx) {
     // Note above top line (ledger lines) → lift above the note head.
     const labelY = noteTop < topLineY ? noteTop - LIFT_GAP : LABEL_Y;
     appendFingeringLabel(g, noteX, labelY, label, '#2e78ff');
-    // Note letter painted INSIDE the notehead in small white text.
-    // Uses the slot's stored TPC so spelling matches the staff
-    // (B♭ shows "B♭", not "A♯"). `inside: true` skips the white
-    // backdrop rect — the black notehead already provides contrast.
-    // Draw the letter centered on the notehead, with a tiny accidental
-    // glyph tucked into the upper-right if present. The accidental is
-    // drawn as a separate SVG text element so centering of the letter
-    // isn't thrown off by the wider ♭/♯ character.
+    // Note letter painted INSIDE the notehead. Filled noteheads
+    // (quarter + shorter) carry white text directly on the black
+    // glyph. HOLLOW noteheads (whole, half) are transparent inside,
+    // so we paint a small white disc behind black text — that reads
+    // against both the staff lines and whatever sits beyond.
     const fullName = nd.tpc != null ? tpcToNoteName(nd.tpc) : null;
     const letter = fullName ? fullName.charAt(0) : null;
     if (letter) {
-      appendFingeringLabel(g, headCX, headCY, letter, '#fff', {
+      const isHollow = nd.duration === 'w' || nd.duration === 'h';
+      if (isHollow) {
+        // White ellipse matching the notehead's natural
+        // wider-than-tall aspect so it fills the hollow interior
+        // without poking above/below the glyph's ink. Half-note
+        // heads are tilted -15° to match the engraver's slant.
+        // VexFlow's whole-note glyph carries ~15° of clockwise
+        // rotation in its path data, so specifying -30° lands it
+        // visually at -15°, matching the half note.
+        const tilt = nd.duration === 'w' ? -30 : -15;
+        const disc = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+        disc.setAttribute('cx', headCX);
+        disc.setAttribute('cy', headCY);
+        disc.setAttribute('rx', 5);
+        disc.setAttribute('ry', 3.2);
+        disc.setAttribute('transform', `rotate(${tilt} ${headCX} ${headCY})`);
+        disc.setAttribute('fill', '#fff');
+        disc.setAttribute('stroke', 'none');
+        g.appendChild(disc);
+      }
+      const textColor = isHollow ? '#000' : '#fff';
+      appendFingeringLabel(g, headCX, headCY, letter, textColor, {
         inside: true, fontSize: 7
       });
       const accidental = fullName && fullName.length > 1 ? fullName.slice(1) : null;
       if (accidental) {
         // Offset up-and-right from the notehead center. Tiny font so
         // the glyph reads but doesn't crowd the letter.
-        appendFingeringLabel(g, headCX + 3.5, headCY - 2.5, accidental, '#fff', {
+        appendFingeringLabel(g, headCX + 3.5, headCY - 2.5, accidental, textColor, {
           inside: true, fontSize: 5
         });
       }
