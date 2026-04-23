@@ -5051,6 +5051,65 @@ function expandDCAlFine(bars) {
   return out;
 }
 
+// Expand a "D.C. al 2nd ending" chart in place. Runs AFTER
+// expandIRealRepeats so the N1/N2 markers survive on the bars that
+// carried them (ending === "1" / ending === "2"). On the D.C. the
+// player returns to bar 0, plays the COMMON bars of the first
+// repeat group (i.e. up to but not including the first N1 bar),
+// then jumps straight to the second ending (N2) — skipping N1.
+//
+// Canonical use: AABA charts like Alice in Wonderland where the B
+// section's last bar is marked "D.C. al 2nd ending" and the N2
+// bars (which often carry Fine) form the final A's tail.
+//
+// Algorithm:
+//   1. Require a D.C.-al-2nd-ending marker somewhere in `bars`.
+//   2. Find the FIRST N1 bar — everything before it is "common".
+//   3. Collect consecutive N2 bars. If a Fine marker sits inside
+//      the N2 range, trim the append to include it and stop.
+//   4. Append `bars[0..firstN1-1] + n2Trimmed` to the output.
+function expandDCAl2ndEnding(bars) {
+  let hasDCAl2nd = false;
+  bars.forEach(b => {
+    (b.markers || []).forEach(m => {
+      if (m.type !== 'comment') return;
+      const lc = (m.text || '').toLowerCase();
+      if (lc.includes('d.c. al 2nd ending') || lc.includes('dc al 2nd ending')) {
+        hasDCAl2nd = true;
+      }
+    });
+  });
+  if (!hasDCAl2nd) return bars;
+
+  // First N1 (first ending) bar — uses loose equality because the
+  // parser stores `ending` as a string ("1"/"2") while callers often
+  // think in numbers.
+  const firstN1Idx = bars.findIndex(b => b.ending == 1);
+  // Full list of N2 (second ending) bar indices, in order.
+  const n2Indices = [];
+  bars.forEach((b, i) => { if (b.ending == 2) n2Indices.push(i); });
+  if (firstN1Idx < 0 || n2Indices.length === 0) return bars;
+
+  // If a Fine marker sits inside the N2 range, cap the appended
+  // second ending at that bar. Otherwise include every N2 bar.
+  const FINE_RE = /^\s*fine\s*\.?\s*$/i;
+  let n2EndIdx = n2Indices.length - 1;
+  for (let k = 0; k < n2Indices.length; k++) {
+    const b = bars[n2Indices[k]];
+    const hasFine = (b.markers || []).some(m =>
+      m.type === 'comment' && FINE_RE.test((m.text || '').trim())
+    );
+    if (hasFine) { n2EndIdx = k; break; }
+  }
+
+  const out = bars.slice();
+  // Common bars 0..firstN1-1.
+  for (let j = 0; j < firstN1Idx; j++) out.push(bars[j]);
+  // Then N2 up to (and including) the Fine bar.
+  for (let k = 0; k <= n2EndIdx; k++) out.push(bars[n2Indices[k]]);
+  return out;
+}
+
 // Expand iReal Pro repeat markers ({ ... }) into two literal copies of the
 // bars so the chord sequence shows twice and the quarter-note walker can
 // continue through the second pass with different notes. Non-repeated bars
@@ -5255,6 +5314,10 @@ function loadFromURL(url) {
   // exercise generators continue their running state (direction,
   // last pitch, enclosure) through the repeat with fresh notes.
   bars = expandDCAlFine(bars);
+  // Same treatment for "D.C. al 2nd ending" — AABA charts like
+  // Alice in Wonderland end B with this marker and expect the
+  // renderer to append the common A bars plus the N2 ending.
+  bars = expandDCAl2ndEnding(bars);
   const normalized = normalizeKey(song.key);
   originalKey = normalized.key;
   currentKey = originalKey;
@@ -5793,12 +5856,12 @@ function applyLayoutMode() {
   if (landscape) {
     body.classList.add('layout-landscape');
     sidebar.hidden = false;
-    // Order (top → bottom): transport buttons, options, instruments,
-    // song list (fills), note info panel.
+    // Order (top → bottom): transport buttons, song list (fills),
+    // options, instruments, note info panel.
     sidebar.appendChild(topRow);
+    sidebar.appendChild(songListPanel);
     sidebar.appendChild(optionsPanel);
     if (instrumentsPanel) sidebar.appendChild(instrumentsPanel);
-    sidebar.appendChild(songListPanel);
     sidebar.appendChild(fbPanel);
     // Always open in landscape — CSS uses `display: flex !important` to
     // defeat the `hidden` attribute that the toggles leave behind.

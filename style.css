@@ -58,21 +58,27 @@ body.layout-landscape #sidebar .top-row {
   flex-wrap: wrap;
   gap: 4px;
 }
-/* Song picker / note-info toggle / options toggle are redundant in
-   landscape — their targets are already visible in the sidebar. */
+/* Song picker / note-info toggle / options toggle / instruments toggle
+   are redundant in landscape — their targets are already visible in
+   the sidebar. */
 body.layout-landscape #sidebar .song-picker,
+body.layout-landscape #sidebar #songPickerBtn,
 body.layout-landscape #sidebar #fbToggle,
-body.layout-landscape #sidebar #optionsToggle {
+body.layout-landscape #sidebar #optionsToggle,
+body.layout-landscape #sidebar #instrumentsToggle {
   display: none;
 }
-body.layout-landscape #sidebar #optionsPanel {
+body.layout-landscape #sidebar #optionsPanel,
+body.layout-landscape #sidebar #instrumentsPanel {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-body.layout-landscape #sidebar #optionsPanel[hidden] {
-  /* In landscape, the options panel is always visible — override the
-     `hidden` attribute that the toggle button might have left behind. */
+body.layout-landscape #sidebar #optionsPanel[hidden],
+body.layout-landscape #sidebar #instrumentsPanel[hidden] {
+  /* In landscape, both panels are always visible — override the
+     `hidden` attribute that the toggle buttons might have left
+     behind when switching orientations. */
   display: flex !important;
 }
 body.layout-landscape #sidebar #fingerboardPanel {
