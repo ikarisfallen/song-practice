@@ -3069,7 +3069,13 @@ function renderChart(song, barsIn, timesigStr) {
 
           const slotIdx = notes.length;
           notes.push(n);
-          barNoteData.push({ pitch: bp.pitch });
+          // Keep the StaveNote ref alongside the pitch/tpc so the
+          // fingering overlay can ask VexFlow directly for the
+          // notehead position (getAbsoluteX / getYs) instead of
+          // relying on DOM bounding-rect geometry — the latter
+          // includes the accidental glyph and throws off centering
+          // on sharps/flats.
+          barNoteData.push({ pitch: bp.pitch, tpc: bp.tpc, staveNote: n });
           for (let bb = b; bb < b + consume && bb < stepsPerBar; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
@@ -4050,31 +4056,80 @@ function updateFingeringOverlay(barIdx) {
     const rect = noteEl.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
     const noteX   = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
-    const noteTop = (rect.top                         - svgRect.top ) * vbSY + vbOY;
+    const noteTop = (rect.top                   - svgRect.top ) * vbSY + vbOY;
+    // Ask VexFlow directly for the notehead position. `getAbsoluteX()`
+    // returns the x at the left edge of the notehead (after any
+    // accidental glyph), and `getYs()[0]` returns the y of the
+    // note's pitch line. These are in the SVG's viewBox coordinate
+    // space — the same space our overlay group lives in, so no
+    // client-space conversion is needed.
+    let headCX = noteX;
+    let headCY = (rect.top + rect.height / 2 - svgRect.top) * vbSY + vbOY;
+    const sn = nd.staveNote;
+    if (sn) {
+      try {
+        const absX = sn.getAbsoluteX();
+        const ys   = sn.getYs && sn.getYs();
+        const noteheadW = (sn.getGlyphWidth && sn.getGlyphWidth()) || 10;
+        if (isFinite(absX) && ys && ys.length) {
+          headCX = absX + noteheadW / 2;
+          headCY = ys[0];
+        }
+      } catch (e) { /* fall back to DOM geometry */ }
+    }
 
     // Note on/below top staff line → fixed Y above the staff.
     // Note above top line (ledger lines) → lift above the note head.
     const labelY = noteTop < topLineY ? noteTop - LIFT_GAP : LABEL_Y;
     appendFingeringLabel(g, noteX, labelY, label, '#2e78ff');
+    // Note letter painted INSIDE the notehead in small white text.
+    // Uses the slot's stored TPC so spelling matches the staff
+    // (B♭ shows "B♭", not "A♯"). `inside: true` skips the white
+    // backdrop rect — the black notehead already provides contrast.
+    // Draw the letter centered on the notehead, with a tiny accidental
+    // glyph tucked into the upper-right if present. The accidental is
+    // drawn as a separate SVG text element so centering of the letter
+    // isn't thrown off by the wider ♭/♯ character.
+    const fullName = nd.tpc != null ? tpcToNoteName(nd.tpc) : null;
+    const letter = fullName ? fullName.charAt(0) : null;
+    if (letter) {
+      appendFingeringLabel(g, headCX, headCY, letter, '#fff', {
+        inside: true, fontSize: 7
+      });
+      const accidental = fullName && fullName.length > 1 ? fullName.slice(1) : null;
+      if (accidental) {
+        // Offset up-and-right from the notehead center. Tiny font so
+        // the glyph reads but doesn't crowd the letter.
+        appendFingeringLabel(g, headCX + 3.5, headCY - 2.5, accidental, '#fff', {
+          inside: true, fontSize: 5
+        });
+      }
+    }
   }
 
   fingeringOverlayEl = g;
   fingeringOverlayBarIdx = barIdx;
 }
 
-function appendFingeringLabel(parent, x, y, txt, color) {
+function appendFingeringLabel(parent, x, y, txt, color, opts) {
+  const fontSize = (opts && opts.fontSize) || 14;
+  const inside = !!(opts && opts.inside);
   const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
   t.setAttribute('x', x);
   t.setAttribute('y', y);
   t.setAttribute('text-anchor', 'middle');
   t.setAttribute('dominant-baseline', 'central');
   t.setAttribute('font-family', 'sans-serif');
-  t.setAttribute('font-size', 14);
+  t.setAttribute('font-size', fontSize);
   t.setAttribute('font-weight', 'bold');
   t.setAttribute('fill', color || '#000');
   t.setAttribute('stroke', 'none');
   t.textContent = txt;
   parent.appendChild(t);
+  // `inside: true` skips the white backdrop rect. Used for the note
+  // letter overlaid on the black notehead — the glyph itself is the
+  // background.
+  if (inside) return;
   // Measure the rendered text (parent must already be in the DOM for
   // this to work) and drop a white rect behind it so the label reads
   // clearly when it overlaps chord symbols above the staff.
