@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#1b2730" />
 <title>Song Practice</title>
-<link rel="manifest" href="manifest.webmanifest" />
+<link rel="manifest" href="manifest.json" />
 <link rel="icon" href="icon-192.png" type="image/png" sizes="192x192" />
 <link rel="icon" href="icon-512.png" type="image/png" sizes="512x512" />
 <link rel="icon" href="icon.svg" type="image/svg+xml" />
@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=61" />
+<link rel="stylesheet" href="style.css?v=67" />
 </head>
 <body>
 <div id="app">
@@ -40,10 +40,25 @@
         <svg viewBox="0 0 16 22" aria-hidden="true"><path d="M 3 2 L 13 2 L 13 20 L 3 20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="square"/></svg>
       </button>
       <button id="clearLoopBtn" class="top-btn" aria-label="Clear loop" disabled>✕</button>
-      <button type="button" id="songPickerBtn" class="song-picker" aria-label="Song library">
-        <span id="songName" class="song-label" aria-live="polite"></span>
+      <button type="button" id="songPickerBtn" class="top-btn" aria-label="Song library">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 6 L10 6 L12 8 L21 8 L21 19 L3 19 Z"
+                stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/>
+        </svg>
       </button>
       <button id="fbToggle" class="top-btn" aria-label="Toggle note info" aria-expanded="false">♪</button>
+      <button id="instrumentsToggle" class="top-btn" aria-label="Toggle instruments" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="7" width="18" height="12"
+                stroke="currentColor" stroke-width="1.8" fill="none"/>
+          <line x1="8"  y1="7" x2="8"  y2="19" stroke="currentColor" stroke-width="1.4"/>
+          <line x1="12" y1="7" x2="12" y2="19" stroke="currentColor" stroke-width="1.4"/>
+          <line x1="16" y1="7" x2="16" y2="19" stroke="currentColor" stroke-width="1.4"/>
+          <rect x="6.5"  y="7" width="3" height="7" fill="currentColor"/>
+          <rect x="10.5" y="7" width="3" height="7" fill="currentColor"/>
+          <rect x="14.5" y="7" width="3" height="7" fill="currentColor"/>
+        </svg>
+      </button>
       <button id="optionsToggle" class="top-btn" aria-label="Toggle options" aria-expanded="false">⚙</button>
     </div>
     <div id="optionsPanel" class="options-panel" hidden>
@@ -78,32 +93,6 @@
         </div>
       </div>
       <div class="drum-row">
-        <span class="drum-label">Tempo</span>
-        <div class="seg tempo-seg" id="tempoSeg" role="tablist">
-          <button type="button" data-bpm="80">Ballad (80)</button>
-          <button type="button" data-bpm="120" class="active">Medium (120)</button>
-          <button type="button" data-bpm="180">Up (180)</button>
-        </div>
-      </div>
-      <div class="drum-row">
-        <span class="drum-label">Drums</span>
-        <div class="seg" id="drumSeg" role="tablist">
-          <button type="button" data-mode="ride" class="active">Real</button>
-          <button type="button" data-mode="hat">2 & 4</button>
-          <button type="button" data-mode="click">Click</button>
-        </div>
-        <input type="range" id="drumVol" class="drum-vol" min="0" max="100" value="40" aria-label="Drum volume" />
-      </div>
-      <div class="drum-row">
-        <span class="drum-label">Piano</span>
-        <label class="wake-label">
-          <input type="checkbox" id="embellishToggle" class="switch-input" checked />
-          <span class="switch" aria-hidden="true"></span>
-          <span>Embellish Chords</span>
-        </label>
-        <input type="range" id="pianoVol" class="drum-vol" min="0" max="100" value="40" aria-label="Piano volume" />
-      </div>
-      <div class="drum-row">
         <span class="drum-label">Bars / Line</span>
         <div class="seg" id="mplSeg" role="tablist">
           <button type="button" data-mpl="1">1</button>
@@ -127,23 +116,10 @@
           <button type="button" data-r="3">3</button>
           <button type="button" data-r="4">4</button>
         </div>
-        <span class="drum-label">Count-in</span>
-        <div class="seg" id="countInSeg" role="tablist">
-          <button type="button" data-count="0">Off</button>
-          <button type="button" data-count="1" class="active">1 bar</button>
-          <button type="button" data-count="2">2 bars</button>
-        </div>
-      </div>
-      <div class="drum-row">
         <label class="wake-label">
           <input type="checkbox" id="wakeLock" class="switch-input" checked />
           <span class="switch" aria-hidden="true"></span>
           <span>Stay awake</span>
-        </label>
-        <label class="wake-label play-score-label">
-          <input type="checkbox" id="playScoreToggle" class="switch-input" />
-          <span class="switch" aria-hidden="true"></span>
-          <span>Play Score</span>
         </label>
         <label class="wake-label fingering-label">
           <input type="checkbox" id="fingeringToggle" class="switch-input" />
@@ -152,9 +128,55 @@
         </label>
       </div>
     </div>
+    <div id="instrumentsPanel" class="options-panel" hidden>
+      <div class="drum-row">
+        <span class="drum-label">Tempo</span>
+        <div class="seg tempo-seg" id="tempoSeg" role="tablist">
+          <button type="button" data-bpm="80">Ballad (80)</button>
+          <button type="button" data-bpm="120" class="active">Medium (120)</button>
+          <button type="button" data-bpm="180">Up (180)</button>
+        </div>
+      </div>
+      <div class="drum-row">
+        <span class="drum-label">Count-in</span>
+        <div class="seg" id="countInSeg" role="tablist">
+          <button type="button" data-count="0">Off</button>
+          <button type="button" data-count="1" class="active">1 bar</button>
+          <button type="button" data-count="2">2 bars</button>
+        </div>
+      </div>
+      <div class="drum-row">
+        <span class="drum-label">Drums</span>
+        <div class="seg" id="drumSeg" role="tablist">
+          <button type="button" data-mode="ride" class="active">Real</button>
+          <button type="button" data-mode="hat">2 & 4</button>
+          <button type="button" data-mode="click">Click</button>
+        </div>
+        <input type="range" id="drumVol" class="drum-vol" min="0" max="100" value="40" aria-label="Drum volume" />
+      </div>
+      <div class="drum-row">
+        <span class="drum-label">Piano</span>
+        <label class="wake-label">
+          <input type="checkbox" id="embellishToggle" class="switch-input" checked />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Embellish Chords</span>
+        </label>
+        <input type="range" id="pianoVol" class="drum-vol" min="0" max="100" value="40" aria-label="Piano volume" />
+      </div>
+      <div class="drum-row">
+        <span class="drum-label">Lead</span>
+        <label class="wake-label">
+          <input type="checkbox" id="playScoreToggle" class="switch-input" />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Play Score</span>
+        </label>
+        <input type="range" id="leadVol" class="drum-vol" min="0" max="100" value="40" aria-label="Lead volume" />
+      </div>
+    </div>
   </header>
 
   <main>
+    <div id="scoreTitle" class="score-title" aria-live="polite"></div>
     <div id="chart" class="chart"></div>
   </main>
   <div class="fingerboard-section">
@@ -178,7 +200,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v1.1</span>
+      <span class="app-version" id="appVersion">v1.9</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -186,7 +208,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=237"></script>
+<script src="app.js?v=240"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

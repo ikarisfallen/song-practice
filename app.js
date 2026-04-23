@@ -2612,6 +2612,27 @@ let songRepeats = 1;
 let exerciseMode = 'scale'; // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
 
+// Refresh the title line above the score: "{song name} ({exercise})".
+// Called on song load and whenever the exercise picker changes, so the
+// title always reflects what's currently being drawn. Takes an optional
+// explicit song arg for the render-time case (renderChart fires before
+// `window.currentSong` is assigned in loadSong); callers from elsewhere
+// can fall back on the global.
+function updateScoreTitle(songArg) {
+  const el = document.getElementById('scoreTitle');
+  if (!el) return;
+  const song = songArg ||
+    (window.currentSong && window.currentSong.song) || null;
+  const title = (song && song.title) || '';
+  const sel = document.getElementById('exerciseSelect');
+  let exLabel = '';
+  if (sel && sel.selectedIndex >= 0) {
+    const opt = sel.options[sel.selectedIndex];
+    if (opt) exLabel = opt.text || '';
+  }
+  el.textContent = title && exLabel ? `${title} (${exLabel})` : title || '';
+}
+
 // Split the input bars at the first coda (Q) marker and, when the
 // song is set to repeat, emit body*N then coda*1 (not body+coda*N).
 // iRealPro charts show the coda section once at the very bottom of
@@ -2688,10 +2709,12 @@ function renderChart(song, barsIn, timesigStr) {
   // options toggled the bar count).
   selectedBar = null;
 
-  // Song title lives in the top bar (between Clear Loop and the song
-  // picker) — set it here so it refreshes on every song load.
-  const nameEl = document.getElementById('songName');
-  if (nameEl) nameEl.textContent = (song && song.title) || '';
+  // Song title line at the top of the score: "{song} ({exercise})".
+  // The old in-button text label was replaced by a folder icon when
+  // the song picker was converted to an icon-only button. Pass `song`
+  // explicitly because renderChart runs BEFORE loadSong assigns
+  // `window.currentSong`, so the global fallback isn't populated yet.
+  updateScoreTitle(song);
 
   if (!window.Vex || !window.Vex.Flow) {
     chartEl.textContent = 'VexFlow failed to load.';
@@ -3691,7 +3714,7 @@ function midiToName(m) {
 }
 
 // ===== Tone.js playback =====
-let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut, pianoOut;
+let transport, piano, hat, rideBody, rideBell, rideNoise, click, drumsOut, pianoOut, leadOut;
 let realHihat, brushSweep, brushTap;
 let guitar; // Sampler used by the "Play Score" switch.
 // Real drum loops, looped via the Transport. Each entry records the source
@@ -3738,6 +3761,10 @@ async function initAudio() {
     volume: -3
   }).connect(pianoOut);
 
+  // Lead (Play Score) bus — Lead-row volume slider controls this gain.
+  const initLeadVol = parseInt(document.getElementById('leadVol').value, 10) / 100;
+  leadOut = new Tone.Gain(isFinite(initLeadVol) ? initLeadVol : 0.4).connect(reverb);
+
   // Clean electric (jazz) guitar sampler for the "Play Score" switch.
   // Uses the nbrosowsky/tonejs-instruments guitar-electric pack.
   // Tone.Sampler interpolates intermediate pitches from these
@@ -3765,7 +3792,7 @@ async function initAudio() {
     baseUrl: 'https://nbrosowsky.github.io/tonejs-instruments/samples/guitar-electric/',
     release: 0.6,
     volume: -2
-  }).connect(reverb);
+  }).connect(leadOut);
 
   document.getElementById('status').textContent = 'Loading samples…';
 
@@ -5474,21 +5501,43 @@ document.getElementById('pianoVol').addEventListener('input', e => {
   if (pianoOut) pianoOut.gain.rampTo(v, 0.05);
 });
 
-// Options panel toggle
+document.getElementById('leadVol').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10) / 100;
+  if (leadOut) leadOut.gain.rampTo(v, 0.05);
+});
+
+// Options / Instruments panel toggles. The two panels are mutually
+// exclusive in portrait — opening one closes the other so we don't
+// end up with a wall of controls above the score.
 (function () {
-  const toggle = document.getElementById('optionsToggle');
-  const panel = document.getElementById('optionsPanel');
-  if (!toggle || !panel) return;
-  toggle.addEventListener('click', () => {
-    const hidden = panel.hasAttribute('hidden');
-    if (hidden) {
+  const optToggle = document.getElementById('optionsToggle');
+  const instToggle = document.getElementById('instrumentsToggle');
+  const optPanel = document.getElementById('optionsPanel');
+  const instPanel = document.getElementById('instrumentsPanel');
+  function setOpen(panel, btn, open) {
+    if (!panel || !btn) return;
+    if (open) {
       panel.removeAttribute('hidden');
-      toggle.setAttribute('aria-expanded', 'true');
+      btn.setAttribute('aria-expanded', 'true');
     } else {
       panel.setAttribute('hidden', '');
-      toggle.setAttribute('aria-expanded', 'false');
+      btn.setAttribute('aria-expanded', 'false');
     }
-  });
+  }
+  if (optToggle && optPanel) {
+    optToggle.addEventListener('click', () => {
+      const opening = optPanel.hasAttribute('hidden');
+      setOpen(optPanel, optToggle, opening);
+      if (opening) setOpen(instPanel, instToggle, false);
+    });
+  }
+  if (instToggle && instPanel) {
+    instToggle.addEventListener('click', () => {
+      const opening = instPanel.hasAttribute('hidden');
+      setOpen(instPanel, instToggle, opening);
+      if (opening) setOpen(optPanel, optToggle, false);
+    });
+  }
 })();
 
 document.querySelectorAll('#countInSeg button').forEach(b => {
@@ -5509,6 +5558,7 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
     const ex = sel.value;
     exerciseMode = (ex === 'head' || ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
       ? ex : 'scale';
+    updateScoreTitle();
     rerenderCurrent();
     if (playState === 'playing' && window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
@@ -5696,16 +5746,18 @@ function applyLayoutMode() {
   const fbSection = document.querySelector('.fingerboard-section');
   const topRow = document.querySelector('.top-row');
   const optionsPanel = document.getElementById('optionsPanel');
+  const instrumentsPanel = document.getElementById('instrumentsPanel');
   const fbPanel = document.getElementById('fingerboardPanel');
   const songListPanel = document.getElementById('songListPanel');
 
   if (landscape) {
     body.classList.add('layout-landscape');
     sidebar.hidden = false;
-    // Order (top → bottom): transport buttons, options, song list (fills),
-    // note info panel.
+    // Order (top → bottom): transport buttons, options, instruments,
+    // song list (fills), note info panel.
     sidebar.appendChild(topRow);
     sidebar.appendChild(optionsPanel);
+    if (instrumentsPanel) sidebar.appendChild(instrumentsPanel);
     sidebar.appendChild(songListPanel);
     sidebar.appendChild(fbPanel);
     // Always open in landscape — CSS uses `display: flex !important` to
@@ -5716,6 +5768,7 @@ function applyLayoutMode() {
     // Restore original mobile positions.
     header.insertBefore(topRow, header.firstChild);
     header.appendChild(optionsPanel);
+    if (instrumentsPanel) header.appendChild(instrumentsPanel);
     fbSection.appendChild(fbPanel);
     // Pull songListPanel BACK OUT of the sidebar in portrait — if it
     // stayed inside `<aside id="sidebar" hidden>`, the `display: none`
@@ -5728,6 +5781,11 @@ function applyLayoutMode() {
     // Restore the hidden state that the toggle buttons expect.
     const optExp = document.getElementById('optionsToggle').getAttribute('aria-expanded') === 'true';
     optionsPanel.hidden = !optExp;
+    const instToggleEl = document.getElementById('instrumentsToggle');
+    if (instrumentsPanel && instToggleEl) {
+      const instExp = instToggleEl.getAttribute('aria-expanded') === 'true';
+      instrumentsPanel.hidden = !instExp;
+    }
     const fbExp = document.getElementById('fbToggle').getAttribute('aria-expanded') === 'true';
     fbPanel.hidden = !fbExp;
   }

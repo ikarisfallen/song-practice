@@ -123,6 +123,13 @@ header {
 .top-row {
   display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
 }
+/* Push the song-picker button (folder) and every button after it to
+   the right edge of the top row. Play / rewind / loop buttons stay
+   on the left. `margin-left: auto` on the first right-group item is
+   all flexbox needs — flex-wrap still works when the row overflows
+   because margin-auto only applies to items sharing a line with the
+   left group. */
+.top-row > #songPickerBtn { margin-left: auto; }
 
 /* Shared style for every button in the top bar: identical footprint,
    rounded rectangle, dark pill. Sized to fit eight in a row on a standard
@@ -146,6 +153,9 @@ header {
   pointer-events: none;
 }
 .top-btn svg { width: 16px; height: 22px; display: block; }
+/* Square-viewBox icons (folder, instruments) render at their natural
+   aspect so they don't stretch like the 16×22 loop-bracket glyphs. */
+.top-btn svg[viewBox="0 0 24 24"] { width: 22px; height: 22px; }
 
 /* Small loop glyph shown at the bottom-right of the play button when both
    Loop In and Loop Out brackets are placed. Hidden otherwise. */
@@ -344,6 +354,19 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
 .key-seg button:nth-child(6n+1) { border-left: 0; }
 .key-seg button:nth-child(n+7)  { border-top: 1px solid #334654; }
 .drum-vol { flex: 1; min-width: 60px; accent-color: #3da9fc; }
+/* Rows that own a volume slider (Drums, Piano, Lead) get a shared
+   grid so the sliders line up on their left edges no matter how wide
+   the middle control is (3-button seg vs a single switch, etc.).
+   Column 1 = label, column 2 = segment/switch area, column 3 = slider.
+   `min-height` is tuned to the Drums row's seg-button height so the
+   Piano and Lead rows (whose switches are shorter) inflate to match. */
+.drum-row:has(.drum-vol) {
+  display: grid;
+  grid-template-columns: 55px 200px 1fr;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
 .wake-label {
   font-size: 13px; color: #cde; display: inline-flex; align-items: center; gap: 8px;
   user-select: none; cursor: pointer;
@@ -396,12 +419,22 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
 main {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 10px 10px 0;
+  /* Tight top so the score title sits close to the toolbar. */
+  padding: 2px 10px 2px;
   overflow: hidden;
+  /* Flex column so the chart fills exactly the remaining space under
+     the title — no overflow at the bottom, so the chart's rounded
+     corners aren't clipped. */
+  display: flex;
+  flex-direction: column;
 }
 
 .chart {
-  height: 100%;
+  /* Grow to fill the main column below the score title — no `height:
+     100%` so we don't overflow main when the title takes some space,
+     which was clipping the bottom rounded corners. */
+  flex: 1 1 auto;
+  min-height: 0;
   box-sizing: border-box;
   background: #fff;
   color: #000;
@@ -464,6 +497,10 @@ main {
   padding: 10px;
   background: #1b2730;
 }
+/* When the inner panel is hidden there's nothing to show — collapse the
+   section's padding so the score can run all the way down to the status
+   bar instead of leaving a dead band above it. */
+.fingerboard-section:has(> .fingerboard-panel[hidden]) { padding: 0; }
 .fingerboard-panel {
   background: #fff;
   color: #000;
@@ -610,6 +647,22 @@ html.is-android .fl {
 }
 
 .tempo-info { font-size: 12px; color: #9ab; }
+
+/* Song + exercise label sitting above the score. Replaces the text
+   that used to live inside the song-picker top-bar button. Kept
+   compact so it doesn't add noticeable gap between the toolbar and
+   the first staff line. */
+.score-title {
+  padding: 0 12px 2px;
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.2;
+  color: #9fb3c2;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+.score-title:empty { display: none; }
 
 /* Footer row: status text on the left, version tag pinned to the right.
    The .status div keeps its own styling so existing textContent writes
