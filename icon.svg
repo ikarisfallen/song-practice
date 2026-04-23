@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Theme-matching rounded background. Maskable safe-zone is the
+       central 80% circle (~204px radius), so the note stays well inside. -->
+  <rect width="512" height="512" rx="96" fill="#1b2730"/>
+  <!-- Eighth note in the app's accent blue. -->
+  <g fill="#3da9fc">
+    <!-- Notehead (tilted oval) -->
+    <ellipse cx="190" cy="360" rx="62" ry="46" transform="rotate(-22 190 360)"/>
+    <!-- Stem -->
+    <rect x="243" y="140" width="16" height="230"/>
+    <!-- Flag -->
+    <path d="M 259 140
+             C 330 170 360 230 344 300
+             C 338 260 314 230 259 220 Z"/>
+  </g>
+</svg>

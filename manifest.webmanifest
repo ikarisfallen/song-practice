@@ -1,0 +1,19 @@
+{
+  "name": "Song Practice",
+  "short_name": "Song Practice",
+  "description": "Practice jazz song heads and exercises over chord changes.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1b2730",
+  "theme_color": "#1b2730",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any maskable"
+    }
+  ]
+}
