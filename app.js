@@ -5623,7 +5623,12 @@ async function initSongLibrary() {
   librarySongs.forEach((entry, i) => {
     if (songListEl) {
       const li = document.createElement('li');
-      li.textContent = entry.title;
+      // Wrap the title in its own span so the filter can target just
+      // the song name and ignore any HEAD badge we append below.
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'song-name';
+      nameSpan.textContent = entry.title;
+      li.appendChild(nameSpan);
       li.dataset.idx = String(i);
       li.setAttribute('role', 'option');
       li.addEventListener('click', () => {
@@ -5640,6 +5645,18 @@ async function initSongLibrary() {
         closeSongPicker();
       });
       songListEl.appendChild(li);
+      // Fire a HEAD request per song (in parallel) to detect a
+      // companion .musicxml / .mid file in the songs/ folder. When
+      // one exists, tag the list item with a small "HEAD" badge on
+      // the right. We don't block list rendering on this — badges
+      // appear as probes resolve.
+      probeSongHasHead(entry.title).then(hasHead => {
+        if (!hasHead) return;
+        const badge = document.createElement('span');
+        badge.className = 'head-badge';
+        badge.textContent = 'HEAD';
+        li.appendChild(badge);
+      });
     }
   });
 
@@ -5668,6 +5685,23 @@ function selectSongByIndex(idx) {
   }
 }
 
+// Check whether a song has a companion head file (.musicxml or .mid)
+// in the songs/ folder. Issues a HEAD request against each candidate
+// URL — cheap, no body download — and returns true for the first one
+// that responds 2xx. Used to decorate the song-picker list with a
+// "HEAD" badge without having to actually load the head data.
+async function probeSongHasHead(title) {
+  if (!title) return false;
+  for (const ext of ['musicxml', 'mid']) {
+    const url = `songs/${encodeURIComponent(title)}.${ext}`;
+    try {
+      const res = await fetch(url, { method: 'HEAD' });
+      if (res.ok) return true;
+    } catch (e) { /* network error → try next ext */ }
+  }
+  return false;
+}
+
 // ----- Song picker popup (portrait) + filter (both layouts) -----
 function isLandscape() {
   return document.body.classList.contains('layout-landscape');
@@ -5689,7 +5723,13 @@ function closeSongPicker() {
 function applySongFilter(q) {
   const needle = (q || '').trim().toLowerCase();
   document.querySelectorAll('#songList li').forEach(li => {
-    const hit = !needle || li.textContent.toLowerCase().includes(needle);
+    // Match against the song name only — the HEAD badge lives in a
+    // sibling span, so `li.textContent` would also include "HEAD"
+    // and any search for "h", "he", "head" would spuriously match
+    // every song with a head file.
+    const nameEl = li.querySelector('.song-name');
+    const text = (nameEl ? nameEl.textContent : li.textContent).toLowerCase();
+    const hit = !needle || text.includes(needle);
     li.hidden = !hit;
   });
   const clearBtn = document.getElementById('songFilterClear');

@@ -100,6 +100,30 @@ body.layout-landscape #songListPanel { display: block; }
   font-size: 13px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   border-bottom: 1px solid #22313d;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Song name takes only its intrinsic width so the HEAD badge sits
+   directly after the title instead of floating to the right edge. */
+.song-list li .song-name { flex: 0 0 auto; min-width: 0; }
+/* Small pill tagging songs that ship a head file (.musicxml / .mid).
+   Pinned to the right of the row via the flex row on .song-list li. */
+.song-list li .head-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #2a4a5e;
+  color: #9ec7e0;
+  border: 1px solid #3a5b70;
+}
+.song-list li.active .head-badge {
+  background: rgba(255,255,255,0.2);
+  color: #052033;
+  border-color: rgba(5,32,51,0.35);
 }
 .song-list li:last-child { border-bottom: 0; }
 .song-list li:hover { background: #22313d; }
