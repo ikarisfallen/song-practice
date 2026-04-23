@@ -121,7 +121,7 @@ header {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
 .top-row {
-  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
 }
 /* Push the song-picker button (folder) and every button after it to
    the right edge of the top row. Play / rewind / loop buttons stay
