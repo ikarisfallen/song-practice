@@ -3147,6 +3147,35 @@ function renderChart(song, barsIn, timesigStr) {
             ? [ { dur: 'h', steps: 4  }, { dur: 'q', steps: 2 }, { dur: '8', steps: 1 } ]
             : [ { dur: 'h', steps: 2  }, { dur: 'q', steps: 1 } ];
           const halfBarSteps = stepsPerBar / 2;
+          // Whole-bar shortcut: when the entire bar is silent and we're
+          // starting at beat 1, emit ONE rest spanning the bar — a
+          // whole rest in 4/4 or a dotted-half rest in 3/4 — instead
+          // of subdividing into q+8+q+8 chunks.
+          const fullBarRestDur = (b === 0 && run === stepsPerBar)
+            ? (ts.num === 4 ? 'w' : ts.num === 3 ? 'h.' : null)
+            : null;
+          // Helper: build a rest StaveNote, stripping any trailing dots
+          // and attaching them as Dot modifiers (VexFlow doesn't accept
+          // dotted duration tokens directly, same as for dotted notes).
+          const makeRestNote = (dur) => {
+            let base = dur;
+            let dots = 0;
+            while (base.endsWith('.')) { dots++; base = base.slice(0, -1); }
+            const r = new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: base + 'r' });
+            if (dots > 0 && VF.Dot && VF.Dot.buildAndAttach) {
+              VF.Dot.buildAndAttach([r], { all: true });
+            }
+            return r;
+          };
+          if (fullBarRestDur) {
+            if (simileStart != null && b >= simileStart) {
+              simileRestSlots.push(notes.length);
+            }
+            notes.push(makeRestNote(fullBarRestDur));
+            barNoteData.push(null);
+            b += run;
+            run = 0;
+          }
           while (run > 0) {
             // Biggest rest that (a) fits in remaining run, (b) doesn't
             // cross the midpoint of the bar if starting in the first
@@ -3168,7 +3197,7 @@ function renderChart(song, barsIn, timesigStr) {
               // 3/4 it's typically a quarter-rest + eighth-rest pair.
               simileRestSlots.push(notes.length);
             }
-            notes.push(new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: chosen.dur + 'r' }));
+            notes.push(makeRestNote(chosen.dur));
             barNoteData.push(null);
             b += chosen.steps;
             run -= chosen.steps;
@@ -5081,32 +5110,46 @@ function expandDCAl2ndEnding(bars) {
   });
   if (!hasDCAl2nd) return bars;
 
-  // First N1 (first ending) bar — uses loose equality because the
-  // parser stores `ending` as a string ("1"/"2") while callers often
-  // think in numbers.
-  const firstN1Idx = bars.findIndex(b => b.ending == 1);
-  // Full list of N2 (second ending) bar indices, in order.
-  const n2Indices = [];
-  bars.forEach((b, i) => { if (b.ending == 2) n2Indices.push(i); });
-  if (firstN1Idx < 0 || n2Indices.length === 0) return bars;
+  // N1 (first ending) range: from the first bar tagged ending==1
+  // to the last one. Loose equality because the parser stores
+  // `ending` as a string ("1"/"2") while callers think in numbers.
+  let firstN1Idx = -1, lastN1Idx = -1;
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].ending == 1) {
+      if (firstN1Idx < 0) firstN1Idx = i;
+      lastN1Idx = i;
+    }
+  }
+  // N2 (second ending) starts at the first bar tagged ending==2.
+  // Its length matches N1 — iReal's expandIRealRepeats uses the
+  // same convention, because Kcl / repeat-prev bars inside N2
+  // don't carry the ending tag of their own.
+  let firstN2Idx = -1;
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].ending == 2) { firstN2Idx = i; break; }
+  }
+  if (firstN1Idx < 0 || firstN2Idx < 0) return bars;
+
+  const n1Length = lastN1Idx - firstN1Idx + 1;
+  const n2EndIdx = Math.min(firstN2Idx + n1Length - 1, bars.length - 1);
 
   // If a Fine marker sits inside the N2 range, cap the appended
   // second ending at that bar. Otherwise include every N2 bar.
   const FINE_RE = /^\s*fine\s*\.?\s*$/i;
-  let n2EndIdx = n2Indices.length - 1;
-  for (let k = 0; k < n2Indices.length; k++) {
-    const b = bars[n2Indices[k]];
+  let effN2End = n2EndIdx;
+  for (let k = firstN2Idx; k <= n2EndIdx; k++) {
+    const b = bars[k];
     const hasFine = (b.markers || []).some(m =>
       m.type === 'comment' && FINE_RE.test((m.text || '').trim())
     );
-    if (hasFine) { n2EndIdx = k; break; }
+    if (hasFine) { effN2End = k; break; }
   }
 
   const out = bars.slice();
   // Common bars 0..firstN1-1.
   for (let j = 0; j < firstN1Idx; j++) out.push(bars[j]);
-  // Then N2 up to (and including) the Fine bar.
-  for (let k = 0; k <= n2EndIdx; k++) out.push(bars[n2Indices[k]]);
+  // Then N2 from its first bar up to (and including) the Fine bar.
+  for (let k = firstN2Idx; k <= effN2End; k++) out.push(bars[k]);
   return out;
 }
 
@@ -5161,13 +5204,26 @@ function expandIRealRepeats(bars) {
           }
         }
 
-        // First pass: common bars plus N1 ending (bars i..j).
-        for (let k = i; k <= j; k++) out.push(stripRepeatBarlines(bars[k]));
+        // First pass: common bars plus N1 ending (bars i..j). Tag
+        // EVERY bar in the N1 range with `ending = '1'` — iReal only
+        // stores the marker on the first bar of the group, but later
+        // passes (e.g. expandDCAl2ndEnding) need to know the full
+        // extent. Kcl / repeat-prev bars inside the group otherwise
+        // look untagged and get missed.
+        for (let k = i; k <= j; k++) {
+          const b = stripRepeatBarlines(bars[k]);
+          if (n1Start >= 0 && k >= n1Start) b.ending = '1';
+          out.push(b);
+        }
         // Second pass: common bars, then jump to N2 (skipping N1).
         const commonEnd = n1Start >= 0 ? n1Start - 1 : j;
         for (let k = i; k <= commonEnd; k++) out.push(stripRepeatBarlines(bars[k]));
         if (n2Start >= 0) {
-          for (let k = n2Start; k <= n2End; k++) out.push(stripRepeatBarlines(bars[k]));
+          for (let k = n2Start; k <= n2End; k++) {
+            const b = stripRepeatBarlines(bars[k]);
+            b.ending = '2';
+            out.push(b);
+          }
           i = n2End + 1;
         } else {
           i = j + 1;
