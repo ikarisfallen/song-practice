@@ -75,7 +75,12 @@ function tokenize(body) {
     [/^p/, 'pause'],
     [/^,/, 'comma'],
     // chord: root [quality] [extensions] [alterations] [sus] [/bass]
-    [/^([A-GW])((?:[#b])?(?:\^|\-|h|o|\+|sus)?(?:\d+(?:sus)?)?(?:(?:[#b])\d+)*(?:sus\d?)?)(\/([A-G][#b]?))?/, 'chord'],
+    // Quality section uses `*` (not `?`) so stacked markers like "-^"
+    // for min-maj7 (iRealPro's encoding of Cm(maj7) = "C-^7") are
+    // consumed together. Without the star, the "-" was matched and
+    // the "^7" was left as unparseable garbage, so Cm(maj7) rendered
+    // as plain "Cm" and was treated as pure minor for scale picking.
+    [/^([A-GW])((?:[#b])?(?:\^|\-|h|o|\+|sus)*(?:\d+(?:sus)?)?(?:(?:[#b])\d+)*(?:sus\d?)?)(\/([A-G][#b]?))?/, 'chord'],
   ];
   let s = body;
   let guard = 0;
@@ -379,7 +384,11 @@ function exGetScale(chordText) {
   if (/^h/i.test(q)) return SCALE_LOCRIAN; // iRealPro half-dim
   if (/dim|°/i.test(q)) return SCALE_DIMINISHED;
   if (/^o/i.test(q)) return SCALE_DIMINISHED; // iRealPro fully-dim
-  if (/^(m(?!a)|min|mi|\-|−)/i.test(q) && /maj|ma/i.test(q)) return SCALE_MELODIC_MINOR;
+  // Minor-major (e.g. Cm(maj7), C-Δ7, iRealPro "C-^7"): both the
+  // textual "maj"/"ma" spelling and the symbolic Δ/∆/^ spelling
+  // count as the major qualifier, paired with the minor quality
+  // signal on the left (m/min/-).
+  if (/^(m(?!a)|min|mi|\-|−)/i.test(q) && /maj|ma|Δ|∆|\^/i.test(q)) return SCALE_MELODIC_MINOR;
   if (/maj|ma/i.test(q)) return SCALE_IONIAN;
   if (/^M([0-9]|$)/.test(q)) return SCALE_IONIAN;
   if (/[Δ∆\^]/.test(q)) return SCALE_IONIAN;
@@ -2680,7 +2689,19 @@ function chordText(ch) {
     else { quality = 'Maj'; }
   } else if (r.startsWith('-')) {
     r = r.substring(1);
-    quality = 'm';
+    // iRealPro encodes minor-major (e.g. Cm(maj7)) as "-^" followed
+    // by the extension. Without this branch we'd swallow the "-"
+    // and leave "^7" behind as an extension, which rendered as
+    // plain "Cm" (the caret + 7 were lost in the accidental
+    // substitution pass). Keep the Maj7 quality label consistent
+    // with how "^7" alone renders elsewhere in the chart.
+    if (r.startsWith('^')) {
+      r = r.substring(1);
+      if (r.startsWith('7')) { quality = 'mMaj7'; r = r.substring(1); }
+      else { quality = 'mMaj'; }
+    } else {
+      quality = 'm';
+    }
   } else if (r.startsWith('h')) {
     r = r.replace(/^h7?/, '');
     quality = 'm7♭5';
