@@ -110,6 +110,10 @@ body.layout-landscape #songListPanel { display: block; }
   align-items: center;
   gap: 8px;
 }
+/* `display: flex` above overrides the default `[hidden] { display: none }`
+   because it has higher specificity. Force the hidden state to actually
+   hide filtered-out songs. */
+.song-list li[hidden] { display: none; }
 /* Song name takes only its intrinsic width so the HEAD badge sits
    directly after the title instead of floating to the right edge. */
 .song-list li .song-name { flex: 0 0 auto; min-width: 0; }

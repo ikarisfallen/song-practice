@@ -6047,6 +6047,11 @@ async function initSongLibrary() {
     }
   });
 
+  // Safety-net the filter-input listeners — bindSongPickerControls
+  // already ran once at script load, but if anything ever re-inserts
+  // the input element these calls re-establish the handlers.
+  ensureSongFilterBindings();
+
   try {
     loadFromURL(librarySongs[0].url);
   } catch (e) {
@@ -6105,6 +6110,13 @@ function openSongPicker() {
 function closeSongPicker() {
   const panel = document.getElementById('songListPanel');
   if (!panel) return;
+  // Clear the filter on portrait close so the next open shows the
+  // full list. Landscape keeps the filter because the panel stays
+  // open as a sidebar — clearing there would be surprising.
+  if (!isLandscape()) {
+    const f = document.getElementById('songFilter');
+    if (f && f.value) { f.value = ''; applySongFilter(''); }
+  }
   panel.classList.remove('open');
 }
 function applySongFilter(q) {
@@ -6122,32 +6134,54 @@ function applySongFilter(q) {
   const clearBtn = document.getElementById('songFilterClear');
   if (clearBtn) clearBtn.hidden = !(q && q.length > 0);
 }
+// Document-level event delegation for the filter input and clear
+// button. Bound ONCE on the document, so the handler fires regardless
+// of whether the specific #songFilter element ever gets reparented,
+// replaced, or re-rendered. Much more robust than per-element
+// addEventListener.
+let _songFilterDelegationBound = false;
+function ensureSongFilterBindings() {
+  if (_songFilterDelegationBound) return;
+  _songFilterDelegationBound = true;
+  document.addEventListener('input', e => {
+    if (e.target && e.target.id === 'songFilter') {
+      applySongFilter(e.target.value);
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (!e.target || e.target.id !== 'songFilter') return;
+    if (e.key === 'Escape') {
+      if (e.target.value) {
+        e.target.value = '';
+        applySongFilter('');
+      } else if (!isLandscape()) {
+        closeSongPicker();
+      }
+    }
+  });
+  document.addEventListener('click', e => {
+    if (!e.target) return;
+    // Walk up a couple of levels in case the click landed on the ✕
+    // glyph inside the button element.
+    let node = e.target;
+    for (let i = 0; i < 3 && node; i++) {
+      if (node.id === 'songFilterClear') {
+        const f = document.getElementById('songFilter');
+        if (f) { f.value = ''; applySongFilter(''); f.focus(); }
+        return;
+      }
+      node = node.parentNode;
+    }
+  });
+}
 (function bindSongPickerControls() {
   const btn = document.getElementById('songPickerBtn');
   if (btn) btn.addEventListener('click', openSongPicker);
   const closeBtn = document.getElementById('songPickerClose');
   if (closeBtn) closeBtn.addEventListener('click', closeSongPicker);
-  const filter = document.getElementById('songFilter');
-  if (filter) {
-    filter.addEventListener('input', e => applySongFilter(e.target.value));
-    filter.addEventListener('keydown', e => {
-      if (e.key === 'Escape') {
-        if (filter.value) {
-          filter.value = '';
-          applySongFilter('');
-        } else if (!isLandscape()) {
-          closeSongPicker();
-        }
-      }
-    });
-  }
-  const clearBtn = document.getElementById('songFilterClear');
-  if (clearBtn) {
-    clearBtn.addEventListener('click', () => {
-      const f = document.getElementById('songFilter');
-      if (f) { f.value = ''; applySongFilter(''); f.focus(); }
-    });
-  }
+  // Filter input + clear button listeners live in ensureSongFilterBindings
+  // so initSongLibrary can re-establish them after a rebuild.
+  ensureSongFilterBindings();
 })();
 
 function syncSongSelectionUI(idx) {
