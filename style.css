@@ -522,9 +522,29 @@ main {
   pointer-events: none;
 }
 .form-separator {
-  height: 0;
-  border-top: 2px solid #000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 10px 6px;
+  color: #000;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: serif;
+  font-style: italic;
+}
+/* Trailing line fills whatever horizontal space is left after the
+   optional "Repeat N" label — so the separator always has the same
+   visual weight across the page. */
+.form-separator::after {
+  content: '';
+  flex: 1;
+  border-top: 2px solid #000;
+}
+/* "Repeat N" label on the left of a separator that has one. Passes
+   that don't carry a label (the first pass under the chart title,
+   and the last separator before a coda) skip this rule. */
+.form-separator[data-repeat-label]::before {
+  content: attr(data-repeat-label);
 }
 .fingerboard-section {
   flex-shrink: 0;

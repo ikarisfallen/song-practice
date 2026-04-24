@@ -3576,10 +3576,16 @@ function renderChart(song, barsIn, timesigStr) {
       svgEl.querySelectorAll('.vf-stavebarline').forEach(g => svgEl.appendChild(g));
     }
 
-    // Add a horizontal separator between full-form repeats.
+    // Add a horizontal separator between full-form repeats. Tag the
+    // separator with the NEXT pass's label (e.g. "Repeat 2" for the
+    // line that introduces the second pass) so the CSS can render
+    // the text inline at the left edge. The first pass gets no
+    // label — it's just the song body.
     if (rowEnd === passBoundary && passBoundary < bars.length) {
+      const nextPassNumber = passIdx + 2;
       const sep = document.createElement('div');
       sep.className = 'form-separator';
+      sep.dataset.repeatLabel = 'Repeat ' + nextPassNumber;
       chartEl.appendChild(sep);
     }
     rowStart = rowEnd;
@@ -4742,21 +4748,14 @@ function selectBar(idx) {
   updateLoopControls();
   if (playState === 'playing') {
     if (!window.currentSong) return;
-    // Inside an active loop, just move the Transport's playhead to
-    // the clicked bar and keep the existing Part running. Rebuilding
-    // the Part via startPlayback was landing on the wrong bar inside
-    // the loop range — the new Part's scheduler interacts oddly with
-    // a Transport.position that already sits inside its loop window.
-    // Seeking works reliably because the Part stays continuous; only
-    // the clock jumps.
-    if (hasLoop && idx >= loopIn && idx <= loopOut
-        && playbackPart && pauseContext) {
-      const pauseOffset = pauseContext.offset || 0;
-      Tone.Transport.position = `${pauseOffset + idx}:0:0`;
-      currentPlayingBar = idx;
-      Tone.Draw.schedule(() => highlightBar(idx), Tone.now());
-      return;
-    }
+    // Full playback rebuild at the selected bar. We used to take a
+    // fast path here when seeking inside an active loop — just moving
+    // Transport.position — but that leaves the real-drum Tone.Player
+    // and piano comping scheduler at their previous buffer offsets,
+    // so they end up out of phase with the new bar's downbeat. A
+    // clean rebuild re-aligns the drum buffer to the target bar
+    // (same math as the initial Play press). Brief (<100 ms) gap
+    // while Tone tears down and re-queues events.
     const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
     // Fire-and-forget: startPlayback is async only for initAudio(), which
     // has already resolved by the time we're playing. The first barStart /
@@ -5254,6 +5253,7 @@ async function startPlayback(song, bars, startBarIdx = 0) {
   // sync it to the Transport so it phase-locks with the bars. Adjust
   // playbackRate when the user tempo differs from the loop's source bpm.
   currentRealLoop = null;
+  let midSongDrum = null; // set when we'll start the drum synchronously below
   if (drumMode === 'ride') {
     const tempoTier2 = currentTempo < 100 ? 'ballad' : (currentTempo < 150 ? 'medium' : 'up');
     const key = tempoTier2 + '-' + ts.str;
@@ -5272,12 +5272,25 @@ async function startPlayback(song, bars, startBarIdx = 0) {
         const beatInLoop = (startBarIdx * beatsPerBar) % entry.beats;
         bufOffset = (beatInLoop / entry.beats) * entry.player.buffer.duration;
       }
-      const drumStartPos = startBarIdx > 0
-        ? `${startBarIdx}:0:0`
-        : `${offset}:0:0`;
-      Tone.Transport.scheduleOnce(t => {
-        try { entry.player.start(t, bufOffset); } catch (e) {}
-      }, drumStartPos);
+      if (startBarIdx > 0) {
+        // Mid-song start (bar click, rewind to loopIn): stash the
+        // entry + offset so we can start the Player in the same tick
+        // as Tone.Transport.start() below. scheduleOnce'ing it at
+        // `${startBarIdx}:0:0` is unreliable after we jump
+        // Transport.position forward — Tone may treat the event as
+        // "past" and skip it, which leaves the drums silent while
+        // the Part keeps firing chord / beat events. Starting the
+        // player directly bypasses that race.
+        midSongDrum = { entry, bufOffset };
+      } else {
+        // Bar-0 start: let count-in play first, then drums kick in
+        // at the top of bar 1. scheduleOnce is fine here because
+        // Transport position stays at 0 — the event time is
+        // genuinely in the future.
+        Tone.Transport.scheduleOnce(t => {
+          try { entry.player.start(t, bufOffset); } catch (e) {}
+        }, `${offset}:0:0`);
+      }
       currentRealLoop = entry;
     }
   }
@@ -5286,6 +5299,12 @@ async function startPlayback(song, bars, startBarIdx = 0) {
   //   - starting from bar 0 → position 0, so count-in fires first
   //   - starting mid-song → jump straight to the selected bar (no count-in)
   Tone.Transport.position = startBarIdx > 0 ? `${startBarIdx}:0:0` : 0;
+  // Start the mid-song drum synchronously with Transport.start() so the
+  // loop and the Part see the same audio clock. Any scheduleOnce'd
+  // equivalent was missing because of the position jump above.
+  if (midSongDrum) {
+    try { midSongDrum.entry.player.start(undefined, midSongDrum.bufOffset); } catch (e) {}
+  }
   Tone.Transport.start();
   playState = 'playing';
   pauseContext = { offset, beatsPerBar };
@@ -5294,6 +5313,16 @@ async function startPlayback(song, bars, startBarIdx = 0) {
   btn.classList.add('playing');
   document.getElementById('status').textContent = `Playing · ${playlist.length} bars`;
   updateLoopControls();
+  // Mid-song starts: Tone's Part sometimes skips the `barStart` event
+  // for the exact bar we jumped to (the event time equals the new
+  // Transport position so it reads as "just fired"). Explicitly
+  // highlight the target bar here so the clicked / rewound bar
+  // shows as the active one instead of the viewer waiting for the
+  // NEXT bar's event to repaint the overlay.
+  if (startBarIdx > 0) {
+    currentPlayingBar = startBarIdx;
+    highlightBar(startBarIdx);
+  }
 }
 
 // ===== File loading =====
@@ -5683,7 +5712,7 @@ function loadFromURL(url) {
   if (chartEl) chartEl.scrollTop = 0;
 }
 
-function applyKeyChange(targetKey) {
+async function applyKeyChange(targetKey) {
   if (!window.currentSong) return;
   if (!(targetKey in KEY_TO_PC)) return;
   currentKey = targetKey;
@@ -5698,6 +5727,15 @@ function applyKeyChange(targetKey) {
   const bars = transposeBars(window.currentSong.originalBars, offset, useFlats);
   window.currentSong.bars = bars;
   renderChart(window.currentSong.song, bars, window.currentSong.timesig);
+  // If playback is in progress, restart the scheduler at the bar we
+  // were on so the audio follows the new key. Mirrors the exercise-
+  // picker behavior — the Transport's already-queued events carry
+  // OLD pitches, so we have to tear them down and re-queue from
+  // the transposed bars.
+  if (playState === 'playing' && window.currentSong) {
+    const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+    await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+  }
 }
 
 document.querySelectorAll('#keySeg button').forEach(btn => {
@@ -5726,25 +5764,54 @@ document.getElementById('playBtn').addEventListener('click', async () => {
   }
   await startPlayback(window.currentSong.song, expanded, startAt);
 });
-document.getElementById('rewindBtn').addEventListener('click', () => {
-  // Back to start. With a Loop In bracket placed, "start" means the loop's
-  // beginning so the next play resumes the practice section. Otherwise it
-  // resets the selection to the first bar and scrolls the chart to the
-  // top. Either way, playback stops — user taps play to resume.
-  stopPlayback();
-  if (loopIn != null) {
-    selectedBar = loopIn;
-    highlightBar(loopIn);
-    refreshFingerboardForBar(loopIn);
+document.getElementById('rewindBtn').addEventListener('click', async () => {
+  // Back to start. The target is the loop's first bar when a Loop In
+  // bracket is placed, else bar 0.
+  //
+  //  - While PLAYING: do a FULL playback rebuild at the target bar
+  //    via startPlayback — not the fast in-loop seek. The fast seek
+  //    just moves Transport.position, which leaves the real-drum
+  //    Tone.Player and any scheduled piano stabs at their previous
+  //    buffer offsets, so they end up out of phase with the bar
+  //    downbeats. A full rebuild tears everything down and re-syncs
+  //    the drum loop's buffer offset to the target bar's downbeat.
+  //  - While PAUSED or STOPPED: move the selection and highlight so
+  //    the next Play press starts from the target.
+  const target = loopIn != null ? loopIn : 0;
+  if (playState === 'playing') {
+    selectedBar = target;
+    if (window.currentSong) {
+      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+      await startPlayback(window.currentSong.song, expanded, target);
+    }
   } else {
-    selectedBar = 0;
-    highlightBar(0);
-    refreshFingerboardForBar(0);
+    stopPlayback();
+    selectedBar = target;
+    highlightBar(target);
+    refreshFingerboardForBar(target);
   }
   const chartEl = document.getElementById('chart');
-  if (chartEl) chartEl.scrollTop = 0;
+  if (chartEl) {
+    if (loopIn != null) {
+      // Scroll the loop's first bar into the center of the view.
+      const info = barElements[loopIn];
+      if (info && info.rowEl) {
+        const rowTop = info.rowEl.offsetTop;
+        const rowH   = info.rowEl.offsetHeight;
+        const viewH  = chartEl.clientHeight;
+        const padding = Math.max(0, (viewH - rowH) / 2);
+        chartEl.scrollTo({ top: Math.max(0, rowTop - padding), behavior: 'smooth' });
+      } else {
+        chartEl.scrollTop = 0;
+      }
+    } else {
+      chartEl.scrollTop = 0;
+    }
+  }
   updateLoopControls();
-  document.getElementById('status').textContent = 'Ready';
+  if (playState !== 'playing') {
+    document.getElementById('status').textContent = 'Ready';
+  }
 });
 
 // Loop controls. Loop In / Loop Out operate on the currently-selected bar.
