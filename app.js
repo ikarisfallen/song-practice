@@ -6020,15 +6020,8 @@ async function initSongLibrary() {
       li.setAttribute('role', 'option');
       li.addEventListener('click', () => {
         selectSongByIndex(i);
-        // In portrait mode the picker is a modal over the chart — clear
-        // the filter when the user commits to a song so the next open
-        // starts fresh (no stale search hiding most of the library).
-        // In landscape the list is a persistent sidebar, so we leave the
-        // filter alone.
-        if (!isLandscape()) {
-          const f = document.getElementById('songFilter');
-          if (f && f.value) { f.value = ''; applySongFilter(''); }
-        }
+        // `closeSongPicker()` also clears the filter in portrait mode
+        // so the next open starts fresh.
         closeSongPicker();
       });
       songListEl.appendChild(li);
