@@ -4003,6 +4003,20 @@ function stopPlayback() {
   Tone.Transport.stop();
   Tone.Transport.cancel();
   Tone.Transport.position = 0;
+  // Clear any pending AudioParam events on pianoOut.gain. The loop
+  // count-in cleanup callback schedules setValueAtTime(0) at the
+  // start of each tail and setValueAtTime(sliderVol) at the next
+  // loopStart — those are Web Audio scheduled events that survive
+  // Transport.cancel(). Without this reset, a rebuild during a
+  // tail leaves orphaned gain=0 events that fire later and mute
+  // the piano mid-body.
+  if (typeof pianoOut !== 'undefined' && pianoOut) {
+    try {
+      pianoOut.gain.cancelScheduledValues(Tone.now());
+      const sliderVol = parseInt(document.getElementById('pianoVol').value, 10) / 100;
+      pianoOut.gain.setValueAtTime(isFinite(sliderVol) ? sliderVol : 0.4, Tone.now());
+    } catch (e) {}
+  }
   playState = 'stopped';
   pauseContext = null;
   const btn = document.getElementById('playBtn');
@@ -4918,7 +4932,7 @@ function highlightBar(idx) {
   // Row is comfortably inside the visible page — don't scroll.
 }
 
-async function startPlayback(song, bars, startBarIdx = 0) {
+async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
   await initAudio();
   stopPlayback();
 
@@ -5190,16 +5204,93 @@ async function startPlayback(song, bars, startBarIdx = 0) {
   }
 
   // Loop count-in: when the user has a Loop In/Out pair AND the
-  // "Loop" checkbox in the instruments panel is on AND a count-in is
-  // configured, append click events at the END of the loop range so
-  // each pass through the loop is preceded by N silent bars of click.
+  // "At Loop Start" checkbox is on AND a count-in is configured,
+  // append click events at the END of the loop range so each pass
+  // through the loop is preceded by N silent bars of click.
   // Implemented by extending the Part's loop window past loopOut by
   // countInBars and putting click events in those tail bars — Tone's
   // Part loop replays everything inside [loopStart, loopEnd) on each
   // iteration, so the clicks fire BEFORE re-entering loopStart.
+  //
+  // During the count-in tail we also:
+  //   - emit a `barStart` event with idx=loopIn at the FIRST tail
+  //     beat so the loop's first bar stays highlighted while the
+  //     count clicks (matches user expectation: "the selected bar
+  //     should be the first bar of the loop while it does the
+  //     count-in").
+  //   - schedule a periodic cleanup at the START of each tail to
+  //     killl any sustaining piano notes and stop the real-drum
+  //     loop, then restart the drum at the next loopStart so the
+  //     count-in is genuinely silent except for the click.
   const _hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
   const loopTailBars = (loopCountIn && _hasLoop && countInBars > 0) ? countInBars : 0;
+  // Pre-roll filter: when starting mid-song with a count-in pre-roll
+  // (rewind / play into a loop with At Loop Start on), strip out
+  // playlist events for the bars we'll play click count-in over.
+  // Belt-and-suspenders — Tone.Part with loop=true normally
+  // already filters events outside [loopStart, loopEnd), but this
+  // makes the behavior explicit and immune to edge cases.
+  const _prerollActive =
+    !!options.prerollCountIn && countInBars > 0 && startBarIdx >= countInBars;
+  if (_prerollActive) {
+    const prerollStart = startBarIdx - countInBars;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      const m = ev.time && ev.time.match(/^(\d+):/);
+      if (m) {
+        const bar = parseInt(m[1], 10);
+        if (bar >= prerollStart && bar < startBarIdx) events.splice(i, 1);
+      }
+    }
+    // Belt-and-suspenders: when the pre-roll is active AND we have a
+    // loop, also strip every event OUTSIDE the loop range. Tone.Part
+    // with loop=true and Transport position < loopStart has shown
+    // weird behavior where events from inside the loop (e.g. bar 8)
+    // fire while Transport is still in the pre-roll bars (3, 4) —
+    // apparently the loop wraparound maps "Transport position 3" to
+    // "loopStart + 3 = bar 8" instead of leaving the Part dormant.
+    // Stripping the outside-loop events from the array prevents
+    // that mapping from finding anything to fire.
+    if (_hasLoop) {
+      const _loopEndBar = loopOut + 1 + loopTailBars;
+      for (let i = events.length - 1; i >= 0; i--) {
+        const ev = events[i];
+        const m = ev.time && ev.time.match(/^(\d+):/);
+        if (m) {
+          const bar = parseInt(m[1], 10);
+          if (bar < loopIn || bar >= _loopEndBar) events.splice(i, 1);
+        }
+      }
+    }
+  }
   if (loopTailBars > 0) {
+    // Strip out any playlist events that fall in the count-in tail
+    // range (bars loopOut+1 .. loopOut+loopTailBars). The Part's
+    // extended loop window would otherwise re-fire those bars'
+    // barStart / beat / comp events during the count-in, causing
+    // the selection to jump past loopOut and the next bar's chord
+    // to stab in the middle of the click track.
+    const tailStart = loopOut + 1;
+    const tailEnd = loopOut + loopTailBars; // inclusive
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      const m = ev.time && ev.time.match(/^(\d+):/);
+      if (m) {
+        const bar = parseInt(m[1], 10);
+        if (bar >= tailStart && bar <= tailEnd) events.splice(i, 1);
+      }
+    }
+    // Highlight loopIn for the duration of the count-in tail. Flag
+    // this event so the Part callback also forces a scroll-into-view
+    // — the playback may have drifted off-screen during the loop
+    // body, and the user wants to see the bar where the count-in
+    // is happening.
+    events.push({
+      time: `${loopOut + 1}:0:0`,
+      type: 'barStart',
+      idx: loopIn,
+      scrollIntoView: true
+    });
     for (let cb = 0; cb < loopTailBars; cb++) {
       const tailBar = loopOut + 1 + cb;
       for (let beat = 0; beat < beatsPerBar; beat++) {
@@ -5218,7 +5309,24 @@ async function startPlayback(song, bars, startBarIdx = 0) {
       // restart playback at the right spot (Transport.position keeps
       // climbing during looping and can't be trusted for this).
       currentPlayingBar = ev.idx;
-      Tone.Draw.schedule(() => highlightBar(ev.idx), time);
+      Tone.Draw.schedule(() => {
+        highlightBar(ev.idx);
+        // The count-in barStart event sets scrollIntoView so the
+        // chart frames the loop's first bar regardless of where the
+        // user had been looking. highlightBar's normal scroll only
+        // fires when the row is off-screen — this forces it.
+        if (ev.scrollIntoView) {
+          const info = barElements[ev.idx];
+          const chartEl = document.getElementById('chart');
+          if (info && info.rowEl && chartEl) {
+            const rowTop = info.rowEl.offsetTop;
+            const rowH   = info.rowEl.offsetHeight;
+            const viewH  = chartEl.clientHeight;
+            const padding = Math.max(0, (viewH - rowH) / 2);
+            chartEl.scrollTo({ top: Math.max(0, rowTop - padding), behavior: 'smooth' });
+          }
+        }
+      }, time);
       return;
     }
     if (ev.type === 'beat') {
@@ -5298,7 +5406,22 @@ async function startPlayback(song, bars, startBarIdx = 0) {
   playbackPart.loopEnd = hasLoop
     ? `${loopOut + 1 + loopTailBars}:0:0`
     : `${playlist.length}:0:0`;
-  playbackPart.start(`${offset}:0:0`);
+  // When pre-roll count-in is active, defer the Part's start until
+  // Transport actually reaches startBarIdx — passing the same time as
+  // both `time` and `offset` so events with absolute bar times (e.g.
+  // event at bar 5 with time '5:0:0') still fire at Transport bar 5.
+  // This is critical: if the Part is started at Transport time 0
+  // while loop=true, Tone.Part's loop wraparound maps Transport
+  // positions BEFORE loopStart into the loop range — so during the
+  // pre-roll bars we'd hear chord stabs from inside the loop, AND
+  // the cursor's barStart event would jump to a bar inside the loop
+  // body instead of staying on the user's selected first-bar
+  // highlight.
+  if (_prerollActive) {
+    playbackPart.start(`${startBarIdx}:0:0`, `${startBarIdx}:0:0`);
+  } else {
+    playbackPart.start(`${offset}:0:0`);
+  }
 
   // If Real mode has a recorded drum loop for this tempo tier + time sig,
   // sync it to the Transport so it phase-locks with the bars. Adjust
@@ -5346,17 +5469,108 @@ async function startPlayback(song, bars, startBarIdx = 0) {
     }
   }
 
-  // Position the Transport:
-  //   - starting from bar 0 → position 0, so count-in fires first
-  //   - starting mid-song → jump straight to the selected bar (no count-in)
-  Tone.Transport.position = startBarIdx > 0 ? `${startBarIdx}:0:0` : 0;
-  // Start the mid-song drum synchronously with Transport.start() so the
-  // loop and the Part see the same audio clock. Any scheduleOnce'd
-  // equivalent was missing because of the position jump above.
-  if (midSongDrum) {
-    try { midSongDrum.entry.player.start(undefined, midSongDrum.bufOffset); } catch (e) {}
+  // Loop count-in cleanup: when At Loop Start is on, schedule a
+  // periodic callback at the start of each count-in tail to silence
+  // the piano + (if applicable) stop the real-drum loop, then
+  // restore them at the next loopStart. Lifted OUTSIDE the
+  // drumMode==='ride' block so the piano cleanup runs even for
+  // synthetic drum modes (hat / click / no real drum file for the
+  // current tempo tier) — those modes don't have a Player to stop,
+  // but the chord sustain still needs to be cut.
+  if (loopTailBars > 0 && hasLoop) {
+    const loopWidthBars = loopOut + 1 + loopTailBars - loopIn;
+    const tailSec = (60 / currentTempo) * beatsPerBar * loopTailBars;
+    const cleanupAt = `${offset + loopOut + 1}:0:0`;
+    // Resolve the active real-drum entry (may be null when drumMode
+    // isn't 'ride' or no recorded loop exists for this tempo tier).
+    const drumEntry = currentRealLoop;
+    let loopBufOffset = 0;
+    if (drumEntry && drumEntry.player.buffer) {
+      const beatInLoop = (loopIn * beatsPerBar) % drumEntry.beats;
+      loopBufOffset = (beatInLoop / drumEntry.beats) * drumEntry.player.buffer.duration;
+    }
+    Tone.Transport.scheduleRepeat(t => {
+      // releaseAll alone leaves the sampler's 1.2 s release envelope
+      // ringing; cut pianoOut's gain to 0 to silence every voice
+      // instantly, then restore at the next loopStart from whatever
+      // the slider currently reads.
+      try { piano.releaseAll(t); } catch (e) {}
+      if (pianoOut) {
+        try {
+          pianoOut.gain.cancelScheduledValues(t);
+          pianoOut.gain.setValueAtTime(0, t);
+          const sliderVol = parseInt(document.getElementById('pianoVol').value, 10) / 100;
+          pianoOut.gain.setValueAtTime(isFinite(sliderVol) ? sliderVol : 0.4, t + tailSec);
+        } catch (e) {}
+      }
+      if (drumEntry) {
+        try { drumEntry.player.stop(t); } catch (e) {}
+        // Restart drum at the next loopStart, aligned so each
+        // iteration's downbeat lands on the loop's downbeat.
+        try { drumEntry.player.start(t + tailSec, loopBufOffset); } catch (e) {}
+      }
+    }, `${loopWidthBars}m`, cleanupAt);
   }
-  Tone.Transport.start();
+
+  // Position the Transport and (optionally) pre-roll a count-in.
+  //
+  // Three flows:
+  //   - bar-0 start with countInBars > 0: position=0, offset=countInBars
+  //     (handled above via the per-bar scheduleOnce loop). Part starts
+  //     at countInBars:0:0 so its events line up after the click track.
+  //   - mid-song start with prerollCountIn: roll Transport BACK by
+  //     countInBars and schedule click events at those bars via
+  //     Tone.Transport.scheduleOnce. Cancelable via Transport.cancel,
+  //     so a quick rewind during pre-roll won't double up. Drum start
+  //     is also Transport-scheduled at the body's first bar.
+  //   - mid-song start without count-in: jump straight to startBarIdx.
+  const wantPrerollCountIn =
+    !!options.prerollCountIn && countInBars > 0 && startBarIdx >= countInBars;
+  if (wantPrerollCountIn) {
+    const prerollStart = startBarIdx - countInBars;
+    Tone.Transport.position = `${prerollStart}:0:0`;
+    for (let cb = 0; cb < countInBars; cb++) {
+      const barTime = prerollStart + cb;
+      for (let beat = 0; beat < beatsPerBar; beat++) {
+        const accent = beat === 0;
+        Tone.Transport.scheduleOnce(t => {
+          try { click.triggerAttackRelease('32n', t, accent ? 0.95 : 0.55); } catch (e) {}
+        }, `${barTime}:${beat}:0`);
+      }
+    }
+    if (midSongDrum) {
+      const drumEntry = midSongDrum.entry;
+      const drumOffset = midSongDrum.bufOffset;
+      Tone.Transport.scheduleOnce(t => {
+        try { drumEntry.player.start(t, drumOffset); } catch (e) {}
+      }, `${startBarIdx}:0:0`);
+    }
+    // Force the cursor onto the loop's first bar BEFORE Transport
+    // starts ticking — during pre-roll the Part is dormant and won't
+    // fire any barStart events, so without this the previously-
+    // highlighted bar would stay lit through the count-in. Also
+    // scroll the chart so the user sees where playback will resume.
+    currentPlayingBar = startBarIdx;
+    highlightBar(startBarIdx);
+    {
+      const info = barElements[startBarIdx];
+      const chartEl = document.getElementById('chart');
+      if (info && info.rowEl && chartEl) {
+        const rowTop = info.rowEl.offsetTop;
+        const rowH   = info.rowEl.offsetHeight;
+        const viewH  = chartEl.clientHeight;
+        const padding = Math.max(0, (viewH - rowH) / 2);
+        chartEl.scrollTo({ top: Math.max(0, rowTop - padding), behavior: 'smooth' });
+      }
+    }
+    Tone.Transport.start();
+  } else {
+    Tone.Transport.position = startBarIdx > 0 ? `${startBarIdx}:0:0` : 0;
+    if (midSongDrum) {
+      try { midSongDrum.entry.player.start(undefined, midSongDrum.bufOffset); } catch (e) {}
+    }
+    Tone.Transport.start();
+  }
   playState = 'playing';
   pauseContext = { offset, beatsPerBar };
   const btn = document.getElementById('playBtn');
@@ -5796,8 +6010,13 @@ document.querySelectorAll('#keySeg button').forEach(btn => {
 // ===== Event bindings =====
 document.getElementById('playBtn').addEventListener('click', async () => {
   if (playState === 'playing') { pausePlayback(); return; }
-  if (playState === 'paused') { resumePlayback(); return; }
   if (!window.currentSong) return;
+  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+  // Paused state → if a loop is set, restart cleanly at loopIn
+  // (the user may have placed the loop while paused; resuming
+  // the Transport mid-song would skip past it). Otherwise resume
+  // from the pause point as before.
+  if (playState === 'paused' && !hasLoop) { resumePlayback(); return; }
   const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
   // Pick a starting bar:
   //   - a complete Loop In / Loop Out pair wins → always start at
@@ -5806,14 +6025,21 @@ document.getElementById('playBtn').addEventListener('click', async () => {
   //     can click that bar during playback — the click seeks to it.
   //   - otherwise a tapped bar
   //   - otherwise the top
-  const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
   let startAt;
   if (hasLoop) {
     startAt = loopIn;
   } else {
     startAt = selectedBar != null ? selectedBar : 0;
   }
-  await startPlayback(window.currentSong.song, expanded, startAt);
+  // When the user has "At Loop Start" on AND we're entering a loop
+  // (startAt === loopIn), pre-roll a count-in before the loop body.
+  // Without this, the very first iteration would skip count-in
+  // because mid-song starts (startBarIdx > 0) suppress the regular
+  // song-start count-in.
+  const wantsLoopCountIn = hasLoop && loopCountIn && countInBars > 0
+    && startAt === loopIn;
+  await startPlayback(window.currentSong.song, expanded, startAt,
+    { prerollCountIn: wantsLoopCountIn });
 });
 document.getElementById('rewindBtn').addEventListener('click', async () => {
   // Back to start. The target is the loop's first bar when a Loop In
@@ -5829,17 +6055,27 @@ document.getElementById('rewindBtn').addEventListener('click', async () => {
   //  - While PAUSED or STOPPED: move the selection and highlight so
   //    the next Play press starts from the target.
   const target = loopIn != null ? loopIn : 0;
+  // When "At Loop Start" is on AND we have a real Loop In/Out pair AND
+  // the user has count-in configured, ask startPlayback to pre-roll a
+  // count-in before re-entering the loop. Applies whether we're
+  // currently playing OR stopped (next play will inherit it).
+  const wantsLoopCountIn =
+    loopCountIn && loopIn != null && loopOut != null && countInBars > 0;
   if (playState === 'playing') {
     selectedBar = target;
     if (window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-      await startPlayback(window.currentSong.song, expanded, target);
+      await startPlayback(window.currentSong.song, expanded, target,
+        { prerollCountIn: wantsLoopCountIn });
     }
   } else {
     stopPlayback();
     selectedBar = target;
     highlightBar(target);
     refreshFingerboardForBar(target);
+    // For paused/stopped → next Play press: the play handler reads
+    // `loopCountIn` directly, so any loop-start count-in is taken
+    // care of there. No additional state needed.
   }
   const chartEl = document.getElementById('chart');
   if (chartEl) {
