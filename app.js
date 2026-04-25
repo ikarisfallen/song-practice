@@ -3787,6 +3787,7 @@ const realLoops = {};  // key "ballad-4/4" → { player, sourceBpm }
 let currentRealLoop = null;
 let drumMode = 'ride'; // 'hat' | 'ride' | 'click'
 let countInBars = 1;  // 0, 1, or 2 measures of click before the song starts
+let loopCountIn = false; // when true, the count-in fires at the top of every loop iteration
 let playbackPart;
 let playState = 'stopped'; // 'stopped' | 'playing' | 'paused'
 let pauseContext = null;   // { offset, beatsPerBar } captured at startPlayback; used by resume
@@ -5188,6 +5189,29 @@ async function startPlayback(song, bars, startBarIdx = 0) {
     }
   }
 
+  // Loop count-in: when the user has a Loop In/Out pair AND the
+  // "Loop" checkbox in the instruments panel is on AND a count-in is
+  // configured, append click events at the END of the loop range so
+  // each pass through the loop is preceded by N silent bars of click.
+  // Implemented by extending the Part's loop window past loopOut by
+  // countInBars and putting click events in those tail bars — Tone's
+  // Part loop replays everything inside [loopStart, loopEnd) on each
+  // iteration, so the clicks fire BEFORE re-entering loopStart.
+  const _hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+  const loopTailBars = (loopCountIn && _hasLoop && countInBars > 0) ? countInBars : 0;
+  if (loopTailBars > 0) {
+    for (let cb = 0; cb < loopTailBars; cb++) {
+      const tailBar = loopOut + 1 + cb;
+      for (let beat = 0; beat < beatsPerBar; beat++) {
+        events.push({
+          time: `${tailBar}:${beat}:0`,
+          type: 'click',
+          accent: beat === 0
+        });
+      }
+    }
+  }
+
   playbackPart = new Tone.Part((time, ev) => {
     if (ev.type === 'barStart') {
       // Track the currently-playing bar so clear-loop / change-loop can
@@ -5267,7 +5291,13 @@ async function startPlayback(song, bars, startBarIdx = 0) {
   const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
   playbackPart.loop = true;
   playbackPart.loopStart = hasLoop ? `${loopIn}:0:0` : 0;
-  playbackPart.loopEnd = hasLoop ? `${loopOut + 1}:0:0` : `${playlist.length}:0:0`;
+  // When loop count-in is on, extend the loop window past loopOut by
+  // `loopTailBars` so the click-only count-in bars play before the
+  // wrap back to loopStart. Otherwise just stop at loopOut+1 as
+  // before.
+  playbackPart.loopEnd = hasLoop
+    ? `${loopOut + 1 + loopTailBars}:0:0`
+    : `${playlist.length}:0:0`;
   playbackPart.start(`${offset}:0:0`);
 
   // If Real mode has a recorded drum loop for this tempo tier + time sig,
@@ -6016,12 +6046,37 @@ document.getElementById('leadVol').addEventListener('input', e => {
 })();
 
 document.querySelectorAll('#countInSeg button').forEach(b => {
-  b.addEventListener('click', () => {
+  b.addEventListener('click', async () => {
     document.querySelectorAll('#countInSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     countInBars = parseInt(b.dataset.count, 10) || 0;
+    // Mid-playback change: rebuild so the new count-in length is
+    // baked into the looping Part's tail (only matters with the
+    // "Loop" checkbox on, but rebuilding either way is harmless).
+    if (playState === 'playing' && window.currentSong) {
+      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+    }
   });
 });
+
+// Loop count-in toggle in the instruments panel. When checked AND a
+// Loop In/Out pair is set, the count-in clicks at the end of every
+// loop iteration before re-entering loopStart.
+(function bindLoopCountInToggle() {
+  const cb = document.getElementById('loopCountInToggle');
+  if (!cb) return;
+  cb.addEventListener('change', async () => {
+    loopCountIn = cb.checked;
+    // Rebuild on the fly so the change takes effect immediately
+    // for the currently-running loop. If we're not playing, the
+    // next Play press picks up the new value.
+    if (playState === 'playing' && window.currentSong) {
+      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+    }
+  });
+})();
 
 // Exercise picker — regenerates the quarter notes with the selected
 // algorithm (scale-walker vs. 1-3-5-7 arpeggio). If playback is running,

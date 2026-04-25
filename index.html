@@ -76,6 +76,14 @@
         </select>
       </div>
       <div class="drum-row">
+        <span class="drum-label">Tempo</span>
+        <div class="seg tempo-seg" id="tempoSeg" role="tablist">
+          <button type="button" data-bpm="80">Ballad (80)</button>
+          <button type="button" data-bpm="120" class="active">Medium (120)</button>
+          <button type="button" data-bpm="180">Up (180)</button>
+        </div>
+      </div>
+      <div class="drum-row">
         <span class="drum-label">Key</span>
         <div class="seg key-seg" id="keySeg" role="tablist">
           <button type="button" data-key="A">A</button>
@@ -130,20 +138,17 @@
     </div>
     <div id="instrumentsPanel" class="options-panel" hidden>
       <div class="drum-row">
-        <span class="drum-label">Tempo</span>
-        <div class="seg tempo-seg" id="tempoSeg" role="tablist">
-          <button type="button" data-bpm="80">Ballad (80)</button>
-          <button type="button" data-bpm="120" class="active">Medium (120)</button>
-          <button type="button" data-bpm="180">Up (180)</button>
-        </div>
-      </div>
-      <div class="drum-row">
         <span class="drum-label">Count-in</span>
         <div class="seg" id="countInSeg" role="tablist">
           <button type="button" data-count="0">Off</button>
           <button type="button" data-count="1" class="active">1 bar</button>
           <button type="button" data-count="2">2 bars</button>
         </div>
+        <label class="wake-label">
+          <input type="checkbox" id="loopCountInToggle" class="switch-input" />
+          <span class="switch" aria-hidden="true"></span>
+          <span>At Loop Start</span>
+        </label>
       </div>
       <div class="drum-row">
         <span class="drum-label">Drums</span>
@@ -200,7 +205,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v1.53</span>
+      <span class="app-version" id="appVersion">v1.55</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -208,7 +213,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=279"></script>
+<script src="app.js?v=280"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on
