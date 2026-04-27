@@ -1381,6 +1381,50 @@ function parseMusicXML(doc) {
           }
           // Don't advance cursor for chord-linked notes.
         } else if (isRest) {
+          // A rest can be a tuplet member — MuseScore exports the
+          // common "quarter-rest at the start of a quarter triplet"
+          // pattern as a `<rest>` carrying `<notations><tuplet>` and
+          // `<time-modification>`. If we just advance the cursor we
+          // lose the start marker (the next note carries
+          // `time-modification` but not `<tuplet type="start">`,
+          // since the bracket starts on the rest), and the tuplet
+          // bracket + proportional spacing get dropped — the bar
+          // ends up with a step-count mismatch that the renderer
+          // papers over with a row of fallback rest glyphs.
+          let rTupletStart = false, rTupletStop = false;
+          el.querySelectorAll('notations > tuplet').forEach(t => {
+            const type = t.getAttribute('type');
+            if (type === 'start') rTupletStart = true;
+            else if (type === 'stop') rTupletStop = true;
+          });
+          const rTm = el.querySelector('time-modification');
+          let rTupletActual = null, rTupletNormal = null;
+          if (rTm) {
+            const a = rTm.querySelector('actual-notes');
+            const n = rTm.querySelector('normal-notes');
+            if (a && n) {
+              rTupletActual = parseInt(a.textContent, 10) || null;
+              rTupletNormal = parseInt(n.textContent, 10) || null;
+            }
+          }
+          if (rTupletActual && rTupletNormal) {
+            const rTypeEl = el.querySelector('type');
+            const rDisplayType = rTypeEl ? (rTypeEl.textContent || '').trim() : null;
+            notes.push({
+              stepStart: Math.round(cursor),
+              durationSteps: dSteps,
+              midi: null,
+              tpc: null,
+              rest: true,
+              tieStart: false,
+              tieStop: false,
+              tupletStart: rTupletStart,
+              tupletStop: rTupletStop,
+              tupletActual: rTupletActual,
+              tupletNormal: rTupletNormal,
+              displayType: rDisplayType
+            });
+          }
           cursor += dSteps;
         } else {
           const p = readPitch(el.querySelector('pitch'));
@@ -1584,6 +1628,10 @@ function generateHeadFromScore(bars, ts) {
   if (rawOffset !== 0) {
     let minAfter = Infinity;
     for (const n of head.notes) {
+      // Rest entries (tuplet rest members) carry no pitch — skip
+      // them when finding the lowest pitched note for the
+      // octave-fit calculation.
+      if (n.rest) continue;
       const p = n.midi + rawOffset;
       if (p < minAfter) minAfter = p;
     }
@@ -1591,6 +1639,23 @@ function generateHeadFromScore(bars, ts) {
     totalShift = rawOffset + octShift;
   }
   const transposedNotes = head.notes.map(n => {
+    // Rest tuplet members pass straight through — no pitch math.
+    if (n.rest) {
+      return {
+        stepStart: n.stepStart,
+        durationSteps: n.durationSteps,
+        rest: true,
+        tieStart: false,
+        tieStop: false,
+        tupletStart: n.tupletStart,
+        tupletStop: n.tupletStop,
+        tupletActual: n.tupletActual,
+        tupletNormal: n.tupletNormal,
+        displayType: n.displayType,
+        midi: null,
+        tpc: null
+      };
+    }
     const midi = n.midi + totalShift;
     const pc = ((midi % 12) + 12) % 12;
     // Preserve the ORIGINAL note's explicit spelling when the key
@@ -1601,6 +1666,7 @@ function generateHeadFromScore(bars, ts) {
     return {
       stepStart: n.stepStart,
       durationSteps: n.durationSteps,
+      rest: false,
       tieStart: n.tieStart,
       tieStop: n.tieStop,
       tupletStart: n.tupletStart,
@@ -1685,8 +1751,11 @@ function generateHeadFromScore(bars, ts) {
         tpc: note.tpc,
         duration: vfDur,
         stepsConsumed,
-        tieFromPrev: !!note.tieStop,
-        tieToNext: !!note.tieStart,
+        // Rest tuplet members render as a rest tickable inside the
+        // tuplet group (see the renderer for the StaveNote build).
+        rest: !!note.rest,
+        tieFromPrev: !note.rest && !!note.tieStop,
+        tieToNext:   !note.rest && !!note.tieStart,
         tuplet: {
           start: !!note.tupletStart,
           stop: !!note.tupletStop,
@@ -2826,13 +2895,19 @@ function renderChart(song, barsIn, timesigStr) {
   // We now omit the clef on every row after the first and redistribute
   // this width across the row's bars as extra note space.
   const clefOnlyExtra = 44;
-  const staffY = 26;
-  // VexFlow's bass-clef staff lines end up at y ≈ 66 (top) .. 106 (bottom).
-  // The lowest F the generator can produce (written F2 via the 8vb clef) sits
-  // around y = 111–116. Push the scale label a bit further below that so
-  // it can't overlap the note head, then the colored line just below the
-  // label as its underline.
-  const patternTextY = 134;         // baseline of the scale label
+  // staffY pushes the bass-clef staff down to leave headroom above for
+  // BOTH the rehearsal-mark badge (drawn at y=2 with bh=13) AND the
+  // chord-symbol label that sits at y = staffY − 6 with font-size 15.
+  // With staffY=36 the chord text's top edge lands around y=18, well
+  // below the rehearsal box's bottom (y=15) — no more overlap when a
+  // section letter falls on a bar that has a beat-1 chord.
+  const staffY = 36;
+  // VexFlow's bass-clef staff lines end up at y ≈ 76 (top) .. 116 (bottom)
+  // when staffY=36 (was 66..106 with staffY=26). The lowest F the generator
+  // can produce (written F2 via the 8vb clef) now sits around y = 121–126,
+  // so the scale label baseline shifts down in lockstep to keep its
+  // ~20 px clearance from the note heads.
+  const patternTextY = 144;         // baseline of the scale label
   const patternLineY = patternTextY + 6; // underline just below descenders
   const staffHeight  = patternLineY + 10;
 
@@ -3047,6 +3122,50 @@ function renderChart(song, barsIn, timesigStr) {
           // subdiv=6) doesn't match their actual footprint (4 for a
           // quarter triplet). Non-tuplet notes fall back to the lookup.
           const consume = bp.stepsConsumed || DUR_TO_STEPS[dur] || 1;
+          // Rest tuplet member: build a rest tickable, fold it into
+          // the active tuplet group, and skip every pitched-note
+          // bookkeeping path (accidentals, ties, fingering data).
+          // Without this branch a quarter-rest at the start of a
+          // quarter triplet (Stablemates m. 29) would never reach
+          // the tuplet collector, the bracket would be silently
+          // dropped, and the bar's tick total wouldn't match — which
+          // VexFlow recovers from by drawing a row of fallback
+          // eighth-rest glyphs.
+          if (bp.rest) {
+            let restBase = dur;
+            let restDots = 0;
+            while (restBase.endsWith('.')) { restDots++; restBase = restBase.slice(0, -1); }
+            const r = new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: restBase + 'r' });
+            if (restDots > 0 && VF.Dot && VF.Dot.buildAndAttach) {
+              VF.Dot.buildAndAttach([r], { all: true });
+            }
+            notes.push(r);
+            barNoteData.push(null);
+            // Rest slots stay at -1 in beatToNoteSlot — playback
+            // and the fingering overlay both treat -1 as "no note
+            // here", which is exactly what we want for a rest.
+            if (bp.tuplet) {
+              if (bp.tuplet.start) {
+                currentTupletNotes = [r];
+                currentTupletRatio = { actual: bp.tuplet.actual, normal: bp.tuplet.normal };
+              } else if (currentTupletNotes) {
+                currentTupletNotes.push(r);
+              }
+              if (bp.tuplet.stop && currentTupletNotes) {
+                const ratio = currentTupletRatio || { actual: 3, normal: 2 };
+                const tupletObj = new VF.Tuplet(currentTupletNotes, {
+                  num_notes: ratio.actual,
+                  notes_occupied: ratio.normal,
+                  bracketed: true
+                });
+                rowTuplets.push({ tuplet: tupletObj });
+                currentTupletNotes = null;
+                currentTupletRatio = null;
+              }
+            }
+            b += consume;
+            continue;
+          }
           const { key, letterIdx, level, octave } = midiTpcToVexKey(bp.pitch, bp.tpc);
           const posKey = letterIdx + ':' + octave;
           // Stem direction: on/above middle line of the staff → stem down,

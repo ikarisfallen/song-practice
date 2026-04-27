@@ -91,14 +91,33 @@ body.layout-landscape #sidebar #fingerboardPanel[hidden] {
 body.layout-landscape #sidebar #songListPanel {
   flex: 1 1 auto;
   min-height: 80px;
-  overflow-y: auto;
+  /* No overflow on the panel itself — the filter row stays pinned at
+     the top while the inner <ul> scrolls. Using overflow here makes
+     the filter scroll away with the list, which is wrong. */
+  overflow: hidden;
   border: 1px solid #334654;
   border-radius: 6px;
   background: #1a2632;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 #songListPanel { display: none; } /* hidden in portrait */
-body.layout-landscape #songListPanel { display: block; }
-.song-list { list-style: none; margin: 0; padding: 0; }
+body.layout-landscape #songListPanel { display: flex; }
+.song-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  /* Take all remaining vertical space inside the panel and scroll
+     internally. `min-height: 0` is required for the flex child to
+     actually shrink below its content size and trigger overflow —
+     without it, `flex: 1 1 auto` lets the ul grow to fit every row
+     and the scroll never engages. */
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 .song-list li {
   padding: 8px 12px;
   cursor: pointer;
@@ -316,10 +335,12 @@ body:not(.layout-landscape) #songListPanel.open {
   background: #1b2730;
   padding: 8px;
   padding-top: calc(8px + env(safe-area-inset-top, 0));
+  /* The base .song-list rule sets flex/overflow on the inner <ul>
+     so the filter row pins to the top and only the song rows
+     scroll. Just style the visual frame here. */
+  overflow: hidden;
 }
 body:not(.layout-landscape) #songListPanel.open .song-list {
-  flex: 1 1 auto;
-  overflow-y: auto;
   background: #1a2632;
   border: 1px solid #334654;
   border-radius: 6px;
@@ -392,14 +413,32 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
    grid so the sliders line up on their left edges no matter how wide
    the middle control is (3-button seg vs a single switch, etc.).
    Column 1 = label, column 2 = segment/switch area, column 3 = slider.
+   Column 2 is sized to fit the Drums row's three-button seg
+   ("Real | 2 & 4 | Click") at its natural content width — anything
+   wider would leave empty pill background past "Click" and make
+   that button look stretched. The Piano/Lead rows' switches are
+   narrower; that just means a bit of transparent space between
+   the switch text and the slider, which is fine.
    `min-height` is tuned to the Drums row's seg-button height so the
    Piano and Lead rows (whose switches are shorter) inflate to match. */
 .drum-row:has(.drum-vol) {
   display: grid;
-  grid-template-columns: 55px 200px 1fr;
+  grid-template-columns: 55px 170px 1fr;
   align-items: center;
   gap: 8px;
   min-height: 34px;
+}
+/* Don't let the grid stretch the middle item to fill column 2.
+   Without this, `justify-self: stretch` (the grid default) would
+   blow the seg pill out to 170px wide while its buttons stayed at
+   content width, leaving dead space to the right of "Click" that
+   reads as the button itself stretching. Pinning to `start` keeps
+   the seg pill hugging its three buttons. The slider in column 3
+   still starts at the same x on every row, so the three sliders
+   stay vertically aligned. */
+.drum-row:has(.drum-vol) > .seg,
+.drum-row:has(.drum-vol) > .wake-label {
+  justify-self: start;
 }
 .wake-label {
   font-size: 13px; color: #cde; display: inline-flex; align-items: center; gap: 8px;
