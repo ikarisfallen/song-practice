@@ -6380,6 +6380,33 @@ document.querySelectorAll('#keySeg button').forEach(btn => {
   btn.addEventListener('click', () => applyKeyChange(btn.dataset.key));
 });
 
+// Spacebar = toggle play/pause (desktop convention). Routed through
+// the play button's existing click handler so all the start/pause/
+// resume branching, count-in handling, and disabled-button gating
+// stay in one place. We bail when:
+//   - the user is typing in a field (song filter, etc.) — letting
+//     space insert a character normally
+//   - the play button itself is the focused element (the browser's
+//     default space-activates-button behavior already covers it
+//     and a duplicate click would just no-op back to the same state)
+//   - any modifier key is held (don't hijack Ctrl-Space etc.)
+//   - the play button is disabled (Head mode on a headless song)
+document.addEventListener('keydown', e => {
+  if (e.key !== ' ' && e.code !== 'Space') return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  const t = e.target;
+  if (t) {
+    if (t.id === 'playBtn') return;
+    const tag = (t.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (t.isContentEditable) return;
+  }
+  const playBtn = document.getElementById('playBtn');
+  if (!playBtn || playBtn.disabled) return;
+  e.preventDefault(); // stop the page from scrolling on space
+  playBtn.click();
+});
+
 // ===== Event bindings =====
 document.getElementById('playBtn').addEventListener('click', async () => {
   if (playState === 'playing') { pausePlayback(); return; }
