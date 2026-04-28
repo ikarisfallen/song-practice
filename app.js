@@ -890,12 +890,20 @@ function generateCantusFirmusQuarterNotes(bars, ts) {
                    : beatCount === 3 ? 'h.'
                    : beatCount === 2 ? 'h'
                    : 'q';
-    // First beat carries the note + duration (score renders one long note).
+    // First beat carries the note + duration (score renders one long note,
+    // with the renderer's `b += consume` jump skipping the subsequent
+    // slots so they never spawn duplicate stavenotes).
     // Subsequent beats repeat the pitch (no duration) so the fingerboard /
-    // scale-view stay lit through the sustained section.
+    // scale-view stay lit through the sustained section, AND they carry
+    // `tieFromPrev: true` so the Lead playback scheduler treats the run
+    // as one sustained attack instead of re-striking on every beat. The
+    // attack duration on the first slot already covers the full chord
+    // span (`'w'` → 4 steps, `'h'` → 2, etc.), so we don't need a
+    // chainSteps walk — `tieFromPrev` alone is enough to silence the
+    // re-attacks on beats 2-N.
     results[ce.barIdx][startBeat] = { pitch: notePitch, tpc: noteTpc, duration };
     for (let b = startBeat + 1; b < endBeat; b++) {
-      results[ce.barIdx][b] = { pitch: notePitch, tpc: noteTpc };
+      results[ce.barIdx][b] = { pitch: notePitch, tpc: noteTpc, tieFromPrev: true };
     }
     lastPitch = notePitch;
   });
@@ -2707,11 +2715,18 @@ function updateScoreTitle(songArg) {
   const song = songArg ||
     (window.currentSong && window.currentSong.song) || null;
   const title = (song && song.title) || '';
-  const sel = document.getElementById('exerciseSelect');
+  // Mode is now driven by the Head/Exercise segmented button. When
+  // Head is active the title reads "(Head)"; otherwise it reflects
+  // the exercise dropdown's current selection.
   let exLabel = '';
-  if (sel && sel.selectedIndex >= 0) {
-    const opt = sel.options[sel.selectedIndex];
-    if (opt) exLabel = opt.text || '';
+  if (exerciseMode === 'head') {
+    exLabel = 'Head';
+  } else {
+    const sel = document.getElementById('exerciseSelect');
+    if (sel && sel.selectedIndex >= 0) {
+      const opt = sel.options[sel.selectedIndex];
+      if (opt) exLabel = opt.text || '';
+    }
   }
   el.textContent = title && exLabel ? `${title} (${exLabel})` : title || '';
 }
@@ -2954,6 +2969,114 @@ function renderChart(song, barsIn, timesigStr) {
     // row, end-of-pass) keep the same per-bar width as full rows and the
     // remainder of the staff sits as empty space to the right.
     const rowWidth = leftPadding + clefExtra + mpl * barWidth + rightPadding;
+    // Per-bar width allocation. A row of [whole-note, 4-quarter,
+    // 4-quarter, 4-quarter] used to give every bar an equal slice
+    // even though the whole-note bar only needs ~25% of the four-
+    // quarter bar's horizontal space. Now we weight each bar by
+    // roughly the count of glyphs the renderer will emit and
+    // redistribute the row's TOTAL content width by those weights.
+    // The total stays the same (so empty trailing space on short
+    // rows is preserved); only the share each bar takes shifts.
+    //
+    // Two-pass distribution:
+    //   1. First pass weights every bar by glyph count (whole = 1,
+    //      4-quarter = 4) and proportionally splits the row's
+    //      content budget. Lighter bars become genuinely narrower.
+    //   2. Any bar that falls below `MIN_BAR_PX` (the floor that
+    //      keeps chord labels readable) gets clamped UP to that
+    //      minimum, and the deficit is taken back PROPORTIONALLY
+    //      from the bars that were above the floor. So a row of
+    //      [whole, whole, whole, whole] still ends up equal — but a
+    //      row of [whole, 4-qtr, whole, 4-qtr] gives the wholes the
+    //      floor and the quarter bars eat the remaining width.
+    // No coarse weight floor — that flattened the discrimination
+    // for [whole, qtr+half] rows where both naturally weigh 1-2.
+    function barNoteWeight(barIdxArg) {
+      const rawBP = quarterNotes[barIdxArg] || [];
+      const sStart = rawBP.simileStart;
+      const bp = (sStart != null)
+        ? rawBP.map((b, idx) => idx >= sStart ? null : b)
+        : rawBP;
+      const stepsBar = bp.length || ts.num;
+      const sub = Math.max(1, Math.round(stepsBar / ts.num));
+      const defDur = sub >= 2 ? '8' : 'q';
+      const DTS = sub === 6
+        ? { 'w': 24, 'h.': 18, 'h': 12, 'q.': 9,   'q': 6,   '8': 3 }
+        : sub === 2
+        ? { 'w': 8,  'h.': 6,  'h': 4,  'q.': 3,   'q': 2,   '8': 1 }
+        : { 'w': 4,  'h.': 3,  'h': 2,  'q.': 1.5, 'q': 1 };
+      let count = 0;
+      let bb = 0;
+      while (bb < stepsBar) {
+        const slot = bp[bb];
+        if (slot) {
+          const dur = slot.duration || defDur;
+          const cons = slot.stepsConsumed || DTS[dur] || 1;
+          count++;
+          bb += cons;
+        } else {
+          let run = 0;
+          while (bb + run < stepsBar && !bp[bb + run]) run++;
+          // Coalesced rests: roughly one glyph per half-bar of
+          // silence (matches the renderer's half-bar boundary
+          // splitting), with a floor of 1.
+          const half = stepsBar / 2;
+          count += Math.max(1, Math.ceil(run / half));
+          bb += run || 1;
+        }
+      }
+      return Math.max(1, count);
+    }
+    const weights = rowBars.map((bar, i) => barNoteWeight(rowStart + i));
+    const sumWeight = weights.reduce((a, b) => a + b, 0) || 1;
+    const totalContent = rowBars.length * barWidth;
+    // Pass 1: pure proportional split.
+    const barWidths = weights.map(w =>
+      Math.max(1, Math.round(totalContent * w / sumWeight))
+    );
+    // Pass 2: clamp anything below MIN_BAR_PX up to that floor and
+    // claw the deficit back from bars that have headroom. The floor
+    // is "chord-label + a note glyph + breathing room" — anything
+    // narrower is unreadable regardless of the proportional math.
+    const MIN_BAR_PX = 90;
+    let deficit = 0;
+    for (let i = 0; i < barWidths.length; i++) {
+      if (barWidths[i] < MIN_BAR_PX) {
+        deficit += MIN_BAR_PX - barWidths[i];
+        barWidths[i] = MIN_BAR_PX;
+      }
+    }
+    if (deficit > 0) {
+      // Pull the deficit out of the ABOVE-floor bars, proportional
+      // to how much extra they each have above MIN_BAR_PX. If
+      // every bar was already at the floor (whole row of wholes),
+      // there's nothing to pull from and we just accept the
+      // overshoot.
+      const givable = barWidths
+        .map(w => Math.max(0, w - MIN_BAR_PX))
+        .reduce((a, b) => a + b, 0);
+      if (givable > 0) {
+        const factor = Math.min(1, deficit / givable);
+        for (let i = 0; i < barWidths.length; i++) {
+          const headroom = barWidths[i] - MIN_BAR_PX;
+          if (headroom > 0) {
+            barWidths[i] = Math.round(barWidths[i] - headroom * factor);
+          }
+        }
+      }
+    }
+    // Round-off drift: the sum of the rounded widths can be off by
+    // a pixel or two from totalContent. Park the drift on the
+    // widest bar so x-advance through the row stays close to the
+    // expected right edge without cutting into a near-floor bar.
+    const widthDrift = totalContent - barWidths.reduce((a, b) => a + b, 0);
+    if (widthDrift !== 0 && barWidths.length > 0) {
+      let widestIdx = 0;
+      for (let i = 1; i < barWidths.length; i++) {
+        if (barWidths[i] > barWidths[widestIdx]) widestIdx = i;
+      }
+      barWidths[widestIdx] += widthDrift;
+    }
 
     const rowEl = document.createElement('div');
     rowEl.className = 'staff-row';
@@ -2991,7 +3114,11 @@ function renderChart(song, barsIn, timesigStr) {
     rowBars.forEach((bar, i) => {
       const barIdx = rowStart + i;
       const isFirstInRow = i === 0;
-      const width = barWidth + (isFirstInRow ? clefExtra : 0);
+      // `barWidths[i]` is the per-bar slice from the weighted
+      // distribution above; the clefExtra is reserved space for
+      // the bass clef + 8vb + time-sig glyphs, only present on
+      // the very first measure of the score.
+      const width = barWidths[i] + (isFirstInRow ? clefExtra : 0);
       // left_bar/right_bar default to true in VexFlow, which draws grey
       // vertical edges at the stave's left and right — the "border" around
       // each measure. Turn them off; we manage measure boundaries via
@@ -4736,7 +4863,10 @@ function redrawLoopBrackets() {
 //     and are disabled while playback is running (editing the loop mid-play
 //     would re-seed the Part and cause audible jumps).
 //   - Clear-loop button is disabled when there's no loop or while playing.
-//   - Play button shows a small loop glyph when both brackets are placed.
+//   - Play button shows a small loop glyph when both brackets are placed,
+//     and is disabled when we're in Head mode but the current song has no
+//     head file (or the load resolved with nothing) — there'd be nothing
+//     for the Lead to play and no notes to highlight.
 function updateLoopControls() {
   const playing = playState === 'playing';
   const noSelection = selectedBar == null;
@@ -4750,6 +4880,17 @@ function updateLoopControls() {
   if (playBtn) {
     const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
     playBtn.classList.toggle('has-loop', hasLoop);
+    // Block Play in Head mode for songs without a head. We only
+    // gate AFTER the head load has resolved (`headLoaded === true`)
+    // so the button doesn't flash disabled during the brief async
+    // fetch on song change. While playback is running we leave the
+    // button enabled so the user can still hit it to pause.
+    const headMissing =
+      exerciseMode === 'head' &&
+      !!window.currentSong &&
+      window.currentSong.headLoaded === true &&
+      !window.currentSong.head;
+    playBtn.disabled = headMissing && !playing;
   }
 }
 
@@ -6087,6 +6228,10 @@ function loadFromURL(url) {
     window.currentSong.head = head;
     window.currentSong.headLoaded = true;
     if (exerciseMode === 'head') rerenderCurrent();
+    // Now that we know whether this song has a head, refresh the
+    // Play button — disable it if we're in Head mode and the load
+    // came back empty, enable it otherwise.
+    updateLoopControls();
   });
   // A freshly loaded song should start at the top of the score. The
   // chart container holds the scroll position from the previously
@@ -6436,19 +6581,67 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
 // Exercise picker — regenerates the quarter notes with the selected
 // algorithm (scale-walker vs. 1-3-5-7 arpeggio). If playback is running,
 // restart so the audible notes match the re-rendered score.
+//
+// The Head/Exercise mode is now driven by the segmented button to the
+// LEFT of the dropdown (#modeSeg). The dropdown only carries the
+// non-head exercises. Changing the dropdown implies the user wants an
+// exercise, so we auto-flip the seg to "Exercise" — keeping the two
+// controls consistent without forcing the user to click both.
 (function bindExerciseSelect() {
   const sel = document.getElementById('exerciseSelect');
   if (!sel) return;
   sel.addEventListener('change', async () => {
     const ex = sel.value;
-    exerciseMode = (ex === 'head' || ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
       ? ex : 'scale';
+    // Auto-flip the mode seg to "Exercise" — picking from the
+    // dropdown is an implicit "I want an exercise" gesture.
+    document.querySelectorAll('#modeSeg button').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === 'exercise');
+    });
     updateScoreTitle();
     rerenderCurrent();
+    // Re-evaluate Play button state — switching to/from Head with a
+    // headless song must enable/disable Play accordingly.
+    updateLoopControls();
     if (playState === 'playing' && window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
     }
+  });
+})();
+
+// Mode segmented button: switches between Head (play the song's
+// melody as parsed from MusicXML / MIDI) and Exercise (one of the
+// generators picked in the dropdown to the right). On "Exercise" we
+// restore exerciseMode from the dropdown's current value so toggling
+// Head off returns to the user's last-picked exercise.
+(function bindModeSeg() {
+  const seg = document.getElementById('modeSeg');
+  if (!seg) return;
+  seg.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      seg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const mode = btn.dataset.mode;
+      if (mode === 'head') {
+        exerciseMode = 'head';
+      } else {
+        const sel = document.getElementById('exerciseSelect');
+        const ex = sel ? sel.value : 'scale';
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
+          ? ex : 'scale';
+      }
+      updateScoreTitle();
+      rerenderCurrent();
+      // Switching INTO Head on a song without one disables Play;
+      // switching OUT of Head re-enables it. Refresh the button now.
+      updateLoopControls();
+      if (playState === 'playing' && window.currentSong) {
+        const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+        await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+      }
+    });
   });
 })();
 
