@@ -3500,12 +3500,74 @@ function renderChart(song, barsIn, timesigStr) {
         //         beam followed by the rests.
         //   3/4 → 3 eighth notes per beam (3+3 across the bar),
         //         matching the waltz 1-2-3 / 1-2-3 grouping.
-        // Rests naturally break beams so partial-bar chords still
-        // engrave correctly.
-        const beamFrac = ts.num === 3
-          ? new VF.Fraction(3, 8)
-          : new VF.Fraction(4, 8);
-        barBeams = VF.Beam.generateBeams(notes, { groups: [beamFrac] });
+        // Rests and non-beamable durations (quarter or longer)
+        // naturally break beams.
+        //
+        // We build beams ourselves rather than calling
+        // `VF.Beam.generateBeams` because that helper has been
+        // observed to silently SKIP beam generation for some bars —
+        // specifically, eighth-note runs that follow a half (or
+        // longer) note in stem-down configurations sometimes come
+        // back un-beamed even though the notes fall cleanly inside a
+        // beat group. Walking the notes ourselves and constructing
+        // VF.Beam directly is fully deterministic.
+        const ticksPerWhole = VF.RESOLUTION;        // 16384 by default
+        const ticksPerQuarter = ticksPerWhole / 4;  // 4096
+        const groupTicks = ts.num === 3
+          ? ticksPerQuarter * 3 / 2   // 3 eighths in waltz
+          : ticksPerQuarter * 2;      // 4 eighths (half-bar) in 4/4 etc.
+        let pending = [];
+        let cursor = 0;
+        const flushPending = () => {
+          if (pending.length >= 2) {
+            // `autoStem = true` (the second VF.Beam arg) tells VexFlow
+            // to override each member's stem_direction so the whole
+            // beamed group shares one direction. Without this, a beam
+            // that includes notes straddling the stem-direction
+            // pivot (D2 sounding / D3 written for our 8vb bass) ends
+            // up with the last note flipped — its stem points the
+            // opposite way of the others and the beam draws as a
+            // crooked dog-leg connecting them.
+            barBeams.push(new VF.Beam(pending.slice(), true));
+          }
+          pending = [];
+        };
+        for (const n of notes) {
+          let dur = '';
+          try { dur = n.getDuration ? n.getDuration() : ''; } catch (e) { dur = ''; }
+          const isRest = !!(n.isRest && n.isRest());
+          const isBeamable = !isRest && (dur === '8' || dur === '16' || dur === '32');
+          // Tick footprint for this note. VF.StaveNote exposes
+          // getTicks() as a Fraction; if it isn't available, fall
+          // back to the duration token's standard tick count.
+          let noteTicks = 0;
+          try {
+            const t = n.getTicks && n.getTicks();
+            if (t && typeof t.value === 'function') noteTicks = t.value();
+          } catch (e) { /* ignore */ }
+          if (!noteTicks) {
+            const STD_TICKS = {
+              w: ticksPerWhole, h: ticksPerQuarter * 2,
+              q: ticksPerQuarter, '8': ticksPerQuarter / 2,
+              '16': ticksPerQuarter / 4, '32': ticksPerQuarter / 8
+            };
+            noteTicks = STD_TICKS[dur] || ticksPerQuarter;
+          }
+          if (isBeamable) {
+            // If adding this note would cross a beat-group boundary,
+            // close the current beam first.
+            const groupBefore = Math.floor(cursor / groupTicks);
+            const groupAfter = Math.floor((cursor + noteTicks - 1) / groupTicks);
+            if (pending.length > 0 && groupBefore !== groupAfter) flushPending();
+            pending.push(n);
+          } else {
+            // Quarter-or-longer note, dotted variants, or any rest
+            // breaks the beam.
+            flushPending();
+          }
+          cursor += noteTicks;
+        }
+        flushPending();
       }
       const noteStart = stave.getNoteStartX();
       const noteEnd = stave.getNoteEndX();
