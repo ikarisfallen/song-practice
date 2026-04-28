@@ -3272,6 +3272,13 @@ function renderChart(song, barsIn, timesigStr) {
             // and the fingering overlay both treat -1 as "no note
             // here", which is exactly what we want for a rest.
             if (bp.tuplet) {
+              // Same beam-grouper markers as the pitched-note path —
+              // a rest tuplet member also breaks any pending beam,
+              // and a tuplet-start that sits on a rest still needs
+              // to flush whatever beam was running before it.
+              r._inTuplet = true;
+              if (bp.tuplet.start) r._tupletStart = true;
+              if (bp.tuplet.stop)  r._tupletStop  = true;
               if (bp.tuplet.start) {
                 currentTupletNotes = [r];
                 currentTupletRatio = { actual: bp.tuplet.actual, normal: bp.tuplet.normal };
@@ -3385,6 +3392,16 @@ function renderChart(song, barsIn, timesigStr) {
           // Formatter positions them. The bracket gets drawn later,
           // after voice.draw, via `rowTuplets`.
           if (bp.tuplet) {
+            // Tag the StaveNote for the beam grouper. Without these
+            // markers, an 8th-triplet inside a half-bar gets fused
+            // into the surrounding eighth-note beam — the triplet
+            // members' tick footprints (≈1365 ticks each) sum to
+            // exactly one quarter, falling cleanly inside a 4/8 beam
+            // group, so the standard boundary check doesn't fire.
+            // Each tuplet should be its own self-contained beam.
+            n._inTuplet = true;
+            if (bp.tuplet.start) n._tupletStart = true;
+            if (bp.tuplet.stop)  n._tupletStop  = true;
             if (bp.tuplet.start) {
               currentTupletNotes = [n];
               currentTupletRatio = { actual: bp.tuplet.actual, normal: bp.tuplet.normal };
@@ -3517,6 +3534,7 @@ function renderChart(song, barsIn, timesigStr) {
           ? ticksPerQuarter * 3 / 2   // 3 eighths in waltz
           : ticksPerQuarter * 2;      // 4 eighths (half-bar) in 4/4 etc.
         let pending = [];
+        let pendingGroup = -1; // beat-group index that `pending[]` belongs to
         let cursor = 0;
         const flushPending = () => {
           if (pending.length >= 2) {
@@ -3531,6 +3549,7 @@ function renderChart(song, barsIn, timesigStr) {
             barBeams.push(new VF.Beam(pending.slice(), true));
           }
           pending = [];
+          pendingGroup = -1;
         };
         for (const n of notes) {
           let dur = '';
@@ -3554,15 +3573,43 @@ function renderChart(song, barsIn, timesigStr) {
             noteTicks = STD_TICKS[dur] || ticksPerQuarter;
           }
           if (isBeamable) {
-            // If adding this note would cross a beat-group boundary,
-            // close the current beam first.
-            const groupBefore = Math.floor(cursor / groupTicks);
-            const groupAfter = Math.floor((cursor + noteTicks - 1) / groupTicks);
-            if (pending.length > 0 && groupBefore !== groupAfter) flushPending();
-            pending.push(n);
+            // Tuplets are self-contained beams. A tuplet-start note
+            // closes any pending non-tuplet beam (or the previous
+            // tuplet), and a tuplet-stop note closes the tuplet's
+            // own beam afterwards. Without these flushes, an 8th
+            // triplet in a half-bar of plain eighths gets fused
+            // into the surrounding beam — its tick footprint
+            // (≈4096 across three members = exactly one quarter)
+            // sits cleanly inside the 4/8 beam group, so the
+            // standard boundary check never fires.
+            if (n._tupletStart && pending.length > 0) flushPending();
+            if (!n._inTuplet) {
+              // Standard non-tuplet boundary checks. Skipped for
+              // tuplet members since the start/stop markers above
+              // already isolate them; their ticks are also scaled
+              // (×normal/actual) and don't align with our raw
+              // beat-group arithmetic.
+              const groupAtStart = Math.floor(cursor / groupTicks);
+              const groupAtEnd = Math.floor((cursor + noteTicks - 1) / groupTicks);
+              if (pending.length > 0 && groupAtStart !== pendingGroup) flushPending();
+              if (pending.length > 0 && groupAtStart !== groupAtEnd) flushPending();
+              pending.push(n);
+              pendingGroup = groupAtStart;
+            } else {
+              pending.push(n);
+              // Tuplet members live in their own implicit "group" —
+              // reset pendingGroup so a following non-tuplet note
+              // unambiguously starts a fresh comparison.
+              pendingGroup = -1;
+            }
+            // Tuplet-stop closes the tuplet's beam before any
+            // following notes (tuplet or otherwise) can extend it.
+            if (n._tupletStop) flushPending();
           } else {
             // Quarter-or-longer note, dotted variants, or any rest
-            // breaks the beam.
+            // breaks the beam. A tuplet rest member that's also
+            // tuplet-start/stop still flushes — none of those rests
+            // is beamable on its own.
             flushPending();
           }
           cursor += noteTicks;
