@@ -3027,7 +3027,23 @@ function renderChart(song, barsIn, timesigStr) {
       }
       return Math.max(1, count);
     }
-    const weights = rowBars.map((bar, i) => barNoteWeight(rowStart + i));
+    // Each chord label needs roughly the same horizontal slice as a
+    // note glyph for the labels to space out without overlapping.
+    // A bar with one whole note but FOUR chord changes (e.g.
+    // "Am Dm Gm C7" stretched across a single sustained note) was
+    // collapsing under the note-only weight of 1 and squeezing all
+    // four labels into the chord-label area, where they overlap as
+    // a single illegible "AmDmGmC7" run. Take the MAX of the note
+    // weight and the live-chord count so the bar gets enough width
+    // for whichever side of the engraving is denser.
+    function barChordCount(bar) {
+      if (!bar || !bar.chords) return 1;
+      const live = bar.chords.filter(c => !c.slash);
+      return Math.max(1, live.length);
+    }
+    const weights = rowBars.map((bar, i) =>
+      Math.max(barNoteWeight(rowStart + i), barChordCount(bar))
+    );
     const sumWeight = weights.reduce((a, b) => a + b, 0) || 1;
     const totalContent = rowBars.length * barWidth;
     // Pass 1: pure proportional split.
