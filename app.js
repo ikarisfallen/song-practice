@@ -1305,7 +1305,11 @@ async function loadSongHead(title) {
 async function loadSongMusicXML(title) {
   try {
     const url = `songs/${encodeURIComponent(title)}.musicxml`;
-    const response = await fetch(url);
+    // `cache: 'no-store'` so a deleted or edited Jordu.musicxml on
+    // disk is reflected immediately. Without this, the browser's HTTP
+    // cache happily serves the old 200 response — even after the
+    // file is gone — so the app keeps showing the stale head.
+    const response = await fetch(url, { cache: 'no-store' });
     if (!response.ok) return null;
     const text = await response.text();
     const doc = new DOMParser().parseFromString(text, 'application/xml');
@@ -1562,7 +1566,10 @@ async function loadSongMidi(title) {
   if (typeof Midi === 'undefined' || !title) return null;
   try {
     const url = `songs/${encodeURIComponent(title)}.mid`;
-    const response = await fetch(url);
+    // `cache: 'no-store'` for the same reason as loadSongMusicXML —
+    // these stable URLs would otherwise stay pinned to a stale
+    // browser cache entry across edits and deletions.
+    const response = await fetch(url, { cache: 'no-store' });
     if (!response.ok) return null;
     const buffer = await response.arrayBuffer();
     return new Midi(buffer);
@@ -6923,7 +6930,11 @@ async function probeSongHasHead(title) {
   for (const ext of ['musicxml', 'mid']) {
     const url = `songs/${encodeURIComponent(title)}.${ext}`;
     try {
-      const res = await fetch(url, { method: 'HEAD' });
+      // `cache: 'no-store'` so a freshly added or deleted song file
+      // takes effect on the next page load without needing the user
+      // to clear their browser cache. Same rationale as the head
+      // loaders above.
+      const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
       if (res.ok) return true;
     } catch (e) { /* network error → try next ext */ }
   }
@@ -6957,15 +6968,47 @@ function closeSongPicker() {
 }
 function applySongFilter(q) {
   const needle = (q || '').trim().toLowerCase();
+  // Escape user-controlled and song-title text before injecting it
+  // back as innerHTML — song titles can contain "&", "<", etc.
+  const escapeHtml = (s) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   document.querySelectorAll('#songList li').forEach(li => {
     // Match against the song name only — the HEAD badge lives in a
     // sibling span, so `li.textContent` would also include "HEAD"
     // and any search for "h", "he", "head" would spuriously match
     // every song with a head file.
     const nameEl = li.querySelector('.song-name');
-    const text = (nameEl ? nameEl.textContent : li.textContent).toLowerCase();
-    const hit = !needle || text.includes(needle);
+    if (!nameEl) return;
+    // `textContent` returns the plain title even when prior filter
+    // runs left <strong> tags inside (textContent strips tags), so
+    // we always recover the original title without needing a
+    // separate dataset cache.
+    const originalText = nameEl.textContent;
+    const lc = originalText.toLowerCase();
+    const hit = !needle || lc.includes(needle);
     li.hidden = !hit;
+    if (!hit) return;
+    if (!needle) {
+      // Filter cleared — drop any leftover <strong> markup.
+      nameEl.textContent = originalText;
+      return;
+    }
+    // Bold every occurrence of the needle in the title. Using the
+    // lowercased copy for index math, but slicing from the original
+    // so the bolded characters keep their original case.
+    let html = '';
+    let i = 0;
+    while (i < originalText.length) {
+      const idx = lc.indexOf(needle, i);
+      if (idx === -1) {
+        html += escapeHtml(originalText.slice(i));
+        break;
+      }
+      if (idx > i) html += escapeHtml(originalText.slice(i, idx));
+      html += '<strong>' + escapeHtml(originalText.slice(idx, idx + needle.length)) + '</strong>';
+      i = idx + needle.length;
+    }
+    nameEl.innerHTML = html;
   });
   const clearBtn = document.getElementById('songFilterClear');
   if (clearBtn) clearBtn.hidden = !(q && q.length > 0);
