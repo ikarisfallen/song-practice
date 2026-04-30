@@ -1291,6 +1291,88 @@ function midiTpcToVexKey(soundingMidi, tpc) {
 //     tieStart: bool,      // this note ties INTO the next one
 //     tieStop: bool }      // this note continues a prior tie
 
+// Songs/ folder index — used to resolve head-file names case-
+// insensitively. The iRealPro song titles use Title Case ("You,
+// The Night, And The Music") but the actual filenames on disk
+// often differ ("You, the Night, and the Music.musicxml").
+// Windows filesystems shrug it off; iOS/Android/Linux refuse to
+// serve the file. The fix is to fetch the directory listing once,
+// build a lowercased → actual map, and resolve each requested
+// filename against it.
+//
+// Two sources, in order:
+//   1. `songs/manifest.json` — an explicit array of filenames.
+//      Use this on hosts that disable directory listings (GitHub
+//      Pages etc.). Generate it however you like — `ls songs/ >
+//      manifest.json` works.
+//   2. `songs/` — the server's HTML directory listing (Python's
+//      http.server + most dev servers). We parse `<a href="...">`
+//      entries out of the HTML.
+//
+// Cached in a single promise so concurrent probe calls share one
+// fetch instead of stampeding the server with N copies.
+let _songDirIndexPromise = null;
+function loadSongDirectoryIndex() {
+  if (_songDirIndexPromise) return _songDirIndexPromise;
+  _songDirIndexPromise = (async () => {
+    // Manifest first — works regardless of directory-listing support.
+    try {
+      const res = await fetch('songs/manifest.json', { cache: 'no-store' });
+      if (res.ok) {
+        const json = await res.json();
+        if (Array.isArray(json)) {
+          const map = Object.create(null);
+          for (const fn of json) {
+            const s = String(fn);
+            map[s.toLowerCase()] = s;
+          }
+          return map;
+        }
+      }
+    } catch (e) { /* fall through to HTML listing */ }
+    // HTML directory listing fallback.
+    try {
+      const res = await fetch('songs/', { cache: 'no-store' });
+      if (!res.ok) return Object.create(null);
+      const text = await res.text();
+      const map = Object.create(null);
+      const re = /<a\s+[^>]*href="([^"]+)"/gi;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        let href;
+        try { href = decodeURIComponent(m[1]); } catch (e) { continue; }
+        // Skip parent / self / any directory entries.
+        if (!href || href === '../' || href === './' || href.endsWith('/')) continue;
+        // Skip anything with a path separator — we only care about
+        // files directly inside songs/.
+        if (href.includes('/')) continue;
+        map[href.toLowerCase()] = href;
+      }
+      return map;
+    } catch (e) {
+      return Object.create(null);
+    }
+  })();
+  return _songDirIndexPromise;
+}
+
+// Resolve `${title}.${ext}` to the actual filename on disk, matching
+// case-insensitively against the directory index. Returns the
+// resolved filename string, or null if nothing matches. If the
+// directory index came back empty (server doesn't support listings
+// AND no manifest is present), falls back to the title as-is — which
+// is the legacy behavior and works fine when the case happens to
+// align.
+async function resolveSongFilename(title, ext) {
+  if (!title) return null;
+  const wanted = `${title}.${ext}`;
+  const index = await loadSongDirectoryIndex();
+  if (Object.keys(index).length > 0) {
+    return index[wanted.toLowerCase()] || null;
+  }
+  return wanted;
+}
+
 // Try MusicXML first (explicit spelling + ties), fall back to MIDI.
 // Returns { notes: [...] } or null.
 async function loadSongHead(title) {
@@ -1304,9 +1386,11 @@ async function loadSongHead(title) {
 
 async function loadSongMusicXML(title) {
   try {
-    const url = `songs/${encodeURIComponent(title)}.musicxml`;
-    // `cache: 'no-store'` so a deleted or edited Jordu.musicxml on
-    // disk is reflected immediately. Without this, the browser's HTTP
+    const filename = await resolveSongFilename(title, 'musicxml');
+    if (!filename) return null;
+    const url = `songs/${encodeURIComponent(filename)}`;
+    // `cache: 'no-store'` so a deleted or edited .musicxml on disk
+    // is reflected immediately. Without this, the browser's HTTP
     // cache happily serves the old 200 response — even after the
     // file is gone — so the app keeps showing the stale head.
     const response = await fetch(url, { cache: 'no-store' });
@@ -1565,7 +1649,9 @@ function midiToHeadNotes(midi) {
 async function loadSongMidi(title) {
   if (typeof Midi === 'undefined' || !title) return null;
   try {
-    const url = `songs/${encodeURIComponent(title)}.mid`;
+    const filename = await resolveSongFilename(title, 'mid');
+    if (!filename) return null;
+    const url = `songs/${encodeURIComponent(filename)}`;
     // `cache: 'no-store'` for the same reason as loadSongMusicXML —
     // these stable URLs would otherwise stay pinned to a stale
     // browser cache entry across edits and deletions.
@@ -6927,13 +7013,21 @@ function selectSongByIndex(idx) {
 // "HEAD" badge without having to actually load the head data.
 async function probeSongHasHead(title) {
   if (!title) return false;
+  // Cheap path: if we have a directory index, just check it. No HTTP
+  // request per song needed and the case-sensitivity gotcha is
+  // handled by `resolveSongFilename`.
+  const index = await loadSongDirectoryIndex();
+  if (Object.keys(index).length > 0) {
+    return !!(
+      index[`${title}.musicxml`.toLowerCase()] ||
+      index[`${title}.mid`.toLowerCase()]
+    );
+  }
+  // Fallback for hosts with no listing AND no manifest: HEAD-probe
+  // the title as-is.
   for (const ext of ['musicxml', 'mid']) {
     const url = `songs/${encodeURIComponent(title)}.${ext}`;
     try {
-      // `cache: 'no-store'` so a freshly added or deleted song file
-      // takes effect on the next page load without needing the user
-      // to clear their browser cache. Same rationale as the head
-      // loaders above.
       const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
       if (res.ok) return true;
     } catch (e) { /* network error → try next ext */ }

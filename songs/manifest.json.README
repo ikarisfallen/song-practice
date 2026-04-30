@@ -1,0 +1,11 @@
+manifest.json lists every head file in this folder so the app can resolve
+case mismatches between iRealPro song titles (e.g. "You And The Night And
+The Music") and on-disk filenames (e.g. "You and the Night and the Music").
+GitHub Pages doesn't return directory listings, so without this file the
+PWA on Android can't see what's available.
+
+Regenerate after adding/removing/renaming a song file. From this folder:
+
+    ls | grep -iE '\.(musicxml|mid)$' | python -c "import sys, json; print(json.dumps(sorted([line.strip() for line in sys.stdin if line.strip()]), indent=2))" > manifest.json
+
+Or any equivalent command that produces a JSON array of filenames.

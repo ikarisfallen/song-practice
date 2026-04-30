@@ -1,0 +1,55 @@
+# Auto-regenerates songs/manifest.json whenever a head file is added,
+# renamed, or removed. The PWA on GitHub Pages reads this manifest to
+# resolve case mismatches between iRealPro song titles ("You And The
+# Night And The Music") and on-disk filenames ("You and the Night and
+# the Music.musicxml"). Without it, Android (case-sensitive) can't
+# find files that Windows (case-insensitive) loaded just fine.
+#
+# Loop avoidance:
+#   - Trigger only fires when files DIRECTLY under `songs/` change.
+#   - The commit message includes `[skip ci]` so this workflow doesn't
+#     re-trigger itself when it pushes the regenerated manifest back.
+name: Update songs manifest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'songs/**'
+
+permissions:
+  contents: write
+
+jobs:
+  update-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Regenerate manifest
+        run: |
+          cd songs
+          # List every .musicxml and .mid file (any case), sort, and
+          # emit a JSON array. Using shopt nocaseglob so the glob
+          # also picks up extensions like .MID or .MusicXML if they
+          # ever appear.
+          shopt -s nullglob nocaseglob
+          files=( *.musicxml *.mid )
+          printf '%s\n' "${files[@]}" \
+            | sort \
+            | python3 -c "import sys, json; print(json.dumps(sorted([l.strip() for l in sys.stdin if l.strip()]), indent=2))" \
+            > manifest.json
+          echo "Manifest entries: $(python3 -c 'import json; print(len(json.load(open(\"manifest.json\"))))')"
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet songs/manifest.json; then
+            echo "manifest.json unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add songs/manifest.json
+          git commit -m "Auto-update songs/manifest.json [skip ci]"
+          git push

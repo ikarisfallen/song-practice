@@ -1,9 +1,8 @@
 // Minimal service worker. Chrome/Android require at least a registered
 // SW with a fetch handler before they'll offer "Install app" on the
-// home screen. We don't actually cache anything ourselves — just pass
-// requests through to the network. This keeps the install path alive
-// without the headache of managing a cache for audio samples and
-// MusicXML that change frequently during development.
+// home screen. We don't cache anything ourselves — every request goes
+// to the network. The trick is making sure the BROWSER doesn't quietly
+// serve cached copies on our behalf either.
 self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
@@ -13,22 +12,29 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // The plain `fetch(event.request)` form re-issues the request with
-  // its default cache mode, which means JS-initiated fetches go
-  // through the browser's HTTP cache. That's a problem for the
-  // songs/ folder: those URLs are stable (e.g. songs/Jordu.musicxml
-  // with no ?v= cachebuster) so a cached 200 response keeps being
-  // returned even after the file on disk is edited or deleted.
-  // Hard-refreshing the page doesn't help — it only bypasses cache
-  // for the initial page load, not for SW-mediated fetches that
-  // happen later.
+  // `fetch(event.request)` with default cache mode lets the browser
+  // serve cached copies for stable URLs — fine for CDN scripts, NOT
+  // fine for our own files. PWAs on Android are especially sticky:
+  // once a stale index.html or app.js is cached, the new code never
+  // reaches the user even though we ship version-busted querystrings,
+  // because the SW intercepts every request and the inner default-
+  // cache fetch hands back the old response.
   //
-  // For the songs/ folder we force `cache: 'no-store'` so every
-  // probe and head-load goes to the network. Other resources
-  // (Tone.js / VexFlow CDN scripts, drum samples, etc.) keep the
-  // default cache behavior so production loads stay fast.
-  const url = new URL(event.request.url);
-  if (url.pathname.includes('/songs/')) {
+  // Policy:
+  //   - same-origin requests (our HTML, JS, CSS, manifest.json,
+  //     song files, drum samples) → `cache: 'no-store'`. Always go
+  //     to the network. Cheap on a static site, and means a
+  //     `git push` is reflected on the next page open.
+  //   - cross-origin (CDN: Tone.js, VexFlow, Midi) → default cache.
+  //     These are versioned URLs, mostly stable, and forcing
+  //     no-store would re-download megabytes of library code on
+  //     every load.
+  let sameOrigin = true;
+  try {
+    const reqUrl = new URL(event.request.url);
+    sameOrigin = reqUrl.origin === self.location.origin;
+  } catch (e) { /* default to same-origin if parsing fails */ }
+  if (sameOrigin) {
     event.respondWith(fetch(event.request, { cache: 'no-store' }));
   } else {
     event.respondWith(fetch(event.request));
