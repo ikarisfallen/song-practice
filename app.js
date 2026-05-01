@@ -4818,43 +4818,14 @@ function updateFingeringOverlay(barIdx) {
   // backdrop rects that sit behind each label.
   svg.appendChild(g);
 
-  // Per-note position assignments from the unified picker. Handles
-  // key gating (non-B/E/A keys → all first) and within-bar mixing
-  // (half and upper can both appear in one bar).
-  const barAssignments = barPositionAssignments(barIdx) || {};
-  // Last fingered note of the prior bar drives whether the FIRST
-  // note of this bar announces a position change.
-  function lastPositionOfBar(idx) {
-    const bi = barElements[idx];
-    if (!bi || !bi.noteData) return null;
-    const prev = barPositionAssignments(idx);
-    if (!prev) return null;
-    let last = null;
-    for (const nd of bi.noteData) {
-      if (!nd) continue;
-      if (prev[nd.pitch]) last = prev[nd.pitch];
-    }
-    return last;
-  }
-  let prevPos = barIdx > 0 ? lastPositionOfBar(barIdx - 1) : null;
-
   for (let i = 0; i < info.noteData.length; i++) {
     const nd = info.noteData[i];
     if (!nd) continue; // rest
     const noteEl = info.noteEls[i];
     if (!noteEl) continue;
-    // Pick this note's position (first / half / upper) from the
-    // bar-wide assignment map built above.
-    const curPos = barAssignments[nd.pitch] || 'first';
-    const label = curPos === 'half'  ? HALF_FINGERING[nd.pitch]
-                : curPos === 'upper' ? UPPER_FINGERING[nd.pitch]
-                :                      FINGERING[nd.pitch];
-    if (!label) continue;
-    const labelColor = POSITION_COLORS[curPos];
     const rect = noteEl.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
     const noteX   = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
-    const noteTop = (rect.top                   - svgRect.top ) * vbSY + vbOY;
     // Ask VexFlow directly for the notehead position. `getAbsoluteX()`
     // returns the x at the left edge of the notehead (after any
     // accidental glyph), and `getYs()[0]` returns the y of the
@@ -4875,23 +4846,13 @@ function updateFingeringOverlay(barIdx) {
         }
       } catch (e) { /* fall back to DOM geometry */ }
     }
-
-    // Note on/below top staff line → fixed Y above the staff.
-    // Note above top line (ledger lines) → lift above the note head.
-    const labelY = noteTop < topLineY ? noteTop - LIFT_GAP : LABEL_Y;
-    appendFingeringLabel(g, noteX, labelY, label, labelColor);
-    // Position-change tag: fires when this note's position differs
-    // from the previous fingered note's position. Announces any
-    // transition between first / half / upper — including mid-bar
-    // half↔upper flips. A "first" at the very start (prevPos is
-    // null) is suppressed because it's the default and would be
-    // noise; transitions TO first from a non-first position still
-    // announce ("first" label), and upper→half / half→upper do too.
-    const isStartFirst = curPos === 'first' && prevPos == null;
-    if (curPos !== prevPos && !isStartFirst) {
-      appendFingeringLabel(g, noteX, labelY - 14, curPos, POSITION_COLORS[curPos]);
-    }
-    prevPos = curPos;
+    // Overlay mode previously also painted position-based fingering
+    // numbers (1/2/3/4) above the staff and "first/half/upper"
+    // labels at position changes. Those have been removed — the
+    // user-authored fingerings (Edit Mode) take over that role —
+    // leaving only the note-letter inside the notehead, which is
+    // the actual sight-reading aid the overlay still earns its
+    // keep with.
     // Note letter painted INSIDE the notehead. Filled noteheads
     // (quarter + shorter) carry white text directly on the black
     // glyph. HOLLOW noteheads (whole, half) are transparent inside,
@@ -6435,6 +6396,12 @@ function loadFromURL(url) {
     // regardless of whether a head was found.
     headLoaded: false
   };
+  // Edit Mode toggle is gated on (Head mode + head loaded). At
+  // this exact moment headLoaded is false, so this disables the
+  // toggle for the brief window between "song picked" and "head
+  // fetch resolved". The post-fetch callback re-enables it (or
+  // keeps it off, for headless songs).
+  if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
   document.getElementById('status').textContent = `Loaded: ${song.title} (${bars.length} bars)`;
   // Try to load a matching score file from the songs/ folder for the
   // "Head" exercise. Prefers <title>.musicxml (explicit spelling +
@@ -6450,6 +6417,9 @@ function loadFromURL(url) {
     // Play button — disable it if we're in Head mode and the load
     // came back empty, enable it otherwise.
     updateLoopControls();
+    // Same gating for the Edit Mode toggle — it only becomes
+    // available now that we know there's a head to annotate.
+    if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
   });
   // A freshly loaded song should start at the top of the score. The
   // chart container holds the scroll position from the previously
@@ -6849,6 +6819,9 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
     // Re-evaluate Play button state — switching to/from Head with a
     // headless song must enable/disable Play accordingly.
     updateLoopControls();
+    // Re-evaluate Edit Mode availability — picking an exercise from
+    // the dropdown moves us out of Head, which disables editing.
+    if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
     if (playState === 'playing' && window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
@@ -6882,6 +6855,9 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
       // Switching INTO Head on a song without one disables Play;
       // switching OUT of Head re-enables it. Refresh the button now.
       updateLoopControls();
+      // Edit Mode follows the same logic — only enabled when in Head
+      // AND a head was loaded. Toggle off automatically when leaving.
+      if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
       if (playState === 'playing' && window.currentSong) {
         const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
         await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
@@ -7229,3 +7205,756 @@ window.addEventListener('resize', applyLayoutMode);
 applyLayoutMode();
 
 initSongLibrary();
+
+// ============================================================
+// Edit Mode — fingering authoring (Windows desktop only)
+//
+// Storage model: one JSON file per song under
+// `songs/fingerings/<title>.json`, written via the File System
+// Access API directly to the user's local working tree. The user
+// then commits + pushes from terminal as part of their normal
+// workflow. The PWA on Android is structurally read-only because
+// `window.showDirectoryPicker` doesn't exist there — the toggle
+// won't even render.
+// ============================================================
+function emIsWindows() {
+  if (navigator.userAgentData && typeof navigator.userAgentData.platform === 'string') {
+    return navigator.userAgentData.platform === 'Windows';
+  }
+  return /\bWindows\b/.test(navigator.userAgent || '');
+}
+function emIsStandalone() {
+  if (window.matchMedia) {
+    if (window.matchMedia('(display-mode: standalone)').matches) return true;
+    if (window.matchMedia('(display-mode: window-controls-overlay)').matches) return true;
+    if (window.matchMedia('(display-mode: minimal-ui)').matches) return true;
+  }
+  return navigator.standalone === true;
+}
+function emIsEditorDevice() {
+  return emIsWindows() && !emIsStandalone()
+      && typeof window.showDirectoryPicker === 'function';
+}
+
+// IndexedDB store for the FileSystemDirectoryHandle. Handles are
+// structured-cloneable in modern Chromium — they survive reload
+// and even browser restart, though Chrome may ask the user to
+// re-grant readwrite permission once per session via a click.
+const EM_DB_NAME = 'song-practice-fs';
+const EM_DB_STORE = 'handles';
+function emOpenDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(EM_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(EM_DB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+async function emIDBGet(key) {
+  const db = await emOpenDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(EM_DB_STORE, 'readonly');
+    const req = tx.objectStore(EM_DB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror   = () => reject(req.error);
+  });
+}
+async function emIDBSet(key, value) {
+  const db = await emOpenDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(EM_DB_STORE, 'readwrite');
+    tx.objectStore(EM_DB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+// Cello fingerboard positions, indexed 0..8 from low to high. Each
+// entry's `label` is what gets engraved above the staff — empty
+// string for 1st position (the default; no marking required).
+//
+//   0  half          → "1/2"
+//   1  1st           → ""           (default — no annotation)
+//   2  +1st          → "+1st"       (extension above 1st position)
+//   3  2nd           → "2nd"
+//   4  3rd           → "3rd"
+//   5  +3rd          → "+3rd"
+//   6  4th           → "4th"
+//   7  +4th          → "+4th"
+//   8  5th           → "5th"
+const EM_POSITIONS = [
+  { name: 'half',  label: '1/2'  },
+  { name: '1st',   label: ''     },
+  { name: '+1st',  label: '+1st' },
+  { name: '2nd',   label: '2nd'  },
+  { name: '3rd',   label: '3rd'  },
+  { name: '+3rd',  label: '+3rd' },
+  { name: '4th',   label: '4th'  },
+  { name: '+4th',  label: '+4th' },
+  { name: '5th',   label: '5th'  }
+];
+const EM_DEFAULT_POSITION = 1;
+
+// Storage format versioning.
+//   v1: the original 9-position layout (idx 2 was labelled "1st")
+//   v2: 8-position layout with the extended-1st ("upper") removed
+//   v3: 9-position layout restored, with the extension explicitly
+//       labelled "+1st" instead of the misleading "1st"
+const EM_STORAGE_VERSION = 3;
+function emMigratePositions(positions, version) {
+  if (!positions || typeof positions !== 'object') return {};
+  if (typeof version !== 'number') version = 1;
+  if (version >= EM_STORAGE_VERSION) return positions;
+  // Filter to a clean numeric copy first so the migrations below
+  // can mutate-and-rebuild without worrying about stray garbage.
+  const clean = {};
+  for (const key of Object.keys(positions)) {
+    const v = positions[key];
+    if (typeof v === 'number') clean[key] = v;
+  }
+  // v1 → v3: identity. v1 already had the 9-entry layout we now
+  // have in v3; the only difference is that v1's idx=2 label was
+  // "1st" (semantically misleading) and v3's is "+1st". Same
+  // musical position either way — no index remapping needed.
+  if (version === 1) {
+    const out = {};
+    for (const key of Object.keys(clean)) {
+      const v = clean[key];
+      if (v !== EM_DEFAULT_POSITION) out[key] = v;
+    }
+    return out;
+  }
+  // v2 → v3: v2 had 8 entries with no extension between 1st and
+  // 2nd. v3 reinstates +1st at idx 2, so v2's idx 2..7 (2nd, 3rd,
+  // +3rd, 4th, +4th, 5th) shift up by one to land at v3 idx 3..8.
+  if (version === 2) {
+    const out = {};
+    for (const key of Object.keys(clean)) {
+      const v = clean[key];
+      const next = v <= 1 ? v : v + 1;
+      if (next !== EM_DEFAULT_POSITION) out[key] = next;
+    }
+    return out;
+  }
+  return clean;
+}
+
+// Edit-mode state.
+let emEnabled = false;
+let emProjectDir = null;        // FileSystemDirectoryHandle for the repo root
+let emEditNoteIdx = 0;          // index into barElements[selectedBar].noteData
+let emFingerings = {};          // { "barIdx:noteIdx": "fingering string" }
+let emPositions = {};           // { "barIdx:noteIdx": positionIdx (int 0..8) }
+let emFingeringsTitle = null;   // title the in-memory map was loaded for
+
+// One-time setup: prompt the user to pick the project root folder, or
+// reuse a previously-saved handle. Returns the handle, or null if the
+// user dismissed the picker.
+async function emEnsureProjectDir() {
+  if (!emProjectDir) {
+    try { emProjectDir = await emIDBGet('projectDir'); } catch (e) { /* ignore */ }
+  }
+  if (emProjectDir) {
+    try {
+      const perm = await emProjectDir.queryPermission({ mode: 'readwrite' });
+      if (perm === 'granted') return emProjectDir;
+      const req = await emProjectDir.requestPermission({ mode: 'readwrite' });
+      if (req === 'granted') return emProjectDir;
+    } catch (e) { /* fall through to re-pick */ }
+    emProjectDir = null;
+  }
+  if (typeof window.showDirectoryPicker !== 'function') return null;
+  try {
+    emProjectDir = await window.showDirectoryPicker({ mode: 'readwrite' });
+    await emIDBSet('projectDir', emProjectDir);
+    return emProjectDir;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Resolve the songs/fingerings/<title>.json file handle, creating
+// every intermediate directory and the file itself if missing.
+async function emFingeringFileHandle(title, opts) {
+  const create = !!(opts && opts.create);
+  const root = await emEnsureProjectDir();
+  if (!root) return null;
+  try {
+    const songsDir = await root.getDirectoryHandle('songs', { create: true });
+    const fDir = await songsDir.getDirectoryHandle('fingerings', { create: true });
+    return await fDir.getFileHandle(title + '.json', { create: create });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function emLoadFingerings(title) {
+  const empty = { fingerings: {}, positions: {} };
+  if (!title) return empty;
+  // HTTP fetch — works on every device, no FS permission needed,
+  // no edit-mode toggle required. Loads the same file the laptop
+  // edit-mode workflow writes via the File System Access API.
+  // `cache: 'no-store'` so freshly-pushed fingering files show up
+  // without manual cache-busting; the SW also strips cache for
+  // anything under songs/ as a belt-and-suspenders.
+  try {
+    const url = 'songs/fingerings/' + encodeURIComponent(title) + '.json';
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return empty;
+    const text = await res.text();
+    if (!text.trim()) return empty;
+    const json = JSON.parse(text);
+    const version    = (json && typeof json.version === 'number') ? json.version : 1;
+    const fingerings = (json && typeof json.fingerings === 'object' && json.fingerings) || {};
+    const rawPos     = (json && typeof json.positions  === 'object' && json.positions)  || {};
+    return {
+      fingerings: fingerings,
+      positions:  emMigratePositions(rawPos, version)
+    };
+  } catch (e) {
+    return empty;
+  }
+}
+
+async function emSaveFingerings(title) {
+  if (!title) return;
+  try {
+    const handle = await emFingeringFileHandle(title, { create: true });
+    if (!handle) return;
+    const writable = await handle.createWritable();
+    const payload = {
+      version: EM_STORAGE_VERSION,
+      song: title,
+      fingerings: emFingerings,
+      positions: emPositions
+    };
+    await writable.write(JSON.stringify(payload, null, 2));
+    await writable.close();
+  } catch (e) {
+    console.warn('emSaveFingerings failed:', e);
+  }
+}
+
+async function emEnsureFingeringsForCurrentSong() {
+  if (!window.currentSong || !window.currentSong.song) return;
+  const title = window.currentSong.song.title;
+  if (!title) return;
+  if (emFingeringsTitle === title) return;
+  emFingeringsTitle = title;
+  const data = await emLoadFingerings(title);
+  emFingerings = data.fingerings;
+  emPositions  = data.positions;
+}
+
+// Walk a bar's noteData looking for the first/last entry that
+// represents a real (pitched) note — rests come through as nulls.
+function emFirstNoteIdx(barIdx) {
+  const info = barElements[barIdx];
+  if (!info || !info.noteData) return -1;
+  for (let i = 0; i < info.noteData.length; i++) {
+    if (info.noteData[i]) return i;
+  }
+  return -1;
+}
+function emLastNoteIdx(barIdx) {
+  const info = barElements[barIdx];
+  if (!info || !info.noteData) return -1;
+  for (let i = info.noteData.length - 1; i >= 0; i--) {
+    if (info.noteData[i]) return i;
+  }
+  return -1;
+}
+
+// Compute SVG-space coordinates for a notehead overlay. VexFlow's
+// native getAbsoluteX / getYs are in the same viewBox the row's SVG
+// uses, so we don't need any client-space conversion.
+function emNoteheadGeometry(barIdx, noteIdx) {
+  const info = barElements[barIdx];
+  if (!info) return null;
+  const nd = info.noteData[noteIdx];
+  if (!nd) return null;
+  const sn = nd.staveNote;
+  if (!sn) return null;
+  let x, y, w;
+  try {
+    x = sn.getAbsoluteX();
+    const ys = sn.getYs && sn.getYs();
+    y = ys && ys.length ? ys[0] : null;
+    w = (sn.getGlyphWidth && sn.getGlyphWidth()) || 12;
+  } catch (e) { return null; }
+  if (!isFinite(x) || y == null || !isFinite(y)) return null;
+  return { x: x, y: y, w: w, svg: info.rowEl.querySelector('svg') };
+}
+
+// Bass clef top staff line. With staffY=36, VexFlow draws the top
+// line near y=76 — see the staffY comment in renderChart for the
+// detailed geometry.
+const EM_TOP_LINE_Y = 76;
+
+function emRenderCursor() {
+  document.querySelectorAll('.edit-cursor').forEach(n => n.remove());
+  if (!emEnabled || selectedBar == null) return;
+  // Cursor only makes sense when we're actually looking at the head.
+  // Edit Mode is gated on Head mode by emUpdateAvailability(), but
+  // there's a transient window during a mode switch where this can
+  // run before the toggle settles.
+  if (typeof exerciseMode !== 'undefined' && exerciseMode !== 'head') return;
+  const geom = emNoteheadGeometry(selectedBar, emEditNoteIdx);
+  if (!geom || !geom.svg) return;
+  const PAD_X = 4, PAD_Y = 7;
+  const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  r.setAttribute('class', 'edit-cursor');
+  r.setAttribute('x', geom.x - PAD_X);
+  r.setAttribute('y', geom.y - PAD_Y);
+  r.setAttribute('width', geom.w + PAD_X * 2);
+  r.setAttribute('height', PAD_Y * 2);
+  r.setAttribute('fill', 'none');
+  r.setAttribute('stroke', '#c92a2a');
+  r.setAttribute('stroke-width', 1.6);
+  r.setAttribute('rx', 2);
+  geom.svg.appendChild(r);
+}
+
+function emRenderFingerings() {
+  document.querySelectorAll('.fingering-text').forEach(n => n.remove());
+  // Fingerings are head-specific — they describe finger positions
+  // for the head's actual melody, not for the algorithmically
+  // generated exercise patterns. So they only paint when the
+  // user is reading the Head (regardless of Edit Mode state). In
+  // Exercise modes the in-memory map persists; switching back to
+  // Head re-renders them.
+  if (typeof exerciseMode !== 'undefined' && exerciseMode !== 'head') return;
+  // Always render whatever fingerings are loaded — edit mode only
+  // controls the COLOR (red while authoring; same color as the
+  // notes once you toggle edit mode off so the fingerings blend
+  // with the score). The in-memory map persists across toggles
+  // for the same song, so flipping edit mode off doesn't lose
+  // anything you typed.
+  const fillColor = emEnabled ? '#c92a2a' : '#000';
+  const keys = Object.keys(emFingerings);
+  for (let k = 0; k < keys.length; k++) {
+    const key = keys[k];
+    const value = emFingerings[key];
+    if (!value) continue;
+    const parts = key.split(':');
+    const barIdx = parseInt(parts[0], 10);
+    const noteIdx = parseInt(parts[1], 10);
+    if (!isFinite(barIdx) || !isFinite(noteIdx)) continue;
+    const geom = emNoteheadGeometry(barIdx, noteIdx);
+    if (!geom || !geom.svg) continue;
+    // Place the fingering above the notehead, but never below the
+    // line "just above the top staff line". So a low note that sits
+    // deep in the staff (or on a ledger line below it) still has its
+    // fingering parked above the top line, horizontally aligned
+    // with the notehead.
+    const noteAboveOffset = geom.y - 8;
+    const cap = EM_TOP_LINE_Y - 8;
+    const ty = Math.min(noteAboveOffset, cap);
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('class', 'fingering-text');
+    t.setAttribute('x', geom.x + geom.w / 2);
+    t.setAttribute('y', ty);
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('font-family', 'serif');
+    t.setAttribute('font-weight', 'bold');
+    t.setAttribute('font-size', '14');
+    t.setAttribute('fill', fillColor);
+    t.setAttribute('stroke', 'none');
+    t.textContent = value;
+    geom.svg.appendChild(t);
+  }
+}
+
+// Render position bars: a horizontal line "hovering above the
+// notehead" with a small text-in-a-box label above it. Consecutive
+// notes with the same non-default position get one continuous bar
+// spanning the run, with the label above the FIRST note. 1st
+// position (idx 1, the default) has an empty label and renders
+// nothing — we only annotate departures from default.
+//
+// Group breaks happen at:
+//   - any rest (null in noteData)
+//   - any note with a different position than the current run
+//   - any note with no explicit position (treated as default)
+//   - a row boundary (different SVG element)
+function emRenderPositions() {
+  document.querySelectorAll('.position-line, .position-box, .position-text').forEach(n => n.remove());
+  if (typeof exerciseMode !== 'undefined' && exerciseMode !== 'head') return;
+  // Default vertical layout — used when no fingering numbers
+  // share the position group's notes:
+  //   line  at y=50
+  //   label at y=36..49 (baseline 46)
+  // When a fingering IS present, the position elements rise just
+  // above the topmost fingering text in the group so the label
+  // doesn't collide with the number. The "rising" only happens
+  // for groups that contain a fingering — groups without one keep
+  // the tight default placement so the chart doesn't waste space.
+  const POS_LINE_DEFAULT_Y = 50;
+  const POS_LABEL_GAP      = 4;   // line-to-label gap (px)
+  const POS_FONT_SIZE      = 10;
+  const POS_TEXT_HEIGHT    = 11;  // approx font-size * 0.8 for "top of text"
+  // The fingering number's font / cap matches what emRenderFingerings
+  // already uses — keep these in sync.
+  const FINGER_FONT_HEIGHT = 11;
+  const FINGER_CAP_Y       = EM_TOP_LINE_Y - 8;
+
+  // Drawing color follows the same edit-mode convention as the
+  // fingering numbers — red while authoring so the live edits
+  // stand out, plain black for reading.
+  const color = emEnabled ? '#c92a2a' : '#000';
+
+  let cur = null; // { positionIdx, svg, notes: [{ barIdx, noteIdx, x, y, w }] }
+  function flushGroup() {
+    if (!cur || cur.notes.length === 0) { cur = null; return; }
+    const pos = EM_POSITIONS[cur.positionIdx];
+    if (pos && pos.label) {
+      const svg = cur.svg;
+      const first = cur.notes[0];
+      const last  = cur.notes[cur.notes.length - 1];
+      // Find the highest (smallest y) fingering text top across
+      // every note in this group. If no note in the group carries
+      // a fingering, this stays Infinity and we use the default
+      // line position.
+      let highestFingerTop = Infinity;
+      for (let i = 0; i < cur.notes.length; i++) {
+        const n = cur.notes[i];
+        const fkey = n.barIdx + ':' + n.noteIdx;
+        if (!(fkey in emFingerings)) continue;
+        const fingerBaseY = Math.min(n.y - 8, FINGER_CAP_Y);
+        const fingerTop   = fingerBaseY - FINGER_FONT_HEIGHT;
+        if (fingerTop < highestFingerTop) highestFingerTop = fingerTop;
+      }
+      let lineY;
+      if (highestFingerTop === Infinity) {
+        lineY = POS_LINE_DEFAULT_Y;
+      } else {
+        // Sit the line just above the highest fingering. Floor at
+        // y=14 so the label (which goes ABOVE the line) still has
+        // room before the top of the SVG.
+        lineY = Math.max(14, highestFingerTop - POS_LABEL_GAP);
+      }
+      const labelBaseline = lineY - POS_LABEL_GAP;
+      const x1 = first.x - 4;
+      const x2 = last.x + last.w + 4;
+      // The line.
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('class', 'position-line');
+      line.setAttribute('x1', x1);
+      line.setAttribute('y1', lineY);
+      line.setAttribute('x2', x2);
+      line.setAttribute('y2', lineY);
+      line.setAttribute('stroke', color);
+      line.setAttribute('stroke-width', 1.2);
+      line.setAttribute('stroke-linecap', 'round');
+      svg.appendChild(line);
+      // The position label, centered over the FIRST note in the run.
+      // Plain text, no box around it.
+      const cx = first.x + first.w / 2;
+      const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.setAttribute('class', 'position-text');
+      t.setAttribute('x', cx);
+      t.setAttribute('y', labelBaseline);
+      t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('font-family', 'serif');
+      t.setAttribute('font-weight', 'bold');
+      t.setAttribute('font-size', POS_FONT_SIZE);
+      t.setAttribute('fill', color);
+      t.setAttribute('stroke', 'none');
+      t.textContent = pos.label;
+      svg.appendChild(t);
+    }
+    cur = null;
+  }
+  if (!barElements || !barElements.length) return;
+  for (let barIdx = 0; barIdx < barElements.length; barIdx++) {
+    const info = barElements[barIdx];
+    if (!info || !info.noteData) { flushGroup(); continue; }
+    for (let noteIdx = 0; noteIdx < info.noteData.length; noteIdx++) {
+      if (!info.noteData[noteIdx]) continue; // rest — doesn't break the group on its own
+      const key = barIdx + ':' + noteIdx;
+      const pIdx = (key in emPositions) ? emPositions[key] : EM_DEFAULT_POSITION;
+      // Default (1st) position is "no annotation" — flush any open
+      // group and skip.
+      if (pIdx === EM_DEFAULT_POSITION) { flushGroup(); continue; }
+      const geom = emNoteheadGeometry(barIdx, noteIdx);
+      if (!geom || !geom.svg) { flushGroup(); continue; }
+      // Same position AND same row → extend; otherwise start fresh.
+      if (cur && cur.positionIdx === pIdx && cur.svg === geom.svg) {
+        cur.notes.push({ barIdx: barIdx, noteIdx: noteIdx, x: geom.x, y: geom.y, w: geom.w });
+      } else {
+        flushGroup();
+        cur = {
+          positionIdx: pIdx,
+          svg: geom.svg,
+          notes: [{ barIdx: barIdx, noteIdx: noteIdx, x: geom.x, y: geom.y, w: geom.w }]
+        };
+      }
+    }
+  }
+  flushGroup();
+}
+
+function emRenderOverlays() {
+  emRenderFingerings();
+  emRenderPositions();
+  emRenderCursor();
+}
+
+function emMoveCursorRight() {
+  if (selectedBar == null) return;
+  const info = barElements[selectedBar];
+  if (!info) return;
+  for (let i = emEditNoteIdx + 1; i < info.noteData.length; i++) {
+    if (info.noteData[i]) {
+      emEditNoteIdx = i;
+      emRenderCursor();
+      return;
+    }
+  }
+  for (let bi = selectedBar + 1; bi < barElements.length; bi++) {
+    const fi = emFirstNoteIdx(bi);
+    if (fi >= 0) {
+      // selectBar() handles the blue highlight; we set the cursor
+      // index BEFORE so the wrapped highlightBar (below) doesn't
+      // snap it back to the first note.
+      emEditNoteIdx = fi;
+      selectBar(bi);
+      return;
+    }
+  }
+}
+function emMoveCursorLeft() {
+  if (selectedBar == null) return;
+  const info = barElements[selectedBar];
+  if (!info) return;
+  for (let i = emEditNoteIdx - 1; i >= 0; i--) {
+    if (info.noteData[i]) {
+      emEditNoteIdx = i;
+      emRenderCursor();
+      return;
+    }
+  }
+  for (let bi = selectedBar - 1; bi >= 0; bi--) {
+    const li = emLastNoteIdx(bi);
+    if (li >= 0) {
+      emEditNoteIdx = li;
+      selectBar(bi);
+      return;
+    }
+  }
+}
+
+async function emSetEnabled(on) {
+  emEnabled = !!on;
+  document.body.classList.toggle('edit-mode', emEnabled);
+  if (emEnabled) {
+    await emEnsureProjectDir();
+    // Force a fresh load — the user might have edited the file
+    // between toggle-off and toggle-on, or this might be the first
+    // time toggling on for this song.
+    emFingeringsTitle = null;
+    await emEnsureFingeringsForCurrentSong();
+    if (selectedBar != null) {
+      const fi = emFirstNoteIdx(selectedBar);
+      if (fi >= 0) emEditNoteIdx = fi;
+    }
+  }
+  // Note: when toggling OFF we DO NOT clear emFingerings — the
+  // user wants the fingerings to remain visible (in note color
+  // rather than red) so they can read the score with their
+  // fingerings still showing.
+  emRenderOverlays();
+}
+
+// Availability gate: Edit Mode requires Head exercise mode AND a
+// successfully-loaded head file for the current song. When
+// unavailable, the toggle dims and won't accept clicks; if the user
+// was already in edit mode and the song / mode shifts to an
+// unsupported state, force it off.
+function emIsAvailable() {
+  if (typeof exerciseMode === 'undefined') return false;
+  if (exerciseMode !== 'head') return false;
+  const cs = window.currentSong;
+  if (!cs) return false;
+  // Treat as available once the head load finished AND returned data.
+  // If the load is still pending, keep the toggle disabled — flipping
+  // it on while the data isn't ready would just produce empty
+  // overlays.
+  return cs.headLoaded === true && !!cs.head;
+}
+function emUpdateAvailability() {
+  const label = document.getElementById('editModeLabel');
+  const cb    = document.getElementById('editModeToggle');
+  if (!label || !cb) return;
+  const ok = emIsAvailable();
+  label.classList.toggle('disabled', !ok);
+  cb.disabled = !ok;
+  // If we were ON and the mode/song no longer permits editing,
+  // turn off and clear overlays so we don't stay in a half-state.
+  if (!ok && emEnabled) {
+    cb.checked = false;
+    emSetEnabled(false);
+  }
+}
+
+(function emInitToggle() {
+  const label = document.getElementById('editModeLabel');
+  const cb    = document.getElementById('editModeToggle');
+  if (!label || !cb) return;
+  if (!emIsEditorDevice()) return;
+  label.hidden = false;
+  cb.addEventListener('change', async () => {
+    if (!emIsAvailable()) {
+      cb.checked = false;
+      return;
+    }
+    await emSetEnabled(cb.checked);
+  });
+  emUpdateAvailability();
+})();
+
+// Re-render overlays after every chart re-render. renderChart wipes
+// the SVGs, so any cursor / fingering text needs to be re-applied.
+//
+// Loading is unconditional — fingering files are fetched over HTTP
+// (cheap, public, works on the phone PWA too) so we always show
+// whatever's been saved for the current song, no edit-mode toggle
+// required. The cache check inside emEnsureFingeringsForCurrentSong
+// makes the second-and-onward render of the same song free.
+const _emOriginalRenderChart = renderChart;
+renderChart = function emWrappedRenderChart() {
+  const result = _emOriginalRenderChart.apply(this, arguments);
+  emEnsureFingeringsForCurrentSong().then(emRenderOverlays);
+  return result;
+};
+
+// Bar selection changes need a cursor refresh. If the new bar's
+// noteData doesn't have an entry at the current emEditNoteIdx,
+// snap to the first note in that bar. The movement helpers above
+// pre-set emEditNoteIdx to a valid slot before calling selectBar,
+// so this only fires the snap for click-driven selection.
+const _emOriginalHighlightBar = highlightBar;
+highlightBar = function emWrappedHighlightBar(idx) {
+  const result = _emOriginalHighlightBar.call(this, idx);
+  if (emEnabled) {
+    const info = barElements[idx];
+    const valid = info && info.noteData && info.noteData[emEditNoteIdx];
+    if (!valid) {
+      const fi = emFirstNoteIdx(idx);
+      emEditNoteIdx = fi >= 0 ? fi : 0;
+    }
+    emRenderOverlays();
+  }
+  return result;
+};
+
+// Allowed input keys → fingering string. Anything not in this map
+// is ignored. The mapping covers:
+//   1..4         → "1".."4"        (right-hand fingers — standard
+//                                    bass guitar notation)
+//   5            → "4+"            (extension past pinky)
+//   `            → "-1"            (thumb-behind / "minus" position;
+//                                    backtick chosen because it's
+//                                    just left of 1, mirroring the
+//                                    "one below" semantics)
+//   A,D,G,C,F    → "I","II","III","IV","V"  (string numbers — first
+//                                    five strings of an upright bass
+//                                    or the four-string equivalents
+//                                    plus a low-B add)
+// Both upper and lower case map to the same value.
+const EM_KEY_MAP = {
+  '1': '1', '2': '2', '3': '3', '4': '4',
+  '5': '4+',
+  '`': '-1',
+  'a': 'I', 'A': 'I',
+  'd': 'II', 'D': 'II',
+  'g': 'III', 'G': 'III',
+  'c': 'IV', 'C': 'IV',
+  'f': 'V', 'F': 'V'
+};
+
+// Edit-mode key handling: arrows navigate, the mapped keys above
+// assign a fingering, Delete/Backspace clears one. All other keys
+// are passed through to the rest of the page (so spacebar still
+// reaches the play handler, etc.).
+document.addEventListener('keydown', e => {
+  if (!emEnabled) return;
+  const t = e.target;
+  if (t) {
+    const tag = (t.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (t.isContentEditable) return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    emMoveCursorRight();
+    return;
+  }
+  if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    emMoveCursorLeft();
+    return;
+  }
+  // Delete (or Backspace) on the current note → clear its fingering
+  // AND its position annotation. Cursor stays put so the user can
+  // immediately retype if they pressed delete by accident.
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (selectedBar == null) return;
+    const info = barElements[selectedBar];
+    if (!info || !info.noteData[emEditNoteIdx]) return;
+    e.preventDefault();
+    const key = selectedBar + ':' + emEditNoteIdx;
+    let changed = false;
+    if (key in emFingerings) { delete emFingerings[key]; changed = true; }
+    if (key in emPositions)  { delete emPositions[key];  changed = true; }
+    if (changed) {
+      emRenderOverlays();
+      if (emFingeringsTitle) emSaveFingerings(emFingeringsTitle);
+    }
+    return;
+  }
+  // Cello fingerboard position: `-` steps down, `=` (or `+` for
+  // shift-=) steps up. The transition is clamped to the array
+  // bounds. Pressing from default (no entry → 1st position) maps
+  // to half (idx 0) on `-` and upper-1st (idx 2) on `=`. The
+  // cursor stays put — these adjust the current note's position
+  // without advancing.
+  if (e.key === '-' || e.key === '=' || e.key === '+') {
+    if (selectedBar == null) return;
+    const info = barElements[selectedBar];
+    if (!info || !info.noteData[emEditNoteIdx]) return;
+    e.preventDefault();
+    const key = selectedBar + ':' + emEditNoteIdx;
+    const cur = (key in emPositions) ? emPositions[key] : EM_DEFAULT_POSITION;
+    let next = cur;
+    if (e.key === '-') next = Math.max(0, cur - 1);
+    else next = Math.min(EM_POSITIONS.length - 1, cur + 1);
+    if (next === EM_DEFAULT_POSITION) {
+      // Landing on the default position is the same as having no
+      // entry — drop the key so the JSON stays clean.
+      delete emPositions[key];
+    } else {
+      emPositions[key] = next;
+    }
+    emRenderOverlays();
+    if (emFingeringsTitle) emSaveFingerings(emFingeringsTitle);
+    return;
+  }
+  // Translate the keypress against the allowed-keys table. If it
+  // isn't a recognised key, we silently ignore it — no preventDefault,
+  // so other listeners (spacebar play/pause) still see it.
+  const mapped = EM_KEY_MAP[e.key];
+  if (mapped == null) return;
+  if (selectedBar == null) return;
+  const info = barElements[selectedBar];
+  if (!info || !info.noteData[emEditNoteIdx]) return;
+  e.preventDefault();
+  const key = selectedBar + ':' + emEditNoteIdx;
+  emFingerings[key] = mapped;
+  emRenderOverlays();
+  if (emFingeringsTitle) emSaveFingerings(emFingeringsTitle);
+  emMoveCursorRight();
+});

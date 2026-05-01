@@ -773,3 +773,53 @@ html.is-android .fl {
   font-size: 11px; font-variant-numeric: tabular-nums;
 }
 
+
+/* === Edit mode (Windows desktop only — toggle is hidden via the
+   `hidden` attr unless app.js detects an editor device). The
+   switch sits in the top toolbar after the gear button. === */
+.top-edit-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* margin-left:auto pushes the Edit Fingering switch to the far
+     right edge of the toolbar, separated from the right-group of
+     icon buttons (folder / fingerboard / instruments / gear) that
+     start with the song picker's own margin-left:auto. With both
+     groups using auto-margins, flexbox splits the available space
+     between them so the switch sits cleanly at the right edge. */
+  margin-left: auto;
+  height: 40px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: #cde;
+  user-select: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.top-edit-text {
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
+/* Disabled state — applied by app.js when not in Head mode or the
+   current song has no head. The whole label dims and stops
+   responding to clicks; the switch underneath visually deactivates
+   via opacity. */
+.top-edit-label.disabled {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
+}
+/* Red border around the score area when editing. Outline (not border)
+   so the chart's content size doesn't shift when the mode toggles. */
+body.edit-mode #chart {
+  outline: 2px solid #c92a2a;
+  outline-offset: -2px;
+}
+/* SVG overlays for the edit cursor and fingering numbers. Pointer
+   events disabled so they don't intercept clicks on the underlying
+   bar (which still drives bar selection). */
+.edit-cursor,
+.fingering-text {
+  pointer-events: none;
+  user-select: none;
+}
