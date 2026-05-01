@@ -2755,16 +2755,13 @@ function updateFingerboard(state) {
       }
       if (inMeasure) {
         ring.style.display = '';
-        // Ring color encodes THIS note's fingering position — blue
-        // for 1st, red for half, green for upper. A bar in "upper"
-        // can still have a lone note (out of the upper reach) that
-        // plays in 1st; that note gets a blue ring even though its
-        // siblings are green. Falls back to black if no per-pitch
-        // color was supplied (early boot, etc.).
-        const ringColor = state.ringColors && state.ringColors[midi]
-          ? state.ringColors[midi]
-          : '#000';
-        ring.setAttribute('stroke', ringColor);
+        // Ring just signals "this pitch appears in the current bar".
+        // The previous color-coded position scheme (blue/red/green
+        // for 1st/half/upper from the old fingering-overlay system)
+        // has been retired in favour of the user-authored Edit
+        // Fingering data; a single black ring is enough to flag the
+        // bar's pitches on the fingerboard.
+        ring.setAttribute('stroke', '#000');
         ring.setAttribute('stroke-width', isOpen ? '3' : '2.2');
       } else {
         ring.style.display = 'none';
@@ -4553,224 +4550,16 @@ function clearHighlight() {
 }
 
 // ===== Fingering overlay =====
-// 1st-position cello fingering table, ported from the MuseScore
-// `cellofingering.qml` plugin. Key = sounding MIDI pitch, value =
-// finger label. Each string spans 7 semitones:
-//   open (Roman numeral), -1 extension, 1, 2, 3, 4, 4+ (pinky
-//   extension up a half step).
-const FINGERING = {
-  29:'V',  30:'-1', 31:'1', 32:'2', 33:'3', 34:'4', 35:'4+',
-  36:'IV', 37:'-1', 38:'1', 39:'2', 40:'3', 41:'4', 42:'4+',
-  43:'III',44:'-1', 45:'1', 46:'2', 47:'3', 48:'4', 49:'4+',
-  50:'II', 51:'-1', 52:'1', 53:'2', 54:'3', 55:'4', 56:'4+',
-  57:'I',  58:'-1', 59:'1', 60:'2', 61:'3', 62:'4', 63:'4+'
-};
-
-// Half-position fingering table. "Half position" is hand-one-semitone-
-// down from 1st position: finger 1 lands on what would be the -1
-// back-extension in 1st position. Defined only for notes that have a
-// natural half-position home on some string (positions 1..5 above
-// the open string, i.e. semitones 1..5 above the open pitch).
-//   F string:  F# G G# A A#   (30..34)
-//   C string:  C# D D# E  F   (37..41)
-//   G string:  G# A A# B  C   (44..48)
-//   D string:  D# E F F# G    (51..55)
-//   A string:  A# B C C# D    (58..62)
-const HALF_FINGERING = {
-  // Open strings — played unpressed in any position, so the label
-  // stays the Roman numeral (V, IV, III, II, I) even when the bar
-  // is in half position. Color picks up the half-position red.
-  29:'V',  36:'IV', 43:'III', 50:'II', 57:'I',
-  30:'1', 31:'2', 32:'3', 33:'4', 34:'4+',
-  37:'1', 38:'2', 39:'3', 40:'4', 41:'4+',
-  44:'1', 45:'2', 46:'3', 47:'4', 48:'4+',
-  51:'1', 52:'2', 53:'3', 54:'4', 55:'4+',
-  58:'1', 59:'2', 60:'3', 61:'4', 62:'4+'
-};
-// "Upper" position: hand one semitone ABOVE 1st position — finger 1
-// lands at open+3 (what would be finger "2" in 1st position). Useful
-// when several notes in a bar sit in the open+3..open+7 zone and
-// 1st position would force a pinky extension (4+). The open+7 slot
-// coincides with the NEXT string's open pitch (e.g. F+7 = C, which
-// is the IV string open) — we label those as string numerals rather
-// than "4+" because you'd just play the next open string rather than
-// pinky-extending across strings.
-const UPPER_FINGERING = {
-  // Open strings (including the ones that the previous string could
-  // reach as "4+") render as Roman numerals in the upper-position
-  // color (green).
-  29:'V',  36:'IV', 43:'III', 50:'II', 57:'I',
-  32:'1', 33:'2', 34:'3', 35:'4',
-  39:'1', 40:'2', 41:'3', 42:'4',
-  46:'1', 47:'2', 48:'3', 49:'4',
-  53:'1', 54:'2', 55:'3', 56:'4',
-  60:'1', 61:'2', 62:'3', 63:'4'
-};
-// Open-string MIDI pitches (V, IV, III, II, I = F1, C2, G2, D3, A3).
-// Used to identify which string a note "lives on" for the half-position
-// trigger heuristic below.
-const FB_OPEN_MIDIS = [29, 36, 43, 50, 57];
-// Pick the string a note naturally sits on (the highest open pitch
-// that's <= the note) and return the semitone offset from that open
-// pitch. Returns null for notes outside the cello range.
-function fbNoteStringOffset(midi) {
-  let bestBase = -1;
-  for (const base of FB_OPEN_MIDIS) {
-    if (base <= midi && base > bestBase) bestBase = base;
-  }
-  if (bestBase < 0) return null;
-  return { base: bestBase, offset: midi - bestBase };
-}
+// State for the legacy "Overlay" toggle, which now ONLY paints the
+// note-letter inside each notehead. The old position-based fingering
+// system (1st/half/upper, with red/green/blue ring colours on the
+// Note Info panel) is gone — superseded by the user-authored Edit
+// Fingering data, which lives in songs/fingerings/<title>.json and
+// renders separately.
 
 let fingeringOn = false;
 let fingeringOverlayEl = null;
 let fingeringOverlayBarIdx = -1;
-
-// Colors tied to each fingering position — reused by the overlay
-// labels and by the Note Info panel's in-bar rings.
-const POSITION_COLORS = { first: '#2e78ff', half: '#d83030', upper: '#168043' };
-
-// (obsolete positionsActiveForCurrentKey helper removed — gating is
-// now per-chord, not per-song-key.)
-
-// Check whether a chord's effective scale (stored as scaleRoot +
-// scaleIntervals on each beat info) is B Major, A Major, or E Major
-// (the three sharp-heavy keys where half/upper fingering pays off).
-const IONIAN_SEMIS = [0, 2, 4, 5, 7, 9, 11];
-function isChordInBEAMajor(scaleRoot, scaleIntervals) {
-  if (!scaleRoot || !scaleIntervals || scaleIntervals.length !== 7) return false;
-  for (let i = 0; i < 7; i++) {
-    if (scaleIntervals[i].s !== IONIAN_SEMIS[i]) return false;
-  }
-  const pc = scaleRoot.pitchClass;
-  return pc === 11 /* B */ || pc === 9 /* A */ || pc === 4 /* E */;
-}
-
-// Per-note position assignments for a bar. Returns a plain map of
-// { [midi pitch]: 'first' | 'half' | 'upper' } for every note in the
-// bar.
-//
-// Gating is PER-CHORD (not per-song): a note only gets half/upper
-// fingering when its OWNING chord's effective scale is B Major, A
-// Major, or E Major. A single bar with a BMaj7 → E7 → … progression
-// might have some notes in half/upper (under the BMaj7) and others
-// in plain 1st (under a non-B/E/A chord that might follow).
-//
-// Per-note pick within a B/E/A chord:
-//   - Half-only zone (offsets 1..2)  → half.
-//   - Upper-only zone (offsets 6..7) → upper.
-//   - Overlap zone (offsets 3..5)    → stay in previous position if
-//     possible; default to half otherwise.
-//   - Neither reaches                → 1st.
-// prevPos resets when the chord context leaves a B/E/A major.
-function barPositionAssignments(idx) {
-  const bi = barElements[idx];
-  if (!bi || !bi.noteData) return null;
-  const map = {};
-  const beatInfoArr = (typeof lastBeatInfo !== 'undefined' && lastBeatInfo)
-    ? lastBeatInfo[idx] : null;
-  // Without per-beat scale info we can't tell which chord owns each
-  // note — everything defaults to 1st position.
-  if (!beatInfoArr) {
-    for (const nd of bi.noteData) if (nd) map[nd.pitch] = 'first';
-    return map;
-  }
-
-  // First pass: build a flat list of in-BEA notes with their
-  // string/offset info, preserving slot order for stickiness.
-  // Non-BEA slots are tagged 'first' immediately.
-  const seq = [];
-  for (const info of beatInfoArr) {
-    if (!info || info.pitch == null) continue;
-    const inBEA = isChordInBEAMajor(info.scaleRoot, info.scaleIntervals);
-    if (!inBEA) {
-      map[info.pitch] = 'first';
-      seq.push({ pitch: info.pitch, bea: false });
-      continue;
-    }
-    const so = fbNoteStringOffset(info.pitch);
-    seq.push({
-      pitch: info.pitch,
-      bea: true,
-      stringBase: so ? so.base : null,
-      offset: so ? so.offset : null
-    });
-  }
-
-  // Second pass: group BEA notes by string. If a string has ≥3 notes
-  // AND they all fit in one non-first position, commit the whole
-  // string to that position so the player keeps a single hand shape.
-  // This is the "cluster 3+ notes on one string" rule.
-  const byString = {};
-  for (const n of seq) {
-    if (!n.bea || n.stringBase == null) continue;
-    (byString[n.stringBase] = byString[n.stringBase] || []).push(n);
-  }
-  const stringCommit = {};
-  for (const base of Object.keys(byString)) {
-    const group = byString[base];
-    if (group.length < 3) continue;
-    const allFitHalf  = group.every(n => HALF_FINGERING[n.pitch]  != null);
-    const allFitUpper = group.every(n => UPPER_FINGERING[n.pitch] != null);
-    if (allFitHalf && allFitUpper) {
-      // Both reach every note — pick the position whose reach is
-      // better-centered on the group. avg offset <4 favors half,
-      // ≥4 favors upper.
-      const avg = group.reduce((s, n) => s + (n.offset || 0), 0) / group.length;
-      stringCommit[base] = avg < 4 ? 'half' : 'upper';
-    } else if (allFitUpper) {
-      stringCommit[base] = 'upper';
-    } else if (allFitHalf) {
-      stringCommit[base] = 'half';
-    }
-  }
-
-  // Third pass: assign each note. Committed strings win; otherwise
-  // fall back to per-note picking with stickiness to the previous
-  // note's position.
-  let prevPos = null;
-  for (const n of seq) {
-    if (!n.bea) { prevPos = null; continue; }
-    const committed = stringCommit[n.stringBase];
-    let chosen;
-    if (committed === 'half' && HALF_FINGERING[n.pitch] != null) {
-      chosen = 'half';
-    } else if (committed === 'upper' && UPPER_FINGERING[n.pitch] != null) {
-      chosen = 'upper';
-    } else {
-      const canHalf  = HALF_FINGERING[n.pitch]  != null;
-      const canUpper = UPPER_FINGERING[n.pitch] != null;
-      if (canHalf && canUpper) {
-        if (n.offset != null && n.offset <= 2) chosen = 'half';
-        else if (n.offset != null && n.offset >= 6) chosen = 'upper';
-        else if (prevPos === 'upper') chosen = 'upper';
-        else chosen = 'half';
-      } else if (canHalf) {
-        chosen = 'half';
-      } else if (canUpper) {
-        chosen = 'upper';
-      } else {
-        chosen = 'first';
-      }
-    }
-    map[n.pitch] = chosen;
-    prevPos = chosen;
-  }
-  return map;
-}
-
-// Build a per-pitch ring-color map for the given bar. Each in-bar
-// note's ring on the Note Info fingerboard gets colored by THAT
-// note's own position. Lets a mixed half/upper bar display cleanly.
-function barRingColors(idx) {
-  const assignments = barPositionAssignments(idx);
-  if (!assignments) return null;
-  const map = {};
-  for (const pitch of Object.keys(assignments)) {
-    map[pitch] = POSITION_COLORS[assignments[pitch]];
-  }
-  return map;
-}
 
 function clearFingeringOverlay() {
   if (fingeringOverlayEl && fingeringOverlayEl.parentNode) {
@@ -5155,8 +4944,7 @@ function refreshFingerboardForBar(idx, beatInBar) {
     scaleRoot: info.scaleRoot,
     scaleIntervals: info.scaleIntervals,
     chordRoot: info.chordRoot,
-    measurePitches,
-    ringColors: barRingColors(idx)
+    measurePitches
   });
 }
 
@@ -5797,8 +5585,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
           scaleRoot: ev.info.scaleRoot,
           scaleIntervals: ev.info.scaleIntervals,
           chordRoot: ev.info.chordRoot,
-          measurePitches: ev.measurePitches,
-          ringColors: barRingColors(ev.idx)
+          measurePitches: ev.measurePitches
         });
         updateNoteHighlight(ev.idx, ev.beat);
       }, time);
@@ -7231,8 +7018,23 @@ function emIsStandalone() {
   }
   return navigator.standalone === true;
 }
+// Belt-and-suspenders mobile check. The Windows test SHOULD already
+// exclude phones (Android/iOS report a different platform string and
+// neither contains "Windows" in their UA), but if a browser ever
+// spoofs UA strangely or `userAgentData` returns something unexpected
+// we want a second guard. `userAgentData.mobile` is the canonical
+// modern signal; the regex is the fallback for browsers that haven't
+// shipped the API.
+function emIsMobile() {
+  if (navigator.userAgentData && typeof navigator.userAgentData.mobile === 'boolean') {
+    return navigator.userAgentData.mobile;
+  }
+  return /\b(Android|iPhone|iPad|iPod|Mobile)\b/i.test(navigator.userAgent || '');
+}
 function emIsEditorDevice() {
-  return emIsWindows() && !emIsStandalone()
+  return emIsWindows()
+      && !emIsMobile()
+      && !emIsStandalone()
       && typeof window.showDirectoryPicker === 'function';
 }
 
@@ -7788,6 +7590,20 @@ function emUpdateAvailability() {
   const label = document.getElementById('editModeLabel');
   const cb    = document.getElementById('editModeToggle');
   if (!label || !cb) return;
+  // First guard: if this isn't an editor device at all (phone PWA,
+  // Mac, Linux, Firefox/Safari on any OS), the toggle stays
+  // hidden no matter what mode/song state says. We re-check on
+  // every availability update so a stray code path that ever
+  // un-hid the label gets corrected on the next song / mode flip.
+  if (!emIsEditorDevice()) {
+    label.hidden = true;
+    if (emEnabled) {
+      cb.checked = false;
+      emSetEnabled(false);
+    }
+    return;
+  }
+  label.hidden = false;
   const ok = emIsAvailable();
   label.classList.toggle('disabled', !ok);
   cb.disabled = !ok;
