@@ -7334,7 +7334,7 @@ function emRenderFingerings() {
   // with the score). The in-memory map persists across toggles
   // for the same song, so flipping edit mode off doesn't lose
   // anything you typed.
-  const fillColor = emEnabled ? '#c92a2a' : '#000';
+  const fillColor = emEnabled ? '#c92a2a' : '#888';
   const keys = Object.keys(emFingerings);
   for (let k = 0; k < keys.length; k++) {
     const key = keys[k];
@@ -7404,8 +7404,9 @@ function emRenderPositions() {
 
   // Drawing color follows the same edit-mode convention as the
   // fingering numbers — red while authoring so the live edits
-  // stand out, plain black for reading.
-  const color = emEnabled ? '#c92a2a' : '#000';
+  // stand out, medium grey for reading so the annotations sit
+  // visibly above the staff without competing with the noteheads.
+  const color = emEnabled ? '#c92a2a' : '#888';
 
   let cur = null; // { positionIdx, svg, notes: [{ barIdx, noteIdx, x, y, w }] }
   function flushGroup() {
