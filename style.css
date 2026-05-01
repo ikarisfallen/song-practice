@@ -514,6 +514,19 @@ main {
   padding: 10px 6px;
   border-radius: 6px;
   overflow-y: auto;
+  /* The score is a tool, not a document — bar/note/chord clicks
+     should never start a text selection. Shift-clicking to extend
+     a multi-bar selection in Edit Mode would otherwise highlight
+     all the chord labels, fingering numbers, and position text
+     between the two clicks. Disable user-select on every element
+     under the chart; the song picker and other text UI keep their
+     own defaults because they're outside this subtree. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.chart * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 /* "No head found" placeholder shown when the Head exercise is picked
    for a song that has no matching .musicxml / .mid file in songs/.
@@ -804,6 +817,61 @@ html.is-android .fl {
    `hidden` set on non-editor devices. Force the override here. */
 .top-edit-label[hidden] {
   display: none;
+}
+
+/* Kebab button + dropdown menu — sits right after the Edit
+   Fingering switch. Visible only on editor devices, enabled only
+   when Edit Mode is on. The menu uses position:fixed and JS to
+   position it relative to the button's viewport rect; that
+   sidesteps any clipping by ancestor overflow:hidden.            */
+.edit-kebab {
+  font-size: 22px;
+  line-height: 1;
+}
+.edit-kebab[hidden] { display: none; }
+.edit-kebab-menu {
+  position: fixed;
+  z-index: 100;
+  background: #2a3a48;
+  border: 1px solid #334654;
+  border-radius: 8px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.edit-kebab-menu[hidden] { display: none; }
+.edit-kebab-menu button {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: #cde;
+  text-align: left;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.edit-kebab-menu button:hover:not(:disabled) {
+  background: #334654;
+}
+.edit-kebab-menu button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+/* Thin divider above the destructive Delete All option so it's
+   visually separated from the routine copy/paste pair. */
+.edit-kebab-sep {
+  border: 0;
+  border-top: 1px solid #334654;
+  margin: 4px 0;
+}
+.edit-kebab-menu button.edit-kebab-danger {
+  color: #ff8a8a;
+}
+.edit-kebab-menu button.edit-kebab-danger:hover:not(:disabled) {
+  background: #4a2424;
 }
 .top-edit-text {
   font-size: 12px;

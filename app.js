@@ -3910,7 +3910,18 @@ function renderChart(song, barsIn, timesigStr) {
         const info = rowBarHits[i];
         if (!info) continue;
         if (svgX >= info.x && svgX < info.x + info.w) {
-          selectBar(rowStartLocal + i);
+          const idx = rowStartLocal + i;
+          // Shift-click in Edit Mode extends the current selection
+          // into a multi-bar range (used by Copy Fingerings).
+          // Anywhere else, or any non-shift click, falls through to
+          // the regular single-bar selection.
+          if (ev.shiftKey
+              && typeof emEnabled !== 'undefined' && emEnabled
+              && selectedBar != null) {
+            extendBarSelection(idx);
+          } else {
+            selectBar(idx);
+          }
           break;
         }
       }
@@ -4257,6 +4268,12 @@ let pauseContext = null;   // { offset, beatsPerBar } captured at startPlayback;
 let currentPlaylist = []; // sequence of { bar, idx } one entry = one bar
 let currentBeatHighlight = null;
 let selectedBar = null;   // user-tapped bar index; when set, play starts here
+// Multi-bar selection range, used by Edit Mode's Copy Fingerings
+// menu. When non-null, bars [min(selectedBar, end) .. max(...)] are
+// all "selected" — visualised with the same blue highlight as
+// `selectedBar`. A regular (non-shift) click resets this to null,
+// as does any path through `selectBar()`.
+let selectedBarRangeEnd = null;
 let loopIn = null;        // inclusive start bar of practice loop (null = no loop)
 let loopOut = null;       // inclusive end bar of practice loop (null = no loop)
 let currentPlayingBar = 0; // latest bar index the Part's barStart event fired for
@@ -5010,6 +5027,9 @@ function selectBar(idx) {
   const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
   if (hasLoop && playState === 'playing' && (idx < loopIn || idx > loopOut)) return;
   selectedBar = idx;
+  // Any non-shift-click bar selection resets the multi-bar range.
+  // Range extension goes through `extendBarSelection` instead.
+  selectedBarRangeEnd = null;
   updateLoopControls();
   if (playState === 'playing') {
     if (!window.currentSong) return;
@@ -5038,11 +5058,9 @@ function selectBar(idx) {
   refreshFingerboardForBar(idx);
   updateChordNav();
 }
-function highlightBar(idx) {
-  clearHighlight();
-  // Refresh the Upper/Half fingering overlay so it follows the
-  // current bar (or user-selected bar when paused/stopped).
-  updateFingeringOverlay(idx);
+// Paint a single highlight rect over `barIdx`. Shared between the
+// primary highlightBar() and the multi-bar range extension.
+function paintBarSelectionRect(idx) {
   const info = barElements[idx];
   if (!info) return;
   const svg = info.rowEl.querySelector('svg');
@@ -5060,6 +5078,42 @@ function highlightBar(idx) {
   rect.setAttribute('height', info.h + TOP_EXTEND - 4);
   rect.setAttribute('rx', 2);
   svg.appendChild(rect);
+}
+
+// Extend the current selection up-to or down-to `idx`. Used by
+// shift-click in Edit Mode. Repaints all highlight rects for the
+// inclusive range; the cursor (selectedBar) stays at the anchor.
+function extendBarSelection(idx) {
+  if (selectedBar == null) {
+    selectBar(idx);
+    return;
+  }
+  selectedBarRangeEnd = idx;
+  clearHighlight();
+  // Re-attach the per-bar fingering overlay to the anchor bar.
+  updateFingeringOverlay(selectedBar);
+  const a = Math.min(selectedBar, idx);
+  const b = Math.max(selectedBar, idx);
+  for (let bi = a; bi <= b; bi++) paintBarSelectionRect(bi);
+  // Edit-mode overlays (cursor + fingering text) follow the anchor.
+  if (typeof emRenderOverlays === 'function') emRenderOverlays();
+  // The kebab's Copy state depends on whether anything is selected,
+  // and the menu's Paste enabled state never changes on selection,
+  // but call to keep things consistent.
+  if (typeof emUpdateKebabState === 'function') emUpdateKebabState();
+}
+
+function highlightBar(idx) {
+  clearHighlight();
+  // Refresh the Upper/Half fingering overlay so it follows the
+  // current bar (or user-selected bar when paused/stopped).
+  updateFingeringOverlay(idx);
+  paintBarSelectionRect(idx);
+  // Use the current barElements[idx] for downstream scroll math.
+  const info = barElements[idx];
+  if (!info) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
   // Only auto-scroll during playback. When the user manually selects
   // a bar while paused or stopped, keep the view where they had it —
   // jumping the scroll position on click is disorienting (e.g. the
@@ -7596,23 +7650,51 @@ function emRenderOverlays() {
   emRenderCursor();
 }
 
+// Play the currently-selected note as a brief preview through the
+// Lead sampler — same instrument the "Play Score" toggle uses, with
+// the same `+12` semitone shift to compensate for the bass-clef
+// 8vb display. Intended to fire whenever the cursor lands on a new
+// note in edit mode so the user can hear what they're fingering
+// without starting full playback. Best-effort: silently no-ops if
+// the sampler hasn't loaded yet, the audio context isn't started,
+// playback is already running (don't fight the live audio), or
+// anything else goes wrong.
+function emPreviewSelectedNote() {
+  if (!emEnabled || selectedBar == null) return;
+  if (typeof playState !== 'undefined' && playState === 'playing') return;
+  const info = barElements[selectedBar];
+  if (!info || !info.noteData) return;
+  const nd = info.noteData[emEditNoteIdx];
+  if (!nd || nd.pitch == null) return;
+  if (typeof guitar === 'undefined' || !guitar || !guitar.loaded) return;
+  try {
+    const name = midiToName(nd.pitch + 12);
+    // '8n' = an eighth note at the current Tone.Transport tempo.
+    // No `time` arg → fires immediately (Tone.now()).
+    guitar.triggerAttackRelease(name, '8n', undefined, 0.7);
+  } catch (e) { /* ignore — preview is best-effort */ }
+}
+
 function emMoveCursorRight() {
   if (selectedBar == null) return;
   const info = barElements[selectedBar];
   if (!info) return;
+  // In-bar advance: no bar change, so the highlightBar wrapper
+  // doesn't fire. Preview here.
   for (let i = emEditNoteIdx + 1; i < info.noteData.length; i++) {
     if (info.noteData[i]) {
       emEditNoteIdx = i;
       emRenderCursor();
+      emPreviewSelectedNote();
       return;
     }
   }
+  // Cross-bar jump: selectBar() invokes highlightBar(), whose
+  // wrapper handles the preview. We don't call emPreviewSelectedNote
+  // explicitly here — that would double-fire the sample.
   for (let bi = selectedBar + 1; bi < barElements.length; bi++) {
     const fi = emFirstNoteIdx(bi);
     if (fi >= 0) {
-      // selectBar() handles the blue highlight; we set the cursor
-      // index BEFORE so the wrapped highlightBar (below) doesn't
-      // snap it back to the first note.
       emEditNoteIdx = fi;
       selectBar(bi);
       return;
@@ -7627,6 +7709,7 @@ function emMoveCursorLeft() {
     if (info.noteData[i]) {
       emEditNoteIdx = i;
       emRenderCursor();
+      emPreviewSelectedNote();
       return;
     }
   }
@@ -7645,6 +7728,13 @@ async function emSetEnabled(on) {
   document.body.classList.toggle('edit-mode', emEnabled);
   if (emEnabled) {
     await emEnsureProjectDir();
+    // Boot the audio graph so the Lead sampler is ready when the
+    // user starts arrowing through notes — `initAudio()` is
+    // idempotent (returns early if `piano` already exists), so
+    // this is safe to call regardless of whether playback was
+    // previously started. The toggle click counts as the user
+    // gesture Tone.start() needs.
+    try { await initAudio(); } catch (e) { /* ignore */ }
     // Force a fresh load — the user might have edited the file
     // between toggle-off and toggle-on, or this might be the first
     // time toggling on for this song.
@@ -7659,7 +7749,27 @@ async function emSetEnabled(on) {
   // user wants the fingerings to remain visible (in note color
   // rather than red) so they can read the score with their
   // fingerings still showing.
+  // BUT we DO clear any multi-bar range — that selection only has
+  // a meaning while editing (Copy Fingerings reads from it). Off
+  // edit mode, leaving 5 bars highlighted blue is just confusing,
+  // so collapse back to the single anchor and repaint.
+  if (!emEnabled && selectedBarRangeEnd != null) {
+    selectedBarRangeEnd = null;
+    if (selectedBar != null) highlightBar(selectedBar);
+  }
   emRenderOverlays();
+  // The kebab button's enabled state mirrors emEnabled, but
+  // emSetEnabled is the one place that flips emEnabled directly
+  // (emUpdateAvailability is called from mode/song-change paths,
+  // not from the toggle switch itself), so we have to refresh
+  // the kebab here too. Without this, the kebab stays disabled
+  // forever once Edit Mode is turned on for the first time.
+  if (typeof emUpdateKebabState === 'function') emUpdateKebabState();
+  // Preview the note the cursor just landed on so the user
+  // immediately hears the starting pitch when they enable edit
+  // mode. Fires after render so the cursor visually appears at
+  // the same instant the sound starts.
+  if (emEnabled) emPreviewSelectedNote();
 }
 
 // Availability gate: Edit Mode requires Head exercise mode AND a
@@ -7693,6 +7803,7 @@ function emUpdateAvailability() {
       cb.checked = false;
       emSetEnabled(false);
     }
+    emUpdateKebabState();
     return;
   }
   label.hidden = false;
@@ -7705,6 +7816,146 @@ function emUpdateAvailability() {
     cb.checked = false;
     emSetEnabled(false);
   }
+  emUpdateKebabState();
+}
+
+// === Kebab menu + copy/paste ============================================
+//
+// Clipboard for fingering+position copy/paste. `null` until the
+// user invokes Copy Fingerings; cleared by reload only (a successful
+// paste leaves it intact so the user can paste the same set
+// repeatedly to multiple targets if they want).
+let emClipboard = null; // null OR { entries: [{ fingering, position }, ...] }
+
+// Update kebab visibility + enabled state. Mirrors the rules for
+// the Edit Mode switch:
+//   - hidden entirely on non-editor devices
+//   - shown but disabled when Edit Mode is off (the kebab itself,
+//     so the menu can't open and copy/paste can't fire)
+//   - enabled when Edit Mode is on; Paste sub-item disabled when
+//     the clipboard is empty.
+function emUpdateKebabState() {
+  const btn = document.getElementById('editKebabBtn');
+  const menu = document.getElementById('editKebabMenu');
+  if (!btn) return;
+  if (!emIsEditorDevice()) {
+    btn.hidden = true;
+    if (menu) menu.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  btn.disabled = !emEnabled;
+  // Closing the menu when Edit Mode flips off keeps the UI tidy.
+  if (!emEnabled && menu) menu.hidden = true;
+  const paste = document.getElementById('pasteFingeringsBtn');
+  if (paste) paste.disabled = !(emClipboard && emClipboard.entries && emClipboard.entries.length > 0);
+}
+
+function emOpenKebabMenu() {
+  const btn = document.getElementById('editKebabBtn');
+  const menu = document.getElementById('editKebabMenu');
+  if (!btn || !menu) return;
+  // Position the fixed-position menu just under and right-aligned
+  // with the kebab button, using its viewport rect so any ancestor
+  // overflow:hidden doesn't clip us.
+  const r = btn.getBoundingClientRect();
+  menu.hidden = false;
+  // Align the menu's right edge with the button's right edge.
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.right = (window.innerWidth - r.right) + 'px';
+  menu.style.left = 'auto';
+  btn.setAttribute('aria-expanded', 'true');
+}
+function emCloseKebabMenu() {
+  const btn = document.getElementById('editKebabBtn');
+  const menu = document.getElementById('editKebabMenu');
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+// Copy fingerings + positions from the current selection (single
+// bar or multi-bar range) into emClipboard. Walks the selected bars'
+// notes in order, capturing each note's fingering / position state
+// (or `null` for "no annotation"). The clipboard is just an ordered
+// list of { fingering, position } entries — bar/note indexes aren't
+// preserved, since paste applies sequentially from the target bar
+// regardless of how the source was structured.
+function emCopyFingerings() {
+  if (selectedBar == null) return;
+  const a = selectedBarRangeEnd != null
+    ? Math.min(selectedBar, selectedBarRangeEnd)
+    : selectedBar;
+  const b = selectedBarRangeEnd != null
+    ? Math.max(selectedBar, selectedBarRangeEnd)
+    : selectedBar;
+  const entries = [];
+  for (let bi = a; bi <= b; bi++) {
+    const info = barElements[bi];
+    if (!info || !info.noteData) continue;
+    for (let ni = 0; ni < info.noteData.length; ni++) {
+      if (!info.noteData[ni]) continue; // skip rests
+      const key = bi + ':' + ni;
+      const fingering = (key in emFingerings) ? emFingerings[key] : null;
+      const position  = (key in emPositions)  ? emPositions[key]  : null;
+      entries.push({ fingering: fingering, position: position });
+    }
+  }
+  emClipboard = { entries: entries };
+  emUpdateKebabState();
+}
+
+// Wipe every fingering and position annotation for the CURRENT key
+// only — other keys' data on the same song is untouched. Confirms
+// before destroying anything; no-ops on cancel. Saves the file at
+// the end so the deletion is committed to disk immediately.
+function emDeleteAllFingerings() {
+  if (!emFingeringsTitle) return;
+  const fEmpty = !emFingerings || Object.keys(emFingerings).length === 0;
+  const pEmpty = !emPositions || Object.keys(emPositions).length === 0;
+  if (fEmpty && pEmpty) return; // nothing to delete
+  const keyLabel = (typeof currentKey === 'string' && currentKey) ? currentKey : '';
+  const msg = keyLabel
+    ? `Delete every fingering and position annotation for "${emFingeringsTitle}" in ${keyLabel}?`
+    : `Delete every fingering and position annotation for "${emFingeringsTitle}"?`;
+  if (typeof confirm === 'function' && !confirm(msg)) return;
+  // emFingerings / emPositions are references into byKey[currentKey]
+  // — clearing the underlying objects is enough; the byKey entry
+  // becomes empty and gets pruned on save.
+  for (const k of Object.keys(emFingerings)) delete emFingerings[k];
+  for (const k of Object.keys(emPositions))  delete emPositions[k];
+  emRenderOverlays();
+  emSaveFingerings(emFingeringsTitle);
+}
+
+// Paste from emClipboard onto consecutive notes starting at the
+// currently-selected bar. Each clipboard entry maps to one
+// pitched note in the target stream — rests are skipped, and we
+// continue across bar boundaries until either the clipboard or the
+// score runs out. Empty clipboard entries (`null` fingering /
+// position) overwrite the target, so pasting clears any prior
+// annotation that was on a now-empty source slot.
+function emPasteFingerings() {
+  if (!emClipboard || !emClipboard.entries.length) return;
+  if (selectedBar == null) return;
+  const entries = emClipboard.entries;
+  let idx = 0;
+  let bi = selectedBar;
+  while (bi < barElements.length && idx < entries.length) {
+    const info = barElements[bi];
+    if (!info || !info.noteData) { bi++; continue; }
+    for (let ni = 0; ni < info.noteData.length && idx < entries.length; ni++) {
+      if (!info.noteData[ni]) continue; // skip rests
+      const key = bi + ':' + ni;
+      const e = entries[idx++];
+      if (e.fingering != null) emFingerings[key] = e.fingering;
+      else                     delete emFingerings[key];
+      if (e.position != null) emPositions[key] = e.position;
+      else                    delete emPositions[key];
+    }
+    bi++;
+  }
+  emRenderOverlays();
+  if (emFingeringsTitle) emSaveFingerings(emFingeringsTitle);
 }
 
 (function emInitToggle() {
@@ -7721,6 +7972,52 @@ function emUpdateAvailability() {
     await emSetEnabled(cb.checked);
   });
   emUpdateAvailability();
+})();
+
+(function emInitKebab() {
+  const btn = document.getElementById('editKebabBtn');
+  const menu = document.getElementById('editKebabMenu');
+  if (!btn || !menu) return;
+  if (!emIsEditorDevice()) return; // stays hidden via emUpdateKebabState
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (btn.disabled) return;
+    if (menu.hidden) emOpenKebabMenu();
+    else             emCloseKebabMenu();
+  });
+  const copyBtn  = document.getElementById('copyFingeringsBtn');
+  const pasteBtn = document.getElementById('pasteFingeringsBtn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      emCopyFingerings();
+      emCloseKebabMenu();
+    });
+  }
+  if (pasteBtn) {
+    pasteBtn.addEventListener('click', () => {
+      if (pasteBtn.disabled) return;
+      emPasteFingerings();
+      emCloseKebabMenu();
+    });
+  }
+  const deleteAllBtn = document.getElementById('deleteAllFingeringsBtn');
+  if (deleteAllBtn) {
+    deleteAllBtn.addEventListener('click', () => {
+      emDeleteAllFingerings();
+      emCloseKebabMenu();
+    });
+  }
+  // Click-outside and Escape close the menu.
+  document.addEventListener('click', (e) => {
+    if (menu.hidden) return;
+    if (e.target === btn || btn.contains(e.target)) return;
+    if (e.target === menu || menu.contains(e.target)) return;
+    emCloseKebabMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !menu.hidden) emCloseKebabMenu();
+  });
+  emUpdateKebabState();
 })();
 
 // Re-render overlays after every chart re-render. renderChart wipes
@@ -7754,6 +8051,13 @@ highlightBar = function emWrappedHighlightBar(idx) {
       emEditNoteIdx = fi >= 0 ? fi : 0;
     }
     emRenderOverlays();
+    // Preview the cursor's note. Triggers whether the bar change
+    // came from a click (user picks a different bar in edit mode)
+    // or from an arrow key jumping past the end of the current
+    // bar. emPreviewSelectedNote no-ops during playback, so the
+    // many highlightBar calls during live playback don't spam the
+    // Lead sampler.
+    emPreviewSelectedNote();
   }
   return result;
 };
@@ -7794,6 +8098,26 @@ document.addEventListener('keydown', e => {
     const tag = (t.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
     if (t.isContentEditable) return;
+  }
+  // Ctrl+C / Ctrl+V (or Cmd on macOS) before the generic modifier
+  // guard below — these are the copy/paste hotkeys for the
+  // fingering clipboard. preventDefault() blocks the browser's
+  // native copy/paste, which would otherwise try to operate on
+  // any document selection (always empty under #chart since we
+  // disable user-select there, but still worth suppressing for
+  // any stray selection elsewhere).
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+    const k = (e.key || '').toLowerCase();
+    if (k === 'c') {
+      e.preventDefault();
+      emCopyFingerings();
+      return;
+    }
+    if (k === 'v') {
+      e.preventDefault();
+      emPasteFingerings();
+      return;
+    }
   }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'ArrowRight') {
