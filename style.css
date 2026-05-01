@@ -900,3 +900,16 @@ body.edit-mode #chart {
   pointer-events: none;
   user-select: none;
 }
+
+/* Beat markers under each bar — blue circles with white digits on
+   downbeats, smaller blue dots on the off-beat "ands". Always
+   painted by renderChart, but hidden until the user enables the
+   Overlay switch (which flips body.overlay-on). Pointer-events
+   stay off so the markers don't intercept bar clicks. */
+.beat-marker {
+  display: none;
+  pointer-events: none;
+}
+body.overlay-on .beat-marker {
+  display: inline;
+}

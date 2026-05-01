@@ -1357,19 +1357,25 @@ function loadSongDirectoryIndex() {
 }
 
 // Resolve `${title}.${ext}` to the actual filename on disk, matching
-// case-insensitively against the directory index. Returns the
-// resolved filename string, or null if nothing matches. If the
-// directory index came back empty (server doesn't support listings
-// AND no manifest is present), falls back to the title as-is — which
-// is the legacy behavior and works fine when the case happens to
-// align.
+// case-insensitively against the directory index when possible.
+// Always returns the title-as-is filename as a final fallback so a
+// just-added file that isn't yet in the manifest still gets a fetch
+// attempt — if the on-disk casing happens to match the iRealPro
+// title verbatim, it loads immediately. The case-insensitive
+// resolution only kicks in when the manifest DOES contain a match,
+// covering the GitHub Pages case-sensitive-filesystem scenario
+// without forcing us to wait for the manifest workflow to run.
 async function resolveSongFilename(title, ext) {
   if (!title) return null;
   const wanted = `${title}.${ext}`;
   const index = await loadSongDirectoryIndex();
   if (Object.keys(index).length > 0) {
-    return index[wanted.toLowerCase()] || null;
+    const found = index[wanted.toLowerCase()];
+    if (found) return found;
   }
+  // No (or stale) index entry — try the title verbatim. The fetch
+  // will 404 if the file doesn't exist with that case, in which
+  // case the load functions return null gracefully.
   return wanted;
 }
 
@@ -3014,7 +3020,12 @@ function renderChart(song, barsIn, timesigStr) {
   // can produce (written F2 via the 8vb clef) now sits around y = 121–126,
   // so the scale label baseline shifts down in lockstep to keep its
   // ~20 px clearance from the note heads.
-  const patternTextY = 144;         // baseline of the scale label
+  // Scale label sits below the staff. Bumped from 144 → 150 to
+  // leave a clean band for the Overlay-mode beat markers (blue
+  // 1/2/3/4 circles + and-dots) at y≈126; without the bump the
+  // bottom of those circles brushed up against the scale label
+  // text. Each row is 6 px taller as a result.
+  const patternTextY = 150;         // baseline of the scale label
   const patternLineY = patternTextY + 6; // underline just below descenders
   const staffHeight  = patternLineY + 10;
 
@@ -3853,6 +3864,182 @@ function renderChart(song, barsIn, timesigStr) {
           appendChordLabelTspans(t, chordText(ch));
           svg.appendChild(t);
         });
+      }
+
+      // Beat markers under the staff — blue circles with white "1"/"2"
+      // /etc. on each downbeat, smaller blue dots on each "and"
+      // (off-beat eighth). Always painted; visibility is gated by
+      // `body.overlay-on` via CSS so the Overlay toggle just flips a
+      // class instead of triggering a full chart re-render.
+      //
+      // Markers anchor to the actual rendered StaveNote x at each
+      // beat (or interpolate between flanking notes when a beat
+      // falls inside a long held note). This places marker "2" right
+      // under a sharp+eighth even though the accidental has shoved
+      // the notehead off the "1/4 of the way across the bar" mark.
+      //
+      // Local push-apart for clustered markers: anchored positions
+      // are kept wherever they fit, and only adjacent pairs that come
+      // closer than MIN_GAP get nudged. A forward pass shoves each
+      // marker right as needed; if the rightmost marker then spills
+      // past the bar's note area, a backward pass pulls earlier
+      // markers leftward to fit. This preserves alignment with the
+      // last note (e.g. an and-of-4 eighth pinned to the right edge)
+      // instead of falling back to pure even spacing across the bar.
+      {
+        const beatsPerBarMarker = ts.num;
+        const beatY = staffY + 90; // ≈y=126: just under the bottom staff line (y=116)
+        const DOWNBEAT_R  = 7;
+        const ANDBEAT_R   = 2.5;
+        const FILL        = '#3da9fc';
+        const MIN_GAP     = 13;
+        const slotWidth   = labelAreaW / beatsPerBarMarker;
+        // Build (step, x) anchors from each rendered StaveNote in
+        // this bar. Step starts come from cumulative tick counts —
+        // tuplet members have scaled tick values, so triplets give
+        // the right (rounded-integer) step counts.
+        const ticksPerStep = (typeof VF !== 'undefined' && VF.RESOLUTION)
+          ? (VF.RESOLUTION / (4 * subdiv)) : (4096 / subdiv);
+        const anchors = [];
+        let cumStep = 0;
+        for (let ni = 0; ni < notes.length; ni++) {
+          // VexFlow's getAbsoluteX() returns the notehead's LEFT
+          // edge, not its center. Shift by half the glyph width so
+          // the marker sits visually centered under the notehead —
+          // critical at the start of a bar where the first note
+          // butts up against the time signature with very little
+          // padding (placing the marker at the left edge had it
+          // looking offset from the notehead).
+          let nx;
+          try {
+            const absX = notes[ni].getAbsoluteX();
+            const w = (notes[ni].getGlyphWidth && notes[ni].getGlyphWidth()) || 10;
+            nx = absX + w / 2;
+          } catch (e) { nx = NaN; }
+          if (isFinite(nx)) anchors.push({ step: cumStep, x: nx });
+          // Tick count for advancing cumStep. Two VexFlow-4 quirks:
+          //  1. StaveNote is constructed from the BARE duration ('q',
+          //     '8', …); dots are attached afterwards via
+          //     VF.Dot.buildAndAttach. getTicks() reflects only the
+          //     bare duration, so a dotted quarter reports 4096 ticks
+          //     (= a plain quarter) instead of 6144. Without
+          //     compensation the cumulative step count drifts and a
+          //     downbeat marker lands on the next note's notehead.
+          //  2. Tuplet members already have scaled .value() (e.g. a
+          //     quarter inside a triplet returns 2730), so the raw
+          //     value is right for tuplets — only dots need adjusting.
+          // Detect dots by counting Dot modifiers attached to the note
+          // and dividing by the number of noteheads (Dot.buildAndAttach
+          // attaches one dot per head). Apply factor (2 − 1/2^D).
+          let rawTicks = 0;
+          try {
+            const tk = notes[ni].getTicks && notes[ni].getTicks();
+            if (tk && typeof tk.value === 'function') rawTicks = tk.value();
+          } catch (e) { /* ignore */ }
+          let dotCount = 0;
+          try {
+            const mods = notes[ni].getModifiers ? notes[ni].getModifiers() : [];
+            const numHeads = Math.max(1, (notes[ni].keys && notes[ni].keys.length) || 1);
+            let dotMods = 0;
+            for (let mi = 0; mi < mods.length; mi++) {
+              const m = mods[mi];
+              const cat = m && m.getCategory ? m.getCategory() : '';
+              const cn  = m && m.constructor ? m.constructor.name : '';
+              if (cat === 'Dots' || cat === 'Dot' || cn === 'Dot') dotMods++;
+            }
+            dotCount = Math.round(dotMods / numHeads);
+          } catch (e) { /* ignore */ }
+          if (dotCount > 0) {
+            rawTicks = rawTicks * (2 - 1 / (1 << dotCount));
+          }
+          let stepCount = Math.round(rawTicks / ticksPerStep);
+          if (stepCount <= 0) stepCount = 1;
+          cumStep += stepCount;
+        }
+        // Implicit end anchor at noteEnd so beats past the last
+        // note's start still get an x in range.
+        anchors.push({ step: cumStep, x: noteEnd });
+        anchors.sort(function (a, b) { return a.step - b.step; });
+        function xAtStep(s) {
+          if (anchors.length === 0) {
+            return labelAreaX0 + (s / stepsPerBar) * labelAreaW;
+          }
+          let before = anchors[0];
+          let after  = anchors[anchors.length - 1];
+          for (let ai = 0; ai < anchors.length; ai++) {
+            const a = anchors[ai];
+            if (a.step <= s) before = a;
+            if (a.step > s) { after = a; break; }
+          }
+          if (before === after || after.step === before.step) return before.x;
+          const t = (s - before.step) / (after.step - before.step);
+          return before.x + t * (after.x - before.x);
+        }
+        // Compute anchor-based positions for every marker step
+        // (downbeats and ands), then check for cluster collisions.
+        const stepsPerBeat = stepsPerBar / beatsPerBarMarker;
+        const halfBeat     = stepsPerBeat / 2;
+        const xs = [];
+        for (let b = 0; b < beatsPerBarMarker; b++) {
+          xs.push(xAtStep(b * stepsPerBeat));            // downbeat
+          xs.push(xAtStep(b * stepsPerBeat + halfBeat)); // and
+        }
+        // Forward pass: enforce MIN_GAP by pushing each marker right
+        // when its left neighbor crowds it. This only moves markers
+        // that actually overlap; everything else stays on its anchor.
+        for (let i = 1; i < xs.length; i++) {
+          if (xs[i] - xs[i - 1] < MIN_GAP) xs[i] = xs[i - 1] + MIN_GAP;
+        }
+        // Backward pass: if the forward pass shoved the rightmost
+        // marker past the bar's note area (noteEnd), pin it there and
+        // pull earlier markers left to maintain MIN_GAP. Anchors that
+        // were already comfortably left of any pushed marker keep
+        // their original x — including, importantly, the anchor for
+        // the final eighth at the and-of-4 position.
+        if (xs.length && xs[xs.length - 1] > noteEnd) {
+          xs[xs.length - 1] = noteEnd;
+          for (let i = xs.length - 2; i >= 0; i--) {
+            if (xs[i + 1] - xs[i] < MIN_GAP) xs[i] = xs[i + 1] - MIN_GAP;
+          }
+        }
+        for (let b = 0; b < beatsPerBarMarker; b++) {
+          const cxBeat = xs[b * 2];
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('class', 'beat-marker beat-down');
+          circle.setAttribute('cx', cxBeat);
+          circle.setAttribute('cy', beatY);
+          circle.setAttribute('r', DOWNBEAT_R);
+          circle.setAttribute('fill', FILL);
+          circle.setAttribute('stroke', 'none');
+          svg.appendChild(circle);
+          const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          txt.setAttribute('class', 'beat-marker beat-down-text');
+          txt.setAttribute('x', cxBeat);
+          // y baseline + ~3 px lifts the digit's visual centre to
+          // the circle centre for a balanced look on serif at 10pt.
+          txt.setAttribute('y', beatY + 4);
+          txt.setAttribute('text-anchor', 'middle');
+          txt.setAttribute('font-family', 'serif');
+          txt.setAttribute('font-weight', 'bold');
+          txt.setAttribute('font-size', '10');
+          txt.setAttribute('fill', '#fff');
+          txt.setAttribute('stroke', 'none');
+          txt.textContent = String(b + 1);
+          svg.appendChild(txt);
+          // The "and" between this beat and the next one (or the
+          // start of the next bar). For 4/4: ands of 1/2/3/4. For
+          // 3/4: ands of 1/2/3. Read from xs so cluster fallback
+          // (even spacing) and anchor mode both flow through.
+          const cxAnd = xs[b * 2 + 1];
+          const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          dot.setAttribute('class', 'beat-marker beat-and');
+          dot.setAttribute('cx', cxAnd);
+          dot.setAttribute('cy', beatY);
+          dot.setAttribute('r', ANDBEAT_R);
+          dot.setAttribute('fill', FILL);
+          dot.setAttribute('stroke', 'none');
+          svg.appendChild(dot);
+        }
       }
 
       // Track bar geometry for the per-row pattern overlay drawn after the loop
@@ -4840,8 +5027,17 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
 (function bindFingeringSwitch() {
   const sw = document.getElementById('fingeringToggle');
   if (!sw) return;
+  // Sync the body class on first bind too, so a checked-on-load
+  // toggle reveals the beat-marker SVG elements that renderChart
+  // already painted but left hidden via CSS.
+  document.body.classList.toggle('overlay-on', !!sw.checked);
   sw.addEventListener('change', (e) => {
     fingeringOn = e.target.checked;
+    // Beat markers (the blue 1/2/3/4 circles + offbeat dots under
+    // each bar) live in the SVG with class .beat-marker and are
+    // hidden by default — flipping `body.overlay-on` reveals them
+    // without a chart re-render.
+    document.body.classList.toggle('overlay-on', fingeringOn);
     if (!fingeringOn) {
       clearFingeringOverlay();
       return;
@@ -6921,18 +7117,18 @@ function selectSongByIndex(idx) {
 // "HEAD" badge without having to actually load the head data.
 async function probeSongHasHead(title) {
   if (!title) return false;
-  // Cheap path: if we have a directory index, just check it. No HTTP
-  // request per song needed and the case-sensitivity gotcha is
-  // handled by `resolveSongFilename`.
+  // Cheap path: if the manifest/listing has a matching entry,
+  // we're done — no HTTP request needed.
   const index = await loadSongDirectoryIndex();
   if (Object.keys(index).length > 0) {
-    return !!(
-      index[`${title}.musicxml`.toLowerCase()] ||
-      index[`${title}.mid`.toLowerCase()]
-    );
+    if (index[`${title}.musicxml`.toLowerCase()]
+        || index[`${title}.mid`.toLowerCase()]) return true;
   }
-  // Fallback for hosts with no listing AND no manifest: HEAD-probe
-  // the title as-is.
+  // No match in the index (stale manifest, or file just dropped on
+  // disk) — fall through to a real HEAD probe so newly-added files
+  // get their HEAD badge immediately, before the next manifest
+  // regeneration. If the on-disk casing matches the iRealPro
+  // title verbatim, the probe succeeds; otherwise it 404s.
   for (const ext of ['musicxml', 'mid']) {
     const url = `songs/${encodeURIComponent(title)}.${ext}`;
     try {
