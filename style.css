@@ -796,6 +796,15 @@ html.is-android .fl {
   cursor: pointer;
   white-space: nowrap;
 }
+/* The `hidden` attribute's UA `display: none` rule has the same
+   specificity as the `.top-edit-label` rule above, and our stylesheet
+   loads later so `display: inline-flex` was winning even when the
+   element was supposed to be hidden — that's why the switch was
+   visible on Android even though `emInitToggle()` correctly left
+   `hidden` set on non-editor devices. Force the override here. */
+.top-edit-label[hidden] {
+  display: none;
+}
 .top-edit-text {
   font-size: 12px;
   letter-spacing: 0.3px;
