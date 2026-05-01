@@ -3265,12 +3265,14 @@ function renderChart(song, barsIn, timesigStr) {
         const by = 2;
         const bw = 13, bh = 13;
         const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        r.setAttribute('class', 'rehearsal-mark');
         r.setAttribute('x', bx); r.setAttribute('y', by);
         r.setAttribute('width', bw); r.setAttribute('height', bh);
         r.setAttribute('fill', '#000');
         r.setAttribute('stroke', 'none');
         svgForSection.appendChild(r);
         const st = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        st.setAttribute('class', 'rehearsal-mark');
         st.setAttribute('x', bx + bw / 2);
         st.setAttribute('y', by + bh - 2);
         st.setAttribute('text-anchor', 'middle');
@@ -3398,7 +3400,16 @@ function renderChart(song, barsIn, timesigStr) {
                 const tupletObj = new VF.Tuplet(currentTupletNotes, {
                   num_notes: ratio.actual,
                   notes_occupied: ratio.normal,
-                  bracketed: true
+                  bracketed: true,
+                  // Force the bracket BELOW the noteheads. VexFlow's
+                  // default places it on the stem-up side, which for
+                  // our 8vb bass-clef means the bracket lands in the
+                  // y≈30..60 band right where the chord row,
+                  // position label, and fingering numbers live —
+                  // overlapping everything. Below-the-staff is
+                  // unconventional but never collides with the
+                  // annotation stack above the staff.
+                  location: -1
                 });
                 rowTuplets.push({ tuplet: tupletObj });
                 currentTupletNotes = null;
@@ -3521,7 +3532,13 @@ function renderChart(song, barsIn, timesigStr) {
               const tupletObj = new VF.Tuplet(currentTupletNotes, {
                 num_notes: ratio.actual,
                 notes_occupied: ratio.normal,
-                bracketed: true
+                bracketed: true,
+                // Force the bracket BELOW the noteheads — see the
+                // matching comment in the rest-tuplet path. Default
+                // location=1 puts the bracket and the "3" marker
+                // right inside the chord/position/fingering stack
+                // above the staff.
+                location: -1
               });
               rowTuplets.push({ tuplet: tupletObj });
               currentTupletNotes = null;
@@ -3823,6 +3840,7 @@ function renderChart(song, barsIn, timesigStr) {
           const cx = labelAreaX0 + (startBeat / beatsPerBarLabel) * labelAreaW;
           const cy = staffY - 6;
           const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          t.setAttribute('class', 'chord-label');
           t.setAttribute('x', cx);
           t.setAttribute('y', cy);
           t.setAttribute('text-anchor', 'start');
@@ -4069,6 +4087,77 @@ function renderChart(song, barsIn, timesigStr) {
       // intersection. Re-append every barline group to the end of the SVG
       // so barlines sit on top of all staff lines.
       svgEl.querySelectorAll('.vf-stavebarline').forEach(g => svgEl.appendChild(g));
+    }
+
+    // === Annotation shift for high-note rows ===
+    // When a row contains noteheads above the default annotation
+    // band, the chord/position/fingering stack would overlap the
+    // notes themselves. Shift the entire annotation stack UP by
+    // the deficit and extend the SVG viewBox upward to give the
+    // chord text somewhere new to live. The shift gets stored on
+    // each barElement so emRenderPositions / emRenderFingerings
+    // can apply the same offset when they paint over this row.
+    if (svgEl) {
+      let minNoteY = Infinity;
+      for (let i = rowStart; i < rowEnd; i++) {
+        const info = barElements[i];
+        if (!info || !info.noteData) continue;
+        for (let j = 0; j < info.noteData.length; j++) {
+          const nd = info.noteData[j];
+          if (!nd || !nd.staveNote) continue;
+          try {
+            const ys = nd.staveNote.getYs && nd.staveNote.getYs();
+            if (ys && ys.length) {
+              const yy = ys[0];
+              if (isFinite(yy) && yy < minNoteY) minNoteY = yy;
+            }
+          } catch (e) { /* ignore */ }
+        }
+      }
+      // The adaptive fingering already tracks the notehead for
+      // mid-range pitches (y ≈ 70..82), so shift only kicks in
+      // when notes are high enough that the fingering's floor
+      // would crash into the notehead. With floor=56 (baseline)
+      // and a 7 px target gap above noteheads, the threshold is
+      // y=70: any note higher than that needs the whole
+      // annotation stack lifted, with shift = (70 − minNoteY).
+      const ANNOT_FLOOR_NOTE_Y = 70;
+      let annotShift = 0;
+      if (isFinite(minNoteY) && minNoteY < ANNOT_FLOOR_NOTE_Y) {
+        annotShift = ANNOT_FLOOR_NOTE_Y - minNoteY;
+      }
+      // Stash on each barElement so the position / fingering
+      // renderers can pick it up later. Stored even when 0 so the
+      // renderers don't have to handle "undefined".
+      for (let i = rowStart; i < rowEnd; i++) {
+        if (barElements[i]) barElements[i].annotShift = annotShift;
+      }
+      if (annotShift > 0) {
+        // Shift chord labels up by the same amount.
+        svgEl.querySelectorAll('text.chord-label').forEach(t => {
+          const oldY = parseFloat(t.getAttribute('y'));
+          if (isFinite(oldY)) t.setAttribute('y', oldY - annotShift);
+        });
+        // Shift the rehearsal-mark badge (rect + text) too.
+        svgEl.querySelectorAll('.rehearsal-mark').forEach(el => {
+          const oldY = parseFloat(el.getAttribute('y'));
+          if (isFinite(oldY)) el.setAttribute('y', oldY - annotShift);
+        });
+        // Extend the viewBox upward so the now-negative-y
+        // chord/rehearsal elements are still visible. The CSS keeps
+        // width:100% / height:auto, so the SVG visually grows taller
+        // by `annotShift` pixels — pushing the chart's other rows
+        // down to make room.
+        const vb = svgEl.getAttribute('viewBox');
+        if (vb) {
+          const parts = vb.split(/\s+/).map(Number);
+          if (parts.length === 4 && parts.every(isFinite)) {
+            const newY = parts[1] - annotShift;
+            const newH = parts[3] + annotShift;
+            svgEl.setAttribute('viewBox', parts[0] + ' ' + newY + ' ' + parts[2] + ' ' + newH);
+          }
+        }
+      }
     }
 
     // Add a horizontal separator between full-form repeats. Tag the
@@ -7416,7 +7505,12 @@ function emLastNoteIdx(barIdx) {
 
 // Compute SVG-space coordinates for a notehead overlay. VexFlow's
 // native getAbsoluteX / getYs are in the same viewBox the row's SVG
-// uses, so we don't need any client-space conversion.
+// uses, so we don't need any client-space conversion. The
+// `annotShift` is the per-row vertical offset applied to chord /
+// position / fingering when a row contains high noteheads — see
+// the "annotation shift" block at the end of each row's render
+// loop. Renderers subtract this from their target y so the entire
+// annotation stack rises uniformly with the chord.
 function emNoteheadGeometry(barIdx, noteIdx) {
   const info = barElements[barIdx];
   if (!info) return null;
@@ -7432,7 +7526,12 @@ function emNoteheadGeometry(barIdx, noteIdx) {
     w = (sn.getGlyphWidth && sn.getGlyphWidth()) || 12;
   } catch (e) { return null; }
   if (!isFinite(x) || y == null || !isFinite(y)) return null;
-  return { x: x, y: y, w: w, svg: info.rowEl.querySelector('svg') };
+  const annotShift = (typeof info.annotShift === 'number') ? info.annotShift : 0;
+  return {
+    x: x, y: y, w: w,
+    svg: info.rowEl.querySelector('svg'),
+    annotShift: annotShift
+  };
 }
 
 // Bass clef top staff line. With staffY=36, VexFlow draws the top
@@ -7491,14 +7590,32 @@ function emRenderFingerings() {
     if (!isFinite(barIdx) || !isFinite(noteIdx)) continue;
     const geom = emNoteheadGeometry(barIdx, noteIdx);
     if (!geom || !geom.svg) continue;
-    // Place the fingering above the notehead, but never below the
-    // line "just above the top staff line". So a low note that sits
-    // deep in the staff (or on a ledger line below it) still has its
-    // fingering parked above the top line, horizontally aligned
-    // with the notehead.
-    const noteAboveOffset = geom.y - 8;
-    const cap = EM_TOP_LINE_Y - 8;
-    const ty = Math.min(noteAboveOffset, cap);
+    // Fingering placement — track the notehead UP for high
+    // ledger-line notes, but never rise so far that the text
+    // crashes into the position line above. The offset is 14 px
+    // above the notehead's pitch line, which empirically clears
+    // the full glyph height plus a 3-4 px breathing margin.
+    // Smaller offsets like 6 or 8 *almost* worked but the
+    // descenders on the bold serif digits combined with the
+    // notehead's full glyph extent kept producing 1-2 px overlap
+    // on high ledger-line noteheads — bumping to 14 gives an
+    // unambiguous gap.
+    //
+    //   - Notes in/below the staff (geom.y ≥ 82) → baseline=68,
+    //     just above the top staff line. Default position.
+    //   - High notes (geom.y < 82) → baseline = geom.y - 14.
+    //   - Very high notes (geom.y ≤ 70) → floor at baseline=56 so
+    //     the text top (≈47) doesn't crash into the position line.
+    const FINGER_BASELINE_FLOOR   = 56;
+    const FINGER_BASELINE_CEILING = EM_TOP_LINE_Y - 8; // 68
+    // Compute the baseline as if the row were at the default
+    // staff position, then apply the row's annotation shift so
+    // we move up uniformly with the chord/position above us.
+    let ty = Math.max(
+      FINGER_BASELINE_FLOOR,
+      Math.min(FINGER_BASELINE_CEILING, geom.y - 14)
+    );
+    ty -= geom.annotShift;
     const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     t.setAttribute('class', 'fingering-text');
     t.setAttribute('x', geom.x + geom.w / 2);
@@ -7506,7 +7623,12 @@ function emRenderFingerings() {
     t.setAttribute('text-anchor', 'middle');
     t.setAttribute('font-family', 'serif');
     t.setAttribute('font-weight', 'bold');
-    t.setAttribute('font-size', '14');
+    // 12 instead of 14 — tightens the text height to ~9 px so the
+    // adaptive layout above can squeeze a fingering between the
+    // position line at y=45 and a ledger-line notehead at y=60..70
+    // without overlapping either. The slight readability cost is
+    // worth the clean visual stack.
+    t.setAttribute('font-size', '12');
     t.setAttribute('fill', fillColor);
     t.setAttribute('stroke', 'none');
     t.textContent = value;
@@ -7529,23 +7651,33 @@ function emRenderFingerings() {
 function emRenderPositions() {
   document.querySelectorAll('.position-line, .position-box, .position-text').forEach(n => n.remove());
   if (typeof exerciseMode !== 'undefined' && exerciseMode !== 'head') return;
-  // Default vertical layout — used when no fingering numbers
-  // share the position group's notes:
-  //   line  at y=50
-  //   label at y=36..49 (baseline 46)
-  // When a fingering IS present, the position elements rise just
-  // above the topmost fingering text in the group so the label
-  // doesn't collide with the number. The "rising" only happens
-  // for groups that contain a fingering — groups without one keep
-  // the tight default placement so the chart doesn't waste space.
-  const POS_LINE_DEFAULT_Y = 50;
-  const POS_LABEL_GAP      = 4;   // line-to-label gap (px)
+  // Vertical stack above the staff:
+  //   chord row    y ≈ 19..30 (baseline 30, font 15)
+  //   position     label y ≈ 31..39 (baseline 39, font 10),
+  //                line y = 43 default, OR raised to clear a high
+  //                fingering in the group (down to y=43 minimum
+  //                where the label still clears chord-bottom).
+  //   fingering    y ≈ 47..58 (baseline 56-68, font 12) — adapts
+  //                to per-note y, see emRenderFingerings.
+  //   top staff    y = 76
+  // The line raises by 2 px (45→43) when fingering text in the
+  // same group reaches up close to the default line; that opens a
+  // 4 px gap between the position line and the topmost fingering
+  // text, instead of the 2 px that read as overlap. For groups
+  // without any fingering, the line stays at the default y=45 so
+  // the layout doesn't shift around for no reason.
+  const POS_LINE_DEFAULT_Y = 45;
+  const POS_LINE_RAISED_Y  = 43; // when fingering forces line up
+  const POS_LABEL_GAP      = 4;  // line-to-label-baseline gap
   const POS_FONT_SIZE      = 10;
-  const POS_TEXT_HEIGHT    = 11;  // approx font-size * 0.8 for "top of text"
-  // The fingering number's font / cap matches what emRenderFingerings
-  // already uses — keep these in sync.
-  const FINGER_FONT_HEIGHT = 11;
-  const FINGER_CAP_Y       = EM_TOP_LINE_Y - 8;
+  const POS_TEXT_HEIGHT    = 11; // approx font-size * 0.8
+
+  // Mirror emRenderFingerings's clamps so we can predict where
+  // the fingering will land for each note in this group.
+  const FINGER_BASELINE_FLOOR   = 56;
+  const FINGER_BASELINE_CEILING = EM_TOP_LINE_Y - 8; // 68
+  const FINGER_FONT_HEIGHT      = 9;                 // font 12 → ~9 px tall
+  const LINE_FINGER_GAP         = 4;                 // min gap line→fingering top
 
   // Drawing color follows the same edit-mode convention as the
   // fingering numbers — red while authoring so the live edits
@@ -7561,28 +7693,40 @@ function emRenderPositions() {
       const svg = cur.svg;
       const first = cur.notes[0];
       const last  = cur.notes[cur.notes.length - 1];
-      // Find the highest (smallest y) fingering text top across
-      // every note in this group. If no note in the group carries
-      // a fingering, this stays Infinity and we use the default
-      // line position.
+      // Per-group adaptive line position. Find the highest fingering
+      // text top across notes in this group (matching the formula in
+      // emRenderFingerings exactly). If that top would land closer
+      // than LINE_FINGER_GAP to the default line, raise the line.
+      // The raise is bounded — line can drop only as far as
+      // POS_LINE_RAISED_Y where the label still clears the chord
+      // row. Anything closer than that and we accept a tighter
+      // visual; the fingering's own floor (56) keeps the gap from
+      // ever closing entirely.
       let highestFingerTop = Infinity;
       for (let i = 0; i < cur.notes.length; i++) {
         const n = cur.notes[i];
         const fkey = n.barIdx + ':' + n.noteIdx;
         if (!(fkey in emFingerings)) continue;
-        const fingerBaseY = Math.min(n.y - 8, FINGER_CAP_Y);
-        const fingerTop   = fingerBaseY - FINGER_FONT_HEIGHT;
+        const fingerBaseY = Math.max(
+          FINGER_BASELINE_FLOOR,
+          Math.min(FINGER_BASELINE_CEILING, n.y - 14)
+        );
+        const fingerTop = fingerBaseY - FINGER_FONT_HEIGHT;
         if (fingerTop < highestFingerTop) highestFingerTop = fingerTop;
       }
-      let lineY;
-      if (highestFingerTop === Infinity) {
-        lineY = POS_LINE_DEFAULT_Y;
-      } else {
-        // Sit the line just above the highest fingering. Floor at
-        // y=14 so the label (which goes ABOVE the line) still has
-        // room before the top of the SVG.
-        lineY = Math.max(14, highestFingerTop - POS_LABEL_GAP);
+      let lineY = POS_LINE_DEFAULT_Y;
+      if (highestFingerTop !== Infinity
+          && highestFingerTop < POS_LINE_DEFAULT_Y + LINE_FINGER_GAP) {
+        lineY = Math.max(POS_LINE_RAISED_Y, highestFingerTop - LINE_FINGER_GAP);
       }
+      // Apply the per-row annotation shift so the position elements
+      // ride up with chord and fingering when a row contains high
+      // noteheads. All notes in a group share a row (groups break
+      // at row boundaries), so reading the shift off any one note
+      // in the group is sufficient.
+      const annotShift = (cur.notes[0] && typeof cur.notes[0].annotShift === 'number')
+        ? cur.notes[0].annotShift : 0;
+      lineY -= annotShift;
       const labelBaseline = lineY - POS_LABEL_GAP;
       const x1 = first.x - 4;
       const x2 = last.x + last.w + 4;
@@ -7629,14 +7773,22 @@ function emRenderPositions() {
       const geom = emNoteheadGeometry(barIdx, noteIdx);
       if (!geom || !geom.svg) { flushGroup(); continue; }
       // Same position AND same row → extend; otherwise start fresh.
+      // Each note carries the row-level annotShift; groups never
+      // span rows (svg-comparison breaks any cross-row attempt) so
+      // every note in a group has the same shift.
+      const noteRecord = {
+        barIdx: barIdx, noteIdx: noteIdx,
+        x: geom.x, y: geom.y, w: geom.w,
+        annotShift: geom.annotShift
+      };
       if (cur && cur.positionIdx === pIdx && cur.svg === geom.svg) {
-        cur.notes.push({ barIdx: barIdx, noteIdx: noteIdx, x: geom.x, y: geom.y, w: geom.w });
+        cur.notes.push(noteRecord);
       } else {
         flushGroup();
         cur = {
           positionIdx: pIdx,
           svg: geom.svg,
-          notes: [{ barIdx: barIdx, noteIdx: noteIdx, x: geom.x, y: geom.y, w: geom.w }]
+          notes: [noteRecord]
         };
       }
     }
