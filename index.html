@@ -69,8 +69,8 @@
     <div id="optionsPanel" class="options-panel" hidden>
       <div class="drum-row">
         <div class="seg mode-seg" id="modeSeg" role="tablist">
-          <button type="button" data-mode="head">Head</button>
-          <button type="button" data-mode="exercise" class="active">Exercise</button>
+          <button type="button" data-mode="head" class="active">Head</button>
+          <button type="button" data-mode="exercise">Exercise</button>
         </div>
         <select id="exerciseSelect" class="exercise-select">
           <option value="scale" selected>Scale Notes</option>
@@ -212,7 +212,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v1.99</span>
+      <span class="app-version" id="appVersion">v2.01</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -220,7 +220,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=319"></script>
+<script src="app.js?v=321"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

@@ -2790,7 +2790,9 @@ let measuresPerLine = 2;
 // exercises like Cantus Firmus.
 let chartSize = 180;
 let songRepeats = 1;
-let exerciseMode = 'scale'; // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio
+let exerciseMode = 'head'; // 'head' = play the song's melody from the head file;
+                            // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio,
+                            // etc. for the various exercise generators.
 const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highlighting
 
 // Refresh the title line above the score: "{song name} ({exercise})".
@@ -7104,11 +7106,18 @@ const EM_DEFAULT_POSITION = 1;
 //   v2: 8-position layout with the extended-1st ("upper") removed
 //   v3: 9-position layout restored, with the extension explicitly
 //       labelled "+1st" instead of the misleading "1st"
-const EM_STORAGE_VERSION = 3;
+//   v4: per-key fingering — `byKey: { C: {...}, Eb: {...}, ... }`
+//       replaces the flat `fingerings`/`positions` at the root.
+//       Pre-v4 files are migrated by wrapping their flat data
+//       under the song's originalKey.
+const EM_STORAGE_VERSION = 4;
+// Position-index migration shared across schema versions. v1→v3
+// rewrote position indices; subsequent versions keep the same
+// 9-entry array, so this only runs when the source is v1 or v2.
 function emMigratePositions(positions, version) {
   if (!positions || typeof positions !== 'object') return {};
   if (typeof version !== 'number') version = 1;
-  if (version >= EM_STORAGE_VERSION) return positions;
+  if (version >= 3) return positions;
   // Filter to a clean numeric copy first so the migrations below
   // can mutate-and-rebuild without worrying about stray garbage.
   const clean = {};
@@ -7144,12 +7153,74 @@ function emMigratePositions(positions, version) {
 }
 
 // Edit-mode state.
+//
+// `emFingeringsByKey` is the canonical store — one entry per key
+// the user has edited fingerings in. `emFingerings` and `emPositions`
+// are *references* into emFingeringsByKey[currentKey], updated by
+// `emRefreshFromByKey()` whenever the key changes. Render and edit
+// code both read/write through those references, so writes
+// automatically land in the right per-key bucket without any
+// extra plumbing.
 let emEnabled = false;
 let emProjectDir = null;        // FileSystemDirectoryHandle for the repo root
 let emEditNoteIdx = 0;          // index into barElements[selectedBar].noteData
-let emFingerings = {};          // { "barIdx:noteIdx": "fingering string" }
-let emPositions = {};           // { "barIdx:noteIdx": positionIdx (int 0..8) }
+let emFingeringsByKey = {};     // { keyName: { fingerings: {...}, positions: {...} } }
+let emFingerings = {};          // ref to byKey[currentKey].fingerings (or {})
+let emPositions = {};           // ref to byKey[currentKey].positions  (or {})
 let emFingeringsTitle = null;   // title the in-memory map was loaded for
+
+// Refresh emFingerings / emPositions to point at the current key's
+// entry in emFingeringsByKey. Lazily creates the entry if missing
+// so subsequent writes (typing a fingering or stepping a position)
+// land in the right bucket without a separate "did we already
+// allocate this key?" check at every keystroke. Empty entries are
+// pruned on save, so visiting a key without making any edits
+// doesn't bloat the JSON file.
+function emRefreshFromByKey() {
+  const k = (typeof currentKey === 'string' && currentKey) ? currentKey : '';
+  if (!k) {
+    emFingerings = {};
+    emPositions = {};
+    return;
+  }
+  if (!emFingeringsByKey[k]) {
+    emFingeringsByKey[k] = { fingerings: {}, positions: {} };
+  }
+  emFingerings = emFingeringsByKey[k].fingerings;
+  emPositions  = emFingeringsByKey[k].positions;
+}
+
+// Take the JSON loaded from disk and produce a `byKey` map ready
+// for emFingeringsByKey. Handles every legacy schema:
+//   - v4+: data is already keyed by song key. Sanitize each entry.
+//   - v1/v2/v3: flat fingerings/positions at root. Apply the v1→v3
+//     position-index migration, then wrap the result under the
+//     song's originalKey (the user's most-likely authoring key,
+//     since pre-v4 had no per-key support to author OFF of).
+function emMigrateByKey(json, wrapKey) {
+  const version = (json && typeof json.version === 'number') ? json.version : 1;
+  if (version >= 4) {
+    const byKey = (json && typeof json.byKey === 'object' && json.byKey) || {};
+    const out = {};
+    for (const k of Object.keys(byKey)) {
+      const entry = byKey[k];
+      if (!entry || typeof entry !== 'object') continue;
+      const fingerings = (typeof entry.fingerings === 'object' && entry.fingerings) || {};
+      const positions  = (typeof entry.positions  === 'object' && entry.positions)  || {};
+      out[k] = { fingerings: fingerings, positions: positions };
+    }
+    return out;
+  }
+  const fingerings = (json && typeof json.fingerings === 'object' && json.fingerings) || {};
+  const rawPos     = (json && typeof json.positions  === 'object' && json.positions)  || {};
+  const positions = emMigratePositions(rawPos, version);
+  const out = {};
+  if (Object.keys(fingerings).length > 0 || Object.keys(positions).length > 0) {
+    const k = (typeof wrapKey === 'string' && wrapKey) ? wrapKey : 'C';
+    out[k] = { fingerings: fingerings, positions: positions };
+  }
+  return out;
+}
 
 // One-time setup: prompt the user to pick the project root folder, or
 // reuse a previously-saved handle. Returns the handle, or null if the
@@ -7193,30 +7264,29 @@ async function emFingeringFileHandle(title, opts) {
 }
 
 async function emLoadFingerings(title) {
-  const empty = { fingerings: {}, positions: {} };
-  if (!title) return empty;
+  if (!title) return {};
   // HTTP fetch — works on every device, no FS permission needed,
   // no edit-mode toggle required. Loads the same file the laptop
   // edit-mode workflow writes via the File System Access API.
   // `cache: 'no-store'` so freshly-pushed fingering files show up
   // without manual cache-busting; the SW also strips cache for
   // anything under songs/ as a belt-and-suspenders.
+  //
+  // Capture the wrap-key BEFORE the await — if the user switches
+  // songs mid-fetch, originalKey may have changed by the time the
+  // response lands, and we want pre-v4 data wrapped under the key
+  // that was active when this load was kicked off.
+  const wrapKey = (typeof originalKey === 'string' && originalKey) ? originalKey : 'C';
   try {
     const url = 'songs/fingerings/' + encodeURIComponent(title) + '.json';
     const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) return empty;
+    if (!res.ok) return {};
     const text = await res.text();
-    if (!text.trim()) return empty;
+    if (!text.trim()) return {};
     const json = JSON.parse(text);
-    const version    = (json && typeof json.version === 'number') ? json.version : 1;
-    const fingerings = (json && typeof json.fingerings === 'object' && json.fingerings) || {};
-    const rawPos     = (json && typeof json.positions  === 'object' && json.positions)  || {};
-    return {
-      fingerings: fingerings,
-      positions:  emMigratePositions(rawPos, version)
-    };
+    return emMigrateByKey(json, wrapKey);
   } catch (e) {
-    return empty;
+    return {};
   }
 }
 
@@ -7226,11 +7296,24 @@ async function emSaveFingerings(title) {
     const handle = await emFingeringFileHandle(title, { create: true });
     if (!handle) return;
     const writable = await handle.createWritable();
+    // Prune empty per-key entries — visiting a transposed key
+    // without typing anything would otherwise leave behind
+    // `{ "Eb": { "fingerings": {}, "positions": {} } }` clutter
+    // in the JSON file.
+    const byKey = {};
+    for (const k of Object.keys(emFingeringsByKey)) {
+      const entry = emFingeringsByKey[k];
+      if (!entry) continue;
+      const f = entry.fingerings || {};
+      const p = entry.positions  || {};
+      if (Object.keys(f).length > 0 || Object.keys(p).length > 0) {
+        byKey[k] = { fingerings: f, positions: p };
+      }
+    }
     const payload = {
       version: EM_STORAGE_VERSION,
       song: title,
-      fingerings: emFingerings,
-      positions: emPositions
+      byKey: byKey
     };
     await writable.write(JSON.stringify(payload, null, 2));
     await writable.close();
@@ -7243,11 +7326,19 @@ async function emEnsureFingeringsForCurrentSong() {
   if (!window.currentSong || !window.currentSong.song) return;
   const title = window.currentSong.song.title;
   if (!title) return;
-  if (emFingeringsTitle === title) return;
-  emFingeringsTitle = title;
-  const data = await emLoadFingerings(title);
-  emFingerings = data.fingerings;
-  emPositions  = data.positions;
+  if (emFingeringsTitle !== title) {
+    const loaded = await emLoadFingerings(title);
+    // Re-check that the user hasn't switched songs while we were
+    // fetching — if they did, the load result is for the wrong
+    // song and we drop it.
+    if (!window.currentSong || !window.currentSong.song
+        || window.currentSong.song.title !== title) return;
+    emFingeringsTitle = title;
+    emFingeringsByKey = loaded;
+  }
+  // Always refresh the per-key view — currentKey may have changed
+  // even when the song title hasn't (i.e. a transpose).
+  emRefreshFromByKey();
 }
 
 // Walk a bar's noteData looking for the first/last entry that
