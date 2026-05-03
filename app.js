@@ -911,6 +911,626 @@ function generateCantusFirmusQuarterNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// 3579 Range generator: a continuous half-note line that walks up
+// through the 3 / 5 / 7 / 9 of each chord toward F3, then turns and
+// walks back down toward F1, then turns again — repeating the
+// climb/descend cycle for the length of the song. Every note is a
+// half note. Each note is one of {3, 5, 7, 9} of whatever chord is
+// sounding at its start beat, picked to continue the current
+// direction by one chord-tone step.
+//
+// Half-note slots:
+//   - 4/4  → two half notes per bar (beats 1 and 3)
+//   - 3/4  → one half note per bar on beat 1; beat 3 is left empty
+//            so the renderer fills it with a quarter rest. (A pure
+//            "all-half-notes" line can't fit a 3-beat bar without
+//            tying across barlines, which the renderer doesn't do
+//            for synthesized exercises.)
+//   - other meters → as many full half-note slots as fit, leftover
+//                    beats become a rest.
+//
+// Direction-stepping:
+//   - Ascending: pick the LOWEST chord-tone option strictly above
+//     the previous pitch. If no such option exists (we've capped out
+//     near F3 on this chord), flip direction and pick the highest
+//     option below the previous pitch instead.
+//   - Descending: mirror — highest option strictly below previous,
+//     flipping if we've bottomed out near F1.
+// The result is a sawtooth between F1 and F3 whose teeth are
+// chord-tone-shaped rather than scale-step-shaped.
+function generateRange3579HalfNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // Locate the chord event covering a (barIdx, beatIdx) — chord events
+  // are partitioned per chord per bar, so a beat falls inside exactly
+  // one event's [startBeat, endBeat) range.
+  function findChordEventAtBeat(barIdx, beatIdx) {
+    for (let i = 0; i < chordEvents.length; i++) {
+      const ce = chordEvents[i];
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return ce;
+    }
+    return null;
+  }
+
+  // All 3 / 5 / 7 / 9 pitches for a chord, sorted ascending across the
+  // F1..F3 cello range. Each entry is { pitch, tpc }. Duplicates within
+  // the [3,5,7,9] set (e.g. on chords whose 9 collapses onto another
+  // chord tone in the current scale) are kept — they don't hurt the
+  // direction-step logic since findIndex still picks the next strictly
+  // greater/lesser pitch.
+  function chordToneOptions(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const degIdxs = [2, 4, 6, 8]; // scale indices for 3, 5, 7, 9
+    const opts = [];
+    for (const di of degIdxs) {
+      const oct = Math.floor(di / chordScale.length);
+      const sd  = chordScale[di % chordScale.length];
+      const pc  = (((rootPc + sd.s + oct * 12) % 12) + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) opts.push({ pitch: p, tpc });
+      }
+    }
+    opts.sort((a, b) => a.pitch - b.pitch);
+    return opts;
+  }
+
+  let direction = 1;     // +1 = ascending, -1 = descending
+  let lastPitch = -1;
+
+  for (let barIdx = 0; barIdx < bars.length; barIdx++) {
+    for (let beatIdx = 0; beatIdx < beatsPerBar; beatIdx += 2) {
+      // A half note needs 2 full beats — skip if the bar runs out
+      // (e.g. beat 2 of a 3/4 bar would only have 1 beat available).
+      if (beatIdx + 2 > beatsPerBar) continue;
+      const ce = findChordEventAtBeat(barIdx, beatIdx);
+      if (!ce) continue;
+      const opts = chordToneOptions(ce);
+      if (opts.length === 0) continue;
+
+      let chosen = null;
+      if (lastPitch < 0) {
+        // First note of the song: start at the lowest available
+        // chord tone (closest to F1) and head upward.
+        chosen = opts[0];
+        direction = 1;
+      } else if (direction > 0) {
+        chosen = opts.find(o => o.pitch > lastPitch);
+        if (!chosen) {
+          // Ceiling: nothing higher available on this chord — turn
+          // around and pick the highest option below lastPitch.
+          direction = -1;
+          for (let i = opts.length - 1; i >= 0; i--) {
+            if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
+          }
+        }
+      } else {
+        for (let i = opts.length - 1; i >= 0; i--) {
+          if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
+        }
+        if (!chosen) {
+          // Floor: turn around and pick the lowest option above.
+          direction = 1;
+          chosen = opts.find(o => o.pitch > lastPitch);
+        }
+      }
+      // Final fallback: if even the reverse direction had no option
+      // (chord's tones happen to all equal lastPitch), repeat the
+      // closest pitch so the bar still gets a half note rather than
+      // a silent gap.
+      if (!chosen) {
+        chosen = opts[0];
+        for (let i = 1; i < opts.length; i++) {
+          if (Math.abs(opts[i].pitch - lastPitch) < Math.abs(chosen.pitch - lastPitch)) {
+            chosen = opts[i];
+          }
+        }
+      }
+
+      results[barIdx][beatIdx] = { pitch: chosen.pitch, tpc: chosen.tpc, duration: 'h' };
+      lastPitch = chosen.pitch;
+    }
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Enclosures generator: each bar is a classic jazz "enclosure" that
+// resolves to a chord tone — diatonic step ABOVE, chromatic step
+// BELOW, then the target. The target is a 1, 3, or 5 of the bar's
+// "main chord" and the targets ascend / descend through the form
+// like the 3579 Range exercise (sweeping from low cello toward F3,
+// then back down).
+//
+// Bar layouts:
+//   - 4/4 with 1 chord:  q (above)  q (below)  h (target)
+//   - 4/4 with 2 chords: q (above)  q (below)  h (target)
+//                        ↑ first chord            ↑ target = 1/3/5 of SECOND chord
+//                        first quarter is diatonic to the FIRST chord's scale
+//   - 4/4 with 3 chords (2-1-1, chord on beat 4): the beat-4 chord is
+//     ignored. Half note targets the chord on beat 3; first quarter
+//     is diatonic to the chord on beat 1.
+//   - 4/4 with 4 chords (1-1-1-1): same — target = chord on beat 3,
+//     diatonic-above is in the chord-on-beat-1 scale, chord-on-beat-2
+//     and chord-on-beat-4 are not voiced.
+//   - 3/4: degrades to q-q-q (target as a quarter, since q-q-h doesn't
+//     fit in 3 beats). Same chord-selection logic.
+//
+// Voice-leading: targets (the half notes) are picked from {1, 3, 5}
+// of the main chord across all octaves in the cello range, choosing
+// the next pitch above the previous target (ascending) until the
+// chord runs out of higher options, then flipping to descending.
+// Same sawtooth shape as 3579 Range, just with a smaller tone set.
+function generateEnclosuresQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // Locate the chord event covering a given (barIdx, beatIdx). Each
+  // beat falls inside exactly one chord event's [startBeat, endBeat).
+  function findChordEventAtBeat(barIdx, beatIdx) {
+    for (let i = 0; i < chordEvents.length; i++) {
+      const ce = chordEvents[i];
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return ce;
+    }
+    return null;
+  }
+
+  // 1 / 3 / 5 of a chord, every octave inside [EX_LOW, EX_HIGH], sorted ascending.
+  function targetOptions(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const opts = [];
+    for (const di of [0, 2, 4]) { // scale indices for 1, 3, 5
+      if (di >= chordScale.length) continue;
+      const sd = chordScale[di];
+      const pc = (((rootPc + sd.s) % 12) + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) opts.push({ pitch: p, tpc });
+      }
+    }
+    opts.sort((a, b) => a.pitch - b.pitch);
+    return opts;
+  }
+
+  // Lowest scale tone strictly greater than `belowMidi` in the given
+  // scale. Sweep enough octaves to cover the cello range and a touch
+  // above (in case the target sits near F3 and the next scale tone
+  // is a whole step higher).
+  function diatonicAbove(belowMidi, scale, rootPc, rootTpc) {
+    let best = null;
+    for (let oct = 0; oct < 8; oct++) {
+      for (let i = 0; i < scale.length; i++) {
+        const pitch = rootPc + scale[i].s + oct * 12;
+        const tpc = rootTpc + scale[i].t;
+        if (pitch > belowMidi && (!best || pitch < best.pitch)) {
+          best = { pitch, tpc };
+        }
+      }
+    }
+    return best;
+  }
+
+  // Chromatic neighbor a half step BELOW the target, spelled as a
+  // leading-tone-from-below approach so the line reads as "rising
+  // chromatic into the target":
+  //   - Naturals D/E/G/A/B → sharp of the next letter down
+  //     (B→A♯, E→D♯, A→G♯, G→F♯, D→C♯). This is the spelling jazz
+  //     pedagogy uses for ascending enclosures.
+  //   - Naturals C/F → next letter down natural (C→B, F→E), since
+  //     C/F already have a half-step diatonic neighbor below — Cb/Fb
+  //     would just be enharmonic clutter.
+  //   - Sharps (C♯, D♯, F♯, G♯, A♯) → lower the same letter to
+  //     natural (C♯→C, F♯→F, …).
+  //   - Flats (E♭, B♭, A♭, D♭, G♭, C♭) → previous letter natural
+  //     (E♭→D, B♭→A, …). Same-letter would give a double flat.
+  // Compactly: TPC+5 covers naturals and flats (the "previous letter"
+  // step in the F-C-G-D-A-E-B fifths cycle), TPC−7 covers sharps
+  // (lower the accidental in place).
+  function chromaticBelow(targetMidi, targetTpc) {
+    const altLevel = Math.floor((targetTpc - 6) / 7); // 0=b, 1=nat, 2=#, 3=##
+    const tpc = altLevel >= 2 ? targetTpc - 7 : targetTpc + 5;
+    return { pitch: targetMidi - 1, tpc };
+  }
+
+  let direction = 1;     // +1 ascending, −1 descending
+  let lastTarget = -1;
+
+  for (let barIdx = 0; barIdx < bars.length; barIdx++) {
+    const firstCe = findChordEventAtBeat(barIdx, 0);
+    if (!firstCe) continue;
+    // Main chord = chord at beat 3 in 4/4 (0-indexed beat 2). The
+    // user explicitly asked: chord on beat 4 is ignored; chord on
+    // beat 3 owns the half note. For non-4/4 meters, look at the
+    // beat closest to "3 of 4" — beats_per_bar - 2 — which gives a
+    // sensible analog (e.g. beat 1 in 3/4) without crashing on odd
+    // signatures.
+    const mainBeatIdx = beatsPerBar >= 4 ? 2 : Math.max(0, beatsPerBar - 2);
+    const mainCe = findChordEventAtBeat(barIdx, mainBeatIdx) || firstCe;
+
+    // Target (half note) — sweeping contour through 1/3/5 options.
+    // Filter to targets whose neighbors will ALSO sit inside F1..F3:
+    //   - chromatic-below = target − 1 semitone, so target ≥ F♯1 (30).
+    //   - diatonic-above (in the FIRST chord's scale) ≤ F3 (53). The
+    //     diatonic step above target is 1 or 2 semitones depending on
+    //     the scale, so we have to compute it per-option rather than
+    //     applying a fixed offset. On F7 (F mixolydian) this caps the
+    //     target at C3 (above = D3 = 50) — F3 itself isn't a valid
+    //     target because its diatonic-above would be G3 = 55, outside
+    //     the cello's F1..F3 range.
+    const firstScale = exGetScale(chordToCanonical(firstCe.chord));
+    const allOpts = targetOptions(mainCe);
+    const opts = allOpts.filter(o => {
+      if (o.pitch - 1 < EX_LOW) return false; // chromatic-below would leave the range
+      const above = diatonicAbove(
+        o.pitch, firstScale, firstCe.root.pitchClass, firstCe.root.tpc
+      );
+      return above && above.pitch <= EX_HIGH;
+    });
+    if (opts.length === 0) continue;
+    let chosen = null;
+    if (lastTarget < 0) {
+      chosen = opts[0]; // first bar: start near F1 and head up.
+      direction = 1;
+    } else if (direction > 0) {
+      chosen = opts.find(o => o.pitch > lastTarget);
+      if (!chosen) {
+        direction = -1;
+        for (let i = opts.length - 1; i >= 0; i--) {
+          if (opts[i].pitch < lastTarget) { chosen = opts[i]; break; }
+        }
+      }
+    } else {
+      for (let i = opts.length - 1; i >= 0; i--) {
+        if (opts[i].pitch < lastTarget) { chosen = opts[i]; break; }
+      }
+      if (!chosen) {
+        direction = 1;
+        chosen = opts.find(o => o.pitch > lastTarget);
+      }
+    }
+    if (!chosen) {
+      // Pathological fallback: chord's only options sit at lastTarget
+      // exactly. Repeat the closest pitch so the bar still has a target.
+      chosen = opts[0];
+      for (let i = 1; i < opts.length; i++) {
+        if (Math.abs(opts[i].pitch - lastTarget) < Math.abs(chosen.pitch - lastTarget)) {
+          chosen = opts[i];
+        }
+      }
+    }
+    const target = chosen;
+    lastTarget = target.pitch;
+
+    // First quarter: diatonic note above target, in the FIRST chord's
+    // scale (so a 2-chord bar gets the chord-1 voice on the upbeat
+    // and the chord-2 voice on the downbeat). Guaranteed ≤ EX_HIGH
+    // by the target filter above.
+    const firstAbove = diatonicAbove(
+      target.pitch, firstScale, firstCe.root.pitchClass, firstCe.root.tpc
+    );
+    if (!firstAbove) continue;
+
+    // Second quarter: chromatic step below target. Guaranteed
+    // ≥ EX_LOW by the target filter above (target ≥ F♯1 ⟹ below ≥ F1).
+    const second = chromaticBelow(target.pitch, target.tpc);
+
+    if (beatsPerBar >= 4) {
+      // 4/4: q (above) | q (below) | h (target, covers beats 3-4).
+      results[barIdx][0] = { pitch: firstAbove.pitch, tpc: firstAbove.tpc, duration: 'q' };
+      results[barIdx][1] = { pitch: second.pitch,     tpc: second.tpc,     duration: 'q' };
+      results[barIdx][2] = { pitch: target.pitch,     tpc: target.tpc,     duration: 'h' };
+    } else if (beatsPerBar === 3) {
+      // 3/4: q-q-q. q-q-h would overflow the bar; degrade target to
+      // a quarter so the enclosure shape is still recognisable.
+      results[barIdx][0] = { pitch: firstAbove.pitch, tpc: firstAbove.tpc, duration: 'q' };
+      results[barIdx][1] = { pitch: second.pitch,     tpc: second.tpc,     duration: 'q' };
+      results[barIdx][2] = { pitch: target.pitch,     tpc: target.tpc,     duration: 'q' };
+    }
+    // Other meters: skip — the renderer will fill the bar with rests.
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Long Enclosures generator: every cycle of THREE bars contains a
+// SETUP bar (4 diatonic quarter notes split into two voice-leading
+// pairs) followed by a TARGET bar (q-q-h enclosure on a 1/3/5 chord
+// tone) followed by a REST bar (a single whole rest). The rest bar
+// gives the player a beat to breathe and re-orient before the next
+// long-enclosure phrase begins. The two PLAYED bars work the same
+// way the regular Enclosures generator's pair does — only the rest
+// bar in between cycles is new. The setup bar's two pairs each
+// voice-lead into a specific note of the upcoming target bar:
+//
+//   pair 1 (beats 1–2) → q1 of target bar (= diatonic-above target)
+//   pair 2 (beats 3–4) → q2 of target bar (= chromatic-below target)
+//
+// Both pairs are diatonic to the SETUP bar's chord scale. Because
+// the two pairs aim at different goals (q1 sits above the target,
+// q2 sits a half step below it), they typically end up in different
+// octaves, producing the audible jump between beats 2 and 3 that
+// the spec image shows.
+//
+// Default approach styles (chosen to match the worked example):
+//   - pair 1: from above, stepwise descending (3rd above ▸ 2nd above
+//     ▸ q1). On Dm7 → G7 with q1 = C3 in D dorian: E3 D3.
+//   - pair 2: from below, stepwise ascending (3rd below ▸ 2nd below
+//     ▸ q2). On Dm7 → G7 with q2 = A♯2 in D dorian (so closest
+//     diatonic notes below are A2 and G2): G2 A2.
+//
+// Combined with the standard target-bar enclosure C A♯ B(h), the
+// full two-bar phrase is E3 D3 G2 A2 | C3 A♯2 B(h) — high-high then
+// low-low in the setup bar, leaping back up to C3 for the target
+// bar's first quarter.
+//
+// Range/voice-leading filter: the same target-picking sweep used by
+// the regular Enclosures generator runs here, but with extra
+// constraints — a candidate target is only valid if BOTH setup pairs
+// (two diatonic notes above q1, two below q2) fit inside F1..F3.
+// This means Long Enclosures has a slightly narrower target range
+// than regular Enclosures, since each target now needs four extra
+// scale tones in the setup bar's scale to fit.
+function generateLongEnclosuresQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // === Helpers ===
+  function findChordEventAtBeat(barIdx, beatIdx) {
+    for (let i = 0; i < chordEvents.length; i++) {
+      const ce = chordEvents[i];
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return ce;
+    }
+    return null;
+  }
+  function targetOptions(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const opts = [];
+    for (const di of [0, 2, 4]) {
+      if (di >= chordScale.length) continue;
+      const sd = chordScale[di];
+      const pc = (((rootPc + sd.s) % 12) + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) opts.push({ pitch: p, tpc });
+      }
+    }
+    opts.sort((a, b) => a.pitch - b.pitch);
+    return opts;
+  }
+  function diatonicAbove(belowMidi, scale, rootPc, rootTpc) {
+    let best = null;
+    for (let oct = 0; oct < 8; oct++) {
+      for (let i = 0; i < scale.length; i++) {
+        const pitch = rootPc + scale[i].s + oct * 12;
+        const tpc = rootTpc + scale[i].t;
+        if (pitch > belowMidi && (!best || pitch < best.pitch)) {
+          best = { pitch, tpc };
+        }
+      }
+    }
+    return best;
+  }
+  function chromaticBelow(targetMidi, targetTpc) {
+    const altLevel = Math.floor((targetTpc - 6) / 7);
+    const tpc = altLevel >= 2 ? targetTpc - 7 : targetTpc + 5;
+    return { pitch: targetMidi - 1, tpc };
+  }
+  // The n-th distinct scale tone above (direction=+1) or below
+  // (direction=-1) `goalPitch`, staying inside [EX_LOW, EX_HIGH].
+  // n=1 ⇒ the immediate scale neighbor; n=2 ⇒ the one past that.
+  // Used to build the two-note voice-leading pairs in the setup bar.
+  function diatonicStep(scale, rootPc, rootTpc, goalPitch, direction, n) {
+    const seen = new Set();
+    const tones = [];
+    for (let oct = 0; oct < 8; oct++) {
+      for (let i = 0; i < scale.length; i++) {
+        const sd = scale[i];
+        const pitch = rootPc + sd.s + oct * 12;
+        if (pitch < EX_LOW || pitch > EX_HIGH) continue;
+        if (seen.has(pitch)) continue;
+        seen.add(pitch);
+        tones.push({ pitch, tpc: rootTpc + sd.t });
+      }
+    }
+    tones.sort((a, b) => a.pitch - b.pitch);
+    if (direction > 0) {
+      const above = tones.filter(t => t.pitch > goalPitch);
+      return above[n - 1] || null;
+    }
+    const below = tones.filter(t => t.pitch < goalPitch).reverse();
+    return below[n - 1] || null;
+  }
+  // Place a regular q-q-h Enclosures bar (used for the target bar of
+  // every pair, and for the leftover bar when the song has an odd
+  // length). Filters target candidates with `extraFilter` so the
+  // setup bar's voice-leading pairs are guaranteed to fit.
+  function placeEnclosureBar(barIdx, contour, extraFilter) {
+    const firstCe = findChordEventAtBeat(barIdx, 0);
+    if (!firstCe) return null;
+    const mainBeatIdx = beatsPerBar >= 4 ? 2 : Math.max(0, beatsPerBar - 2);
+    const mainCe = findChordEventAtBeat(barIdx, mainBeatIdx) || firstCe;
+    const firstScale = exGetScale(chordToCanonical(firstCe.chord));
+    const allOpts = targetOptions(mainCe);
+    const opts = allOpts.filter(o => {
+      if (o.pitch - 1 < EX_LOW) return false;
+      const above = diatonicAbove(o.pitch, firstScale, firstCe.root.pitchClass, firstCe.root.tpc);
+      if (!above || above.pitch > EX_HIGH) return false;
+      if (extraFilter && !extraFilter(o, above)) return false;
+      return true;
+    });
+    if (opts.length === 0) return null;
+
+    let chosen = null;
+    if (contour.lastTarget < 0) {
+      chosen = opts[0];
+      contour.direction = 1;
+    } else if (contour.direction > 0) {
+      chosen = opts.find(o => o.pitch > contour.lastTarget);
+      if (!chosen) {
+        contour.direction = -1;
+        for (let i = opts.length - 1; i >= 0; i--) {
+          if (opts[i].pitch < contour.lastTarget) { chosen = opts[i]; break; }
+        }
+      }
+    } else {
+      for (let i = opts.length - 1; i >= 0; i--) {
+        if (opts[i].pitch < contour.lastTarget) { chosen = opts[i]; break; }
+      }
+      if (!chosen) {
+        contour.direction = 1;
+        chosen = opts.find(o => o.pitch > contour.lastTarget);
+      }
+    }
+    if (!chosen) {
+      chosen = opts[0];
+      for (let i = 1; i < opts.length; i++) {
+        if (Math.abs(opts[i].pitch - contour.lastTarget) <
+            Math.abs(chosen.pitch - contour.lastTarget)) chosen = opts[i];
+      }
+    }
+    const target = chosen;
+    contour.lastTarget = target.pitch;
+
+    const firstAbove = diatonicAbove(
+      target.pitch, firstScale, firstCe.root.pitchClass, firstCe.root.tpc
+    );
+    if (!firstAbove) return null;
+    const second = chromaticBelow(target.pitch, target.tpc);
+
+    if (beatsPerBar >= 4) {
+      results[barIdx][0] = { pitch: firstAbove.pitch, tpc: firstAbove.tpc, duration: 'q' };
+      results[barIdx][1] = { pitch: second.pitch,     tpc: second.tpc,     duration: 'q' };
+      results[barIdx][2] = { pitch: target.pitch,     tpc: target.tpc,     duration: 'h' };
+    } else if (beatsPerBar === 3) {
+      results[barIdx][0] = { pitch: firstAbove.pitch, tpc: firstAbove.tpc, duration: 'q' };
+      results[barIdx][1] = { pitch: second.pitch,     tpc: second.tpc,     duration: 'q' };
+      results[barIdx][2] = { pitch: target.pitch,     tpc: target.tpc,     duration: 'q' };
+    }
+    return { firstAbove, target, second };
+  }
+  // === End helpers ===
+
+  // Drive the form in 3-bar cycles: SETUP at `cycleStart`, TARGET at
+  // `cycleStart + 1`, REST at `cycleStart + 2`. The rest bar's slots
+  // stay all-null so the renderer fills it with a single whole rest
+  // (in 4/4) or a dotted-half rest (in 3/4) via its full-bar-empty
+  // shortcut. If the song length isn't a clean multiple of 3, the
+  // tail-end cycles just play whatever bars remain — a leftover
+  // single bar gets the regular Enclosures pattern; a leftover pair
+  // (setup + target with no rest) plays the long-enclosure phrase
+  // and the song simply ends on the half note.
+  const contour = { lastTarget: -1, direction: 1 };
+  for (let cycleStart = 0; cycleStart < bars.length; cycleStart += 3) {
+    const setupBarIdx  = cycleStart;
+    const targetBarIdx = cycleStart + 1;
+
+    // Tail case: only one bar left in the song, so there's no room
+    // for a setup-target pair. Drop in a regular Enclosures bar so
+    // the contour still gets a target and the song doesn't trail
+    // off into an unexpected silent bar.
+    if (targetBarIdx >= bars.length) {
+      placeEnclosureBar(setupBarIdx, contour, null);
+      continue;
+    }
+
+    const setupCe = findChordEventAtBeat(setupBarIdx, 0);
+    if (!setupCe) continue;
+    const setupScale = exGetScale(chordToCanonical(setupCe.chord));
+    if (!setupScale || setupScale.length === 0) continue;
+    const setupRootPc  = setupCe.root.pitchClass;
+    const setupRootTpc = setupCe.root.tpc;
+
+    // Reject targets whose setup pairs can't fit:
+    //  - pair 1 (above q1 stepwise descending) needs 2 scale tones above
+    //    q1 inside [EX_LOW, EX_HIGH].
+    //  - pair 2 (below q2 stepwise ascending) needs 2 scale tones below
+    //    q2 (= target − 1 semitone) inside the same range.
+    // Both are computed in the SETUP bar's chord scale.
+    const extraFilter = (o, above) => {
+      const u1 = diatonicStep(setupScale, setupRootPc, setupRootTpc, above.pitch, +1, 1);
+      const u2 = diatonicStep(setupScale, setupRootPc, setupRootTpc, above.pitch, +1, 2);
+      if (!u1 || !u2) return false;
+      const secondPitch = o.pitch - 1;
+      const d1 = diatonicStep(setupScale, setupRootPc, setupRootTpc, secondPitch, -1, 1);
+      const d2 = diatonicStep(setupScale, setupRootPc, setupRootTpc, secondPitch, -1, 2);
+      if (!d1 || !d2) return false;
+      return true;
+    };
+
+    const enc = placeEnclosureBar(targetBarIdx, contour, extraFilter);
+    if (!enc) continue;
+
+    // Pair 1 (beats 1-2 of setup bar): from above stepwise descending
+    // INTO the next bar's q1 (= enc.firstAbove). The two notes are the
+    // diatonic 3rd-above and 2nd-above of q1 in the setup scale, played
+    // in that order so the line steps down toward q1.
+    const u2 = diatonicStep(setupScale, setupRootPc, setupRootTpc, enc.firstAbove.pitch, +1, 2);
+    const u1 = diatonicStep(setupScale, setupRootPc, setupRootTpc, enc.firstAbove.pitch, +1, 1);
+    // Pair 2 (beats 3-4): from below stepwise ascending INTO q2
+    // (= enc.second, the chromatic-below quarter). Two diatonic notes
+    // below q2 in the setup scale, played 3rd-below then 2nd-below
+    // so the line steps up toward q2.
+    const d2 = diatonicStep(setupScale, setupRootPc, setupRootTpc, enc.second.pitch, -1, 2);
+    const d1 = diatonicStep(setupScale, setupRootPc, setupRootTpc, enc.second.pitch, -1, 1);
+    if (!u1 || !u2 || !d1 || !d2) continue; // shouldn't happen — extraFilter caught it.
+
+    if (beatsPerBar >= 4) {
+      results[setupBarIdx][0] = { pitch: u2.pitch, tpc: u2.tpc, duration: 'q' };
+      results[setupBarIdx][1] = { pitch: u1.pitch, tpc: u1.tpc, duration: 'q' };
+      results[setupBarIdx][2] = { pitch: d2.pitch, tpc: d2.tpc, duration: 'q' };
+      results[setupBarIdx][3] = { pitch: d1.pitch, tpc: d1.tpc, duration: 'q' };
+    } else if (beatsPerBar === 3) {
+      // 3/4: only 3 quarters fit. Drop pair-2's 3rd-below and play
+      // 3rd-above ▸ 2nd-above ▸ 2nd-below so the bar still ends on the
+      // approach note for q2.
+      results[setupBarIdx][0] = { pitch: u2.pitch, tpc: u2.tpc, duration: 'q' };
+      results[setupBarIdx][1] = { pitch: u1.pitch, tpc: u1.tpc, duration: 'q' };
+      results[setupBarIdx][2] = { pitch: d1.pitch, tpc: d1.tpc, duration: 'q' };
+    }
+  }
+  return { results, chordEvents, patterns, effective };
+}
+
 // Broken 3rds generator: alternates a base scale tone with the diatonic
 // 3rd in the current direction, then steps the base up/down by one scale
 // degree and repeats. Ported from the MuseScore ExerciseBuilder
@@ -2955,12 +3575,19 @@ function renderChart(song, barsIn, timesigStr) {
   //   - "broken3" → alternating base / diatonic-3rd pairs, stepping through
   //                 the scale (MuseScore ExerciseBuilder "Broken 3rds")
   //   - "cantus"  → one descending scale tone per chord (Cantus Firmus)
+  //   - "range3579"     → half-note F1↔F3 sweep through 3/5/7/9 of each chord
+  //   - "enclosures"    → q (above) + q (below) + h (1/3/5 target) per bar
+  //   - "longEnclosures"→ pair-of-bars enclosures: 4 diatonic quarters into
+  //                       a regular q-q-h enclosure on the next bar
   const bars = expandBarsByRepeats(barsIn, songRepeats);
   const gen = exerciseMode === 'head' ? generateHeadFromScore
             : exerciseMode === 'chord' ? generate1357QuarterNotes
             : exerciseMode === 'triads' ? generateTriadsQuarterNotes
             : exerciseMode === 'broken3' ? generateBroken3rdsQuarterNotes
             : exerciseMode === 'cantus' ? generateCantusFirmusQuarterNotes
+            : exerciseMode === 'range3579' ? generateRange3579HalfNotes
+            : exerciseMode === 'enclosures' ? generateEnclosuresQuarterNotes
+            : exerciseMode === 'longEnclosures' ? generateLongEnclosuresQuarterNotes
             : exerciseMode === '1235' ? generate1235EighthNotes
             : exerciseMode === '3579' ? generate3579EighthNotes
             : generateQuarterNotes;
@@ -6935,7 +7562,7 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   if (!sel) return;
   sel.addEventListener('change', async () => {
     const ex = sel.value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === '1235' || ex === '3579')
       ? ex : 'scale';
     // Auto-flip the mode seg to "Exercise" — picking from the
     // dropdown is an implicit "I want an exercise" gesture.
@@ -6975,7 +7602,7 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
       } else {
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === '1235' || ex === '3579')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === '1235' || ex === '3579')
           ? ex : 'scale';
       }
       updateScoreTitle();
@@ -7760,7 +8387,7 @@ function emRenderCursor() {
 }
 
 function emRenderFingerings() {
-  document.querySelectorAll('.fingering-text').forEach(n => n.remove());
+  document.querySelectorAll('.fingering-text, .fingering-bg').forEach(n => n.remove());
   // Fingerings are head-specific — they describe finger positions
   // for the head's actual melody, not for the algorithmically
   // generated exercise patterns. So they only paint when the
@@ -7829,6 +8456,27 @@ function emRenderFingerings() {
     t.setAttribute('stroke', 'none');
     t.textContent = value;
     geom.svg.appendChild(t);
+    // White rectangle behind the text so the digit stays legible even
+    // when it sits directly on top of a beat marker, ledger line, or
+    // overlapping note glyph. Sized via the actual text bounding box
+    // (1 px of padding on every side) so it hugs the digit instead of
+    // covering more of the staff than necessary. The rect is inserted
+    // BEFORE the text in document order so SVG paint order draws it
+    // underneath; the wrapping cleanup query also picks it up via the
+    // `fingering-bg` class.
+    let bbox = null;
+    try { bbox = t.getBBox(); } catch (e) { /* not yet in layout — skip bg */ }
+    if (bbox && isFinite(bbox.width) && bbox.width > 0) {
+      const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      bg.setAttribute('class', 'fingering-bg');
+      bg.setAttribute('x', bbox.x - 1);
+      bg.setAttribute('y', bbox.y - 1);
+      bg.setAttribute('width',  bbox.width  + 2);
+      bg.setAttribute('height', bbox.height + 2);
+      bg.setAttribute('fill', '#fff');
+      bg.setAttribute('stroke', 'none');
+      geom.svg.insertBefore(bg, t);
+    }
   }
 }
 

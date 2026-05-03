@@ -896,7 +896,8 @@ body.edit-mode #chart {
    events disabled so they don't intercept clicks on the underlying
    bar (which still drives bar selection). */
 .edit-cursor,
-.fingering-text {
+.fingering-text,
+.fingering-bg {
   pointer-events: none;
   user-select: none;
 }
