@@ -464,30 +464,6 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
   cursor: pointer;
 }
 .exercise-select:focus { outline: 2px solid #3da9fc; outline-offset: 0; }
-/* Take Photo button, occupies the exercise-dropdown's slot when in
-   Test Me mode. Same height/padding as the dropdown so the row's
-   vertical rhythm doesn't change when the user toggles between
-   modes. The flex:1 lets it fill the row width like the select did. */
-.take-photo-btn {
-  flex: 1;
-  height: 32px;
-  padding: 0 14px;
-  border: 1px solid #3da9fc;
-  background: #3da9fc;
-  color: #fff;
-  border-radius: 8px;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.take-photo-btn:hover { background: #2b95e8; }
-.take-photo-btn:active { transform: translateY(1px); }
-.take-photo-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-  transform: none;
-}
 .switch-input {
   position: absolute; opacity: 0; pointer-events: none;
 }

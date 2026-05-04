@@ -1046,205 +1046,6 @@ function generateBlankExercise(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
-// ===== Test Me =====
-// Photograph a printed worksheet, send it (plus the chord
-// progression context) to a server-side vision proxy, and render
-// the AI's parsed notes onto the chart with red highlighting on
-// any pitch that doesn't fit the chord's scale.
-//
-// REQUIRES a server-side endpoint at TEST_ME_API_URL that holds
-// the vision-API key and proxies the call to Anthropic / OpenAI /
-// Gemini. The browser sends:
-//   POST {TEST_ME_API_URL}
-//   { title, chordProgression: [[chord, ...], ...], beatsPerBar, image: dataURL }
-// and expects:
-//   { bars: [ { barIdx, notes: [ { beat, pitch, duration }, ... ] }, ... ] }
-// where `pitch` is a string like "F3" / "Bb2" / "C#4" reading the
-// bass clef without 8vb compensation (the client subtracts 12 to
-// convert to sounding pitch).
-const TEST_ME_API_URL = 'https://song-practice-vision.ikaris.workers.dev';
-
-// Cached parsed-notes JSON from the most recent photo. null = no
-// photo yet → generateTestMeFromDetected falls back to Blank Staff
-// so the user sees an empty worksheet to compare against. Set by
-// the photo handler, read by the dispatch.
-let _testDetectedNotes = null;
-
-// Pitch-string parser for "F3" / "Bb2" / "C#4". Returns the
-// internal { pitch, tpc } shape — sounding MIDI on bass-clef-8vb,
-// and TPC for accurate accidental rendering. Returns null if the
-// string doesn't parse.
-const _TESTME_NATURAL_TPC = { F:13, C:14, G:15, D:16, A:17, E:18, B:19 };
-const _TESTME_PC_OF_LETTER = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
-function parsePitchString(str) {
-  const m = /^([A-G])([#♯b♭]?)(-?\d+)$/i.exec(String(str || '').trim());
-  if (!m) return null;
-  const letter = m[1].toUpperCase();
-  const accChar = m[2];
-  const octave = parseInt(m[3], 10);
-  let pc = _TESTME_PC_OF_LETTER[letter];
-  let tpc = _TESTME_NATURAL_TPC[letter];
-  if (accChar === '#' || accChar === '♯') { pc++; tpc += 7; }
-  else if (accChar === 'b' || accChar === '♭') { pc--; tpc -= 7; }
-  const writtenMidi = pc + (octave + 1) * 12;
-  // Bass clef is rendered 8vb in this app — what's "F3 on the
-  // staff" sounds as F2. The vision model reads the staff, so we
-  // convert written → sounding here so the rest of the pipeline
-  // (which expects sounding MIDI) just works.
-  return { pitch: writtenMidi - 12, tpc };
-}
-
-// Test Me generator: returns the cached detected notes mapped onto
-// the chart's per-beat slots, with bp.invalid set on any note whose
-// pitch class isn't in the chord's scale at that beat. When no
-// photo has been taken yet we fall back to Blank Staff so the user
-// has something to look at while they prepare to take the photo.
-function generateTestMeFromDetected(bars, ts) {
-  if (!_testDetectedNotes) return generateBlankExercise(bars, ts);
-
-  const beatsPerBar = ts.num;
-  const chordEvents = buildChordEventList(bars);
-  const patterns = detectKeyPatterns(chordEvents);
-  const effective = chordEvents.map((ce, i) => {
-    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
-  });
-
-  // Effective chord-scale at a given (barIdx, beatIdx). Used to
-  // validate each detected note against the harmony at its slot.
-  function effectiveAtBeat(barIdx, beatIdx) {
-    for (let i = 0; i < chordEvents.length; i++) {
-      const ce = chordEvents[i];
-      if (ce.barIdx !== barIdx) continue;
-      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
-      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return effective[i];
-    }
-    return null;
-  }
-  // True iff `midi`'s pitch class is one of the chord's scale
-  // tones. Returns true for unknown chords so we don't mark every
-  // note red on N.C. or unparseable chord symbols.
-  function fitsScale(midi, eff) {
-    if (!eff || !eff.scale) return true;
-    const noteCp = (((midi % 12) + 12) % 12);
-    const rootPc = eff.root.pitchClass;
-    for (let i = 0; i < eff.scale.length; i++) {
-      const tonePc = (((rootPc + eff.scale[i].s) % 12) + 12) % 12;
-      if (tonePc === noteCp) return true;
-    }
-    return false;
-  }
-
-  const results = bars.map(() => new Array(beatsPerBar).fill(null));
-  const detectedBars = (_testDetectedNotes && _testDetectedNotes.bars) || [];
-  detectedBars.forEach(d => {
-    const barIdx = d && typeof d.barIdx === 'number' ? d.barIdx : -1;
-    if (barIdx < 0 || barIdx >= bars.length) return;
-    const beats = (d && d.notes) || [];
-    beats.forEach(n => {
-      const beat = Math.floor(Number(n && n.beat) || 0);
-      if (beat < 0 || beat >= beatsPerBar) return;
-      if (results[barIdx][beat]) return; // first detected note wins on duplicates
-      const parsed = parsePitchString(n && n.pitch);
-      if (!parsed) return;
-      const eff = effectiveAtBeat(barIdx, beat);
-      const valid = fitsScale(parsed.pitch, eff);
-      results[barIdx][beat] = {
-        pitch: parsed.pitch,
-        tpc: parsed.tpc,
-        duration: (n && n.duration) || 'q',
-        invalid: !valid
-      };
-    });
-  });
-
-  return { results, chordEvents, patterns, effective };
-}
-
-// Take Photo button handler: click → file input → upload → render.
-// Wires the camera path end-to-end on the client; the only piece
-// the user has to deploy themselves is the TEST_ME_API_URL backend.
-(function bindTakePhoto() {
-  const btn = document.getElementById('takePhotoBtn');
-  const fileInput = document.getElementById('photoFileInput');
-  if (!btn || !fileInput) return;
-  btn.addEventListener('click', () => {
-    if (btn.disabled) return;
-    fileInput.click();
-  });
-  fileInput.addEventListener('change', async (e) => {
-    const file = e.target.files && e.target.files[0];
-    fileInput.value = ''; // reset so picking the same file twice still fires
-    if (!file) return;
-    if (!window.currentSong) return;
-    btn.disabled = true;
-    const originalText = btn.textContent;
-    btn.textContent = 'Analyzing…';
-    try {
-      const dataUrl = await _readFileAsDataUrl(file);
-      const songBars = window.currentSong.bars || [];
-      // Strip down to just the chord text per bar — the vision model
-      // doesn't need iRealPro markers, repeats, etc. Slashes ("/")
-      // and N.C. are filtered out so the proxy gets a clean array.
-      const chordsPerBar = songBars.map(b =>
-        (b.chords || [])
-          .filter(c => !c.slash && !c.nc)
-          .map(c => chordText(c))
-      );
-      const ts = parseTimesig(window.currentSong.timesig);
-      const resp = await fetch(TEST_ME_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: (window.currentSong.song && window.currentSong.song.title) || '',
-          chordProgression: chordsPerBar,
-          beatsPerBar: ts.num,
-          image: dataUrl
-        })
-      });
-      if (!resp.ok) {
-        // Surface as much of the upstream error as we can — the
-        // proxy returns a JSON body with `error` and optionally
-        // `detail` keys when something goes wrong, so plain status
-        // codes alone (404 / 502 / 500) aren't enough to debug.
-        let bodyText = '';
-        try {
-          const errJson = await resp.json();
-          bodyText = errJson.error || '';
-          if (errJson.detail) bodyText += ' — ' + errJson.detail;
-        } catch (e) {
-          try { bodyText = await resp.text(); } catch (e2) { /* ignore */ }
-        }
-        throw new Error('Server ' + resp.status + (bodyText ? ': ' + bodyText : ''));
-      }
-      const json = await resp.json();
-      _testDetectedNotes = json;
-      if (typeof rerenderCurrent === 'function') rerenderCurrent();
-    } catch (err) {
-      console.error('Test Me photo analysis failed:', err);
-      // Surface a friendly message — the most common cause is the
-      // user not having deployed the proxy endpoint yet.
-      alert('Could not analyze the photo: ' + (err && err.message ? err.message : err));
-    } finally {
-      btn.disabled = false;
-      btn.textContent = originalText;
-    }
-  });
-})();
-
-// FileReader → Promise wrapper for the photo upload path. Returns
-// a base64 data URL ("data:image/jpeg;base64,...") which the vision
-// proxy can decode directly.
-function _readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload  = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
-
 // Cantus Firmus generator: one tone per chord, held for the chord's full
 // duration by repeating the same pitch on every beat. The melody descends
 // slowly — the next note is the lowest diatonic tone within a whole step
@@ -3861,8 +3662,6 @@ function updateScoreTitle(songArg) {
   let exLabel = '';
   if (exerciseMode === 'head') {
     exLabel = 'Head';
-  } else if (exerciseMode === 'testme') {
-    exLabel = 'Test Me';
   } else {
     const sel = document.getElementById('exerciseSelect');
     if (sel && sel.selectedIndex >= 0) {
@@ -4008,10 +3807,6 @@ function renderChart(song, barsIn, timesigStr) {
   //                       bar's first note (e.g. D E F F♯ | G A B D♭).
   //   - "blank"         → empty staff with chord symbols above; for
   //                       hand-writing or printing as practice paper.
-  //   - "testme"        → renders the AI-detected handwritten notes
-  //                       from the most recent Take Photo upload, with
-  //                       chord-scale validation (red for non-fitting).
-  //                       Falls back to Blank Staff before any photo.
   const bars = expandBarsByRepeats(barsIn, songRepeats);
   const gen = exerciseMode === 'head' ? generateHeadFromScore
             : exerciseMode === 'chord' ? generate1357QuarterNotes
@@ -4023,7 +3818,6 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === 'longEnclosures' ? generateLongEnclosuresQuarterNotes
             : exerciseMode === 'scaleChromatic' ? generateScaleChromaticQuarterNotes
             : exerciseMode === 'blank' ? generateBlankExercise
-            : exerciseMode === 'testme' ? generateTestMeFromDetected
             : exerciseMode === '1235' ? generate1235EighthNotes
             : exerciseMode === '3579' ? generate3579EighthNotes
             : generateQuarterNotes;
@@ -4571,14 +4365,6 @@ function renderChart(song, barsIn, timesigStr) {
           const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: noteDur, stem_direction: stemDir });
           if (dotCount > 0 && VF.Dot && VF.Dot.buildAndAttach) {
             VF.Dot.buildAndAttach([n], { all: true });
-          }
-          // Test Me mode flags notes whose pitch class isn't in the
-          // chord scale via `bp.invalid`. Color those notes red so
-          // the user can see at a glance which handwritten pitches
-          // don't fit. Other modes never set `invalid`, so the style
-          // stays at VexFlow's default black.
-          if (bp.invalid) {
-            n.setStyle({ fillStyle: '#cc0000', strokeStyle: '#cc0000' });
           }
 
           // Decide whether to show an accidental on this note.
@@ -7718,10 +7504,6 @@ function loadFromURL(url) {
     // regardless of whether a head was found.
     headLoaded: false
   };
-  // Clear any Test Me detected notes from the previous song so the
-  // new song starts from a blank-staff baseline if the user
-  // switches to Test Me without taking a fresh photo.
-  if (typeof _testDetectedNotes !== 'undefined') _testDetectedNotes = null;
   // Edit Mode toggle is gated on (Head mode + head loaded). At
   // this exact moment headLoaded is false, so this disables the
   // toggle for the brief window between "song picked" and "head
@@ -8156,29 +7938,21 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   });
 })();
 
-// Show/hide the Exercise dropdown and the Take-Photo button based
-// on the current mode:
-//   - Head     → both hidden (no exercise to pick, no photo flow).
-//   - Exercise → dropdown visible, photo button hidden.
-//   - Test Me  → dropdown hidden, photo button visible — the
-//                button is the only knob in this mode.
+// Hide the Exercise dropdown when the user is in Head mode (no
+// exercise to pick) and show it when they switch to Exercise.
 // Called from the mode-seg click handler below and once on page
-// load so the initial "Head" state hides both controls.
+// load so the initial "Head" state starts with the dropdown
+// hidden.
 function _updateModeUIVisibility() {
-  const sel      = document.getElementById('exerciseSelect');
-  const photoBtn = document.getElementById('takePhotoBtn');
-  const isExercise = (exerciseMode !== 'head' && exerciseMode !== 'testme');
-  if (sel)      sel.hidden      = !isExercise;
-  if (photoBtn) photoBtn.hidden = (exerciseMode !== 'testme');
+  const sel = document.getElementById('exerciseSelect');
+  if (sel) sel.hidden = (exerciseMode === 'head');
 }
 
 // Mode segmented button: switches between Head (play the song's
-// melody as parsed from MusicXML / MIDI), Exercise (one of the
-// generators picked in the dropdown to the right), and Test Me
-// (photograph a worksheet, AI reads the handwritten notes,
-// non-fitting notes are rendered red). On "Exercise" we restore
-// exerciseMode from the dropdown's current value so toggling
-// Head off returns to the user's last-picked exercise.
+// melody as parsed from MusicXML / MIDI) and Exercise (one of the
+// generators picked in the dropdown to the right). On "Exercise"
+// we restore exerciseMode from the dropdown's current value so
+// toggling Head off returns to the user's last-picked exercise.
 (function bindModeSeg() {
   const seg = document.getElementById('modeSeg');
   if (!seg) return;
@@ -8189,8 +7963,6 @@ function _updateModeUIVisibility() {
       const mode = btn.dataset.mode;
       if (mode === 'head') {
         exerciseMode = 'head';
-      } else if (mode === 'testme') {
-        exerciseMode = 'testme';
       } else {
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
@@ -8212,10 +7984,9 @@ function _updateModeUIVisibility() {
       }
     });
   });
-  // Page-load sync: the default exerciseMode is 'head', which means
-  // BOTH the Exercise dropdown and the Take-Photo button should
-  // start hidden. Without this call the dropdown stays visible
-  // until the user clicks a mode button.
+  // Page-load sync: the default exerciseMode is 'head', so the
+  // dropdown should start hidden. Without this call it stays
+  // visible until the user clicks a mode button.
   _updateModeUIVisibility();
 })();
 
