@@ -464,6 +464,30 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
   cursor: pointer;
 }
 .exercise-select:focus { outline: 2px solid #3da9fc; outline-offset: 0; }
+/* Take Photo button, occupies the exercise-dropdown's slot when in
+   Test Me mode. Same height/padding as the dropdown so the row's
+   vertical rhythm doesn't change when the user toggles between
+   modes. The flex:1 lets it fill the row width like the select did. */
+.take-photo-btn {
+  flex: 1;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid #3da9fc;
+  background: #3da9fc;
+  color: #fff;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.take-photo-btn:hover { background: #2b95e8; }
+.take-photo-btn:active { transform: translateY(1px); }
+.take-photo-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+}
 .switch-input {
   position: absolute; opacity: 0; pointer-events: none;
 }
@@ -905,12 +929,184 @@ body.edit-mode #chart {
 /* Beat markers under each bar — blue circles with white digits on
    downbeats, smaller blue dots on the off-beat "ands". Always
    painted by renderChart, but hidden until the user enables the
-   Overlay switch (which flips body.overlay-on). Pointer-events
-   stay off so the markers don't intercept bar clicks. */
+   "Beats" entry in the Overlays dropdown (which flips
+   body.overlay-beats-on). Pointer-events stay off so the markers
+   don't intercept bar clicks. */
 .beat-marker {
   display: none;
   pointer-events: none;
 }
-body.overlay-on .beat-marker {
+body.overlay-beats-on .beat-marker {
   display: inline;
+}
+
+/* Overlays dropdown: a small inline button that lives in the Options
+   panel where the old Overlay switch used to live. Sized to match
+   the wake-label switches on the same row (≈22 px tall pill) so the
+   row's vertical rhythm doesn't change when the user toggles between
+   the old and new builds. The button's chevron (▾) hints that it
+   opens a multi-select menu — without it the label alone could read
+   as a regular toggle button. The menu itself is a fixed-position
+   checkbox panel modeled on the Edit kebab menu. */
+.overlays-btn {
+  /* margin-left: auto pushes the button to the right edge of the
+     drum-row, matching where the old "Overlay" switch sat. */
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 10px;
+  background: #1a2632;
+  color: #cde;
+  border: 1px solid #334654;
+  border-radius: 11px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.overlays-btn:hover { background: #243240; }
+.overlays-btn:focus-visible {
+  outline: 2px solid #3da9fc; outline-offset: 0;
+}
+.overlays-btn[aria-expanded="true"] {
+  background: #3da9fc; color: #fff; border-color: #3da9fc;
+}
+.overlays-btn-chevron {
+  font-size: 10px;
+  line-height: 1;
+  /* Nudge up by a half-pixel so the ▾ glyph optically centers with
+     the "Overlays" text — its ink rides low in the em box. */
+  transform: translateY(-1px);
+}
+.overlays-menu {
+  position: fixed;
+  z-index: 100;
+  background: #2a3a48;
+  border: 1px solid #334654;
+  border-radius: 8px;
+  padding: 4px 0;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.overlays-menu[hidden] { display: none; }
+.overlays-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  color: #cde;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.overlays-item:hover {
+  background: #334654;
+}
+.overlays-item input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* === Print stylesheet ===
+   Activated by `window.print()` (fired from the kebab menu's
+   "Print Worksheet" item). Strips the dark UI shell down to just
+   the score so the printed page reads like clean manuscript.
+   The chart pane already uses a white background — most of the
+   work here is hiding chrome and undoing the inner-scroll layout
+   that makes the on-screen experience comfortable but the printed
+   one impossible (a printer can't scroll). */
+@media print {
+  /* Force light theme regardless of the user's color scheme.
+     The on-screen layout pins html/body/#app/.main-area to the
+     viewport height with `overflow: hidden` (so .chart's internal
+     scrollbar drives navigation). For print we MUST undo every
+     one of those so the score can flow onto a second/third page —
+     otherwise the printer sees only the first viewport-worth of
+     content and the rest never reaches the paper. */
+  html, body {
+    background: #fff !important;
+    color: #000 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  /* Hide every UI surface that isn't the score itself. */
+  header,
+  footer,
+  #sidebar,
+  #songListPanel,
+  #fingerboardPanel,
+  .fingerboard-section,
+  #optionsPanel,
+  #instrumentsPanel,
+  .edit-kebab-menu,
+  .overlays-menu {
+    display: none !important;
+  }
+  /* Let the chart and its containers expand to natural height —
+     the on-screen `overflow-y: auto` would otherwise clip the score
+     to one viewport and the rest of the song would never reach the
+     paper. `display: block` also flattens the flex layout (the
+     on-screen one uses flex-direction: column with flex: 1 1 auto
+     to stretch the chart, which fights `height: auto`). */
+  #app, .main-area, main, #chart {
+    display: block !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #000 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    flex: none !important;
+  }
+  /* Score title: prominent, centered, plain black ink. */
+  .score-title {
+    color: #000 !important;
+    font-size: 16pt !important;
+    text-align: center !important;
+    margin: 0 0 12pt 0 !important;
+    padding: 0 !important;
+  }
+  /* Pack the page to a fixed layout: 4 bars per row × 9 rows per
+     page = 36 bars per page. The 4-bars-per-row part is enforced
+     by JS (beforeprint event temporarily sets measuresPerLine=4
+     and re-renders); this CSS handles the 9-rows-per-page part by
+     pinning each rendered SVG to a fixed height that 9 of fit
+     inside the available 9.7in (10in printable height − ~0.3in
+     for the score title at the top of the first page). */
+  .staff-row {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin: 0 0 2pt 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    text-align: center;
+  }
+  /* Each row's SVG is given a fixed HEIGHT and auto width so the
+     row's natural aspect ratio is preserved. With chord-scale band
+     visible (staffHeight=166) or hidden (138), the SVG centers
+     horizontally at whatever width the aspect ratio yields and
+     never exceeds the page's printable width. The 1in target
+     leaves enough vertical headroom that 9 rows + the 16pt title
+     reliably fit on a letter page. */
+  .staff-row svg {
+    height: 1in !important;
+    width: auto !important;
+    max-width: 100% !important;
+    display: inline-block !important;
+    margin: 0 auto !important;
+  }
+  /* Page setup. 0.5in margins all around fit a typical letter/A4
+     printer without wasting paper. */
+  @page {
+    margin: 0.5in;
+  }
 }

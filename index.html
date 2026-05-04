@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=83" />
+<link rel="stylesheet" href="style.css?v=89" />
 </head>
 <body>
 <div id="app">
@@ -65,8 +65,10 @@
         <span class="switch" aria-hidden="true"></span>
         <span class="top-edit-text">Edit Fingering</span>
       </label>
-      <button id="editKebabBtn" class="top-btn edit-kebab" type="button" aria-label="Fingering options" aria-haspopup="menu" aria-expanded="false" disabled hidden>⋮</button>
+      <button id="editKebabBtn" class="top-btn edit-kebab" type="button" aria-label="More options" aria-haspopup="menu" aria-expanded="false" hidden>⋮</button>
       <div id="editKebabMenu" class="edit-kebab-menu" role="menu" hidden>
+        <button id="printScoreBtn" type="button" role="menuitem">Print Worksheet</button>
+        <hr class="edit-kebab-sep" role="separator" />
         <button id="copyFingeringsBtn" type="button" role="menuitem">Copy Fingerings</button>
         <button id="pasteFingeringsBtn" type="button" role="menuitem" disabled>Paste Fingerings</button>
         <hr class="edit-kebab-sep" role="separator" />
@@ -78,9 +80,11 @@
         <div class="seg mode-seg" id="modeSeg" role="tablist">
           <button type="button" data-mode="head" class="active">Head</button>
           <button type="button" data-mode="exercise">Exercise</button>
+          <button type="button" data-mode="testme">Test Me</button>
         </div>
         <select id="exerciseSelect" class="exercise-select">
           <option value="scale" selected>Scale Notes</option>
+          <option value="scaleChromatic">Scale Chromatic</option>
           <option value="triads">Triads</option>
           <option value="chord">Chord Tones</option>
           <option value="broken3">Broken 3rds</option>
@@ -90,7 +94,10 @@
           <option value="longEnclosures">Long Enclosures</option>
           <option value="1235">1235</option>
           <option value="3579">3579</option>
+          <option value="blank">Blank Staff</option>
         </select>
+        <button id="takePhotoBtn" class="take-photo-btn" type="button" hidden>Take Photo</button>
+        <input type="file" id="photoFileInput" accept="image/*" capture="environment" hidden />
       </div>
       <div class="drum-row">
         <span class="drum-label">Tempo</span>
@@ -146,11 +153,24 @@
           <span class="switch" aria-hidden="true"></span>
           <span>Stay on</span>
         </label>
-        <label class="wake-label fingering-label">
-          <input type="checkbox" id="fingeringToggle" class="switch-input" />
-          <span class="switch" aria-hidden="true"></span>
-          <span>Overlay</span>
-        </label>
+        <button id="overlaysBtn" class="overlays-btn" type="button" aria-label="Overlays" aria-haspopup="menu" aria-expanded="false">
+          <span class="overlays-btn-text">Overlays</span>
+          <span class="overlays-btn-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div id="overlaysMenu" class="overlays-menu" role="menu" hidden>
+          <label class="overlays-item" role="menuitemcheckbox">
+            <input type="checkbox" id="overlayNotesToggle" />
+            <span>Notes</span>
+          </label>
+          <label class="overlays-item" role="menuitemcheckbox">
+            <input type="checkbox" id="overlayBeatsToggle" />
+            <span>Beats</span>
+          </label>
+          <label class="overlays-item" role="menuitemcheckbox">
+            <input type="checkbox" id="overlayChordScalesToggle" checked />
+            <span>Chord scales</span>
+          </label>
+        </div>
       </div>
     </div>
     <div id="instrumentsPanel" class="options-panel" hidden>
@@ -222,7 +242,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v2.32</span>
+      <span class="app-version" id="appVersion">v2.44</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -230,7 +250,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=352"></script>
+<script src="app.js?v=362"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

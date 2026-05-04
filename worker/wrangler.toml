@@ -1,0 +1,26 @@
+# Cloudflare Worker config for the Test Me vision proxy.
+#
+# After editing this file, deploy with:
+#   wrangler deploy
+#
+# The Anthropic API key lives as a Secret (not in this file).
+# Set it once with:
+#   wrangler secret put ANTHROPIC_API_KEY
+# and paste your sk-ant-... key when prompted. The secret is
+# encrypted in Cloudflare's environment and never appears in
+# this repository.
+
+name = "song-practice-vision"
+main = "index.js"
+
+# Set to today's date when first creating the project; controls
+# which features of the Workers runtime are enabled. Bumping the
+# date later opts into newer behaviors but isn't necessary for
+# this Worker.
+compatibility_date = "2024-09-01"
+
+# Optional: pin to a custom subdomain instead of the default
+# *.workers.dev. To use, uncomment and set the route.
+# routes = [
+#   { pattern = "vision.example.com", custom_domain = true }
+# ]

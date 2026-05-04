@@ -823,6 +823,414 @@ function generateQuarterNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// Scale Chromatic generator: a diatonic scale walk that fills only
+// the FIRST `beatsPerBar - 1` beats of each bar (3 in 4/4, 2 in
+// 3/4) — the last beat of each bar is reserved for a half-step
+// chromatic approach to the FIRST note of the NEXT bar. Treating
+// the last beat as "rest in the base pattern, replaced by a
+// chromatic" (rather than "scale step replaced by chromatic") is
+// what keeps the bar-to-bar continuity matching the spec — bar 2
+// starts on G after bar 1 ends on F (not on A, which is what a
+// 4-note walk would produce).
+//
+// Worked examples from the spec:
+//   Dm7  → G7   → CMaj7
+//   D E F F♯  | G A B D♭ | C D E F …
+//
+// Direction rule for the chromatic note:
+//   - line ascending (the bar's scale walk is going up)  →
+//     approach the next bar's first note FROM BELOW
+//     (chromatic-below = leading-tone-up).
+//   - line descending → approach FROM ABOVE
+//     (chromatic-above = leading-tone-down).
+//   - if the chosen direction's chromatic pitch class would be
+//     the SAME as the bar's last scale note (e.g. ascending
+//     toward C with the previous beat already on B — chromatic-
+//     below C is also B, a duplicate), flip to the opposite
+//     direction. That's exactly what bumps bar 2's chromatic in
+//     the example off "B" and onto "D♭".
+function generateScaleChromaticQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  // Number of scale notes per bar before the chromatic seat. 4/4 → 3,
+  // 3/4 → 2. Shorter meters fall back to a normal scale walk since
+  // there'd be nowhere to fit the chromatic.
+  const scaleNotes = beatsPerBar - 1;
+  if (scaleNotes < 1) return generateQuarterNotes(bars, ts);
+
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') {
+      return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    }
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  // Direction at the END of each bar's scale walk (after the last
+  // scale note is placed). Used by the pass-2 chromatic chooser.
+  const barEndDir = new Array(bars.length).fill(1);
+
+  // === Pass 1: scale walk into beats 0..scaleNotes-1 of each bar ===
+  // This mirrors generateQuarterNotes' walk verbatim except for two
+  // things: chord events that fall entirely on the chromatic-reserved
+  // beat (e.g. a chord starting on beat 3 of a 4/4 bar) are skipped so
+  // they don't perturb the walk, and the per-chord beat range is
+  // capped at `scaleNotes` so the chromatic seat stays empty for
+  // pass 2 to fill.
+  let direction = -1;
+  let tones = [];
+  let toneIdx = 0;
+  let lastPitch = -1;
+  let lastTpc = -1;
+  let lastSig = null;
+
+  chordEvents.forEach((ce, i) => {
+    const eff = effective[i];
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const cap = Math.min(endBeat, scaleNotes);
+    if (startBeat >= cap) return; // entirely inside the chromatic seat — skip.
+
+    const sig = eff.root.pitchClass + '|' + eff.root.tpc + '|' + eff.scale.map(x => x.s).join(',');
+    if (sig !== lastSig) {
+      tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+      lastSig = sig;
+      if (tones.length === 0) return;
+      if (lastPitch < 0) {
+        let sp = eff.root.pitchClass + 48;
+        while (sp < EX_LOW) sp += 12;
+        while (sp > EX_HIGH) sp -= 12;
+        toneIdx = findClosestIndex(tones, sp);
+      } else {
+        const cont = findSmoothContinuation(tones, lastPitch, lastTpc, direction);
+        toneIdx = cont.idx;
+        direction = cont.dir;
+      }
+    }
+    if (tones.length === 0) return;
+
+    for (let b = startBeat; b < cap; b++) {
+      let p = tones[toneIdx].pitch;
+      let t = tones[toneIdx].tpc;
+      if (p === lastPitch && tones.length > 1) {
+        let ti = toneIdx + direction;
+        if (ti < 0) { direction = 1; ti = toneIdx + 1; }
+        else if (ti >= tones.length) { direction = -1; ti = toneIdx - 1; }
+        if (ti >= 0 && ti < tones.length && tones[ti].pitch !== lastPitch) {
+          toneIdx = ti; p = tones[ti].pitch; t = tones[ti].tpc;
+        }
+      }
+      results[ce.barIdx][b] = { pitch: p, tpc: t };
+      // Keep barEndDir in sync with whatever direction is current at
+      // each beat write. The last write for a bar wins → this ends
+      // up as the direction at the bar's last scale note, which is
+      // what pass 2 wants when choosing chromatic above vs. below.
+      barEndDir[ce.barIdx] = direction;
+      lastPitch = p;
+      lastTpc = t;
+
+      let ni = toneIdx + direction;
+      if (ni < 0) { direction = 1; ni = toneIdx + 1; }
+      else if (ni >= tones.length) { direction = -1; ni = toneIdx - 1; }
+      if (ni < 0) ni = 0;
+      if (ni >= tones.length) ni = tones.length - 1;
+      toneIdx = ni;
+    }
+  });
+
+  // Spelling helpers — mirror the rules used in the Enclosures
+  // generators so accidentals read consistently across exercises.
+  function chromBelow(targetMidi, targetTpc) {
+    // half-step BELOW target, spelled as a leading-tone-up.
+    // TPC+5 for naturals & flats (B→A♯, F→E, E♭→D, etc.); TPC−7
+    // for sharps (C♯→C, F♯→F).
+    const altLevel = Math.floor((targetTpc - 6) / 7);
+    const tpc = altLevel >= 2 ? targetTpc - 7 : targetTpc + 5;
+    return { pitch: targetMidi - 1, tpc };
+  }
+  function chromAbove(targetMidi, targetTpc) {
+    // half-step ABOVE target, spelled as a leading-tone-down.
+    // TPC−5 for naturals & sharps (C→D♭, E→F, B→C, F♯→G); TPC+7
+    // for flats (E♭→E, B♭→B).
+    const altLevel = Math.floor((targetTpc - 6) / 7);
+    const tpc = altLevel <= 0 ? targetTpc + 7 : targetTpc - 5;
+    return { pitch: targetMidi + 1, tpc };
+  }
+
+  // === Pass 2: place a chromatic on beat `scaleNotes` of every
+  // bar except the last (no next bar to lead into → leave as rest). ===
+  for (let bi = 0; bi < bars.length - 1; bi++) {
+    const cur = results[bi];
+    const next = results[bi + 1];
+    if (!cur || !next) continue;
+    // Find the bar's last placed scale note (within the scale-walk
+    // beats only — ignore any future writes to the chromatic seat).
+    let lastBeat = -1;
+    for (let b = scaleNotes - 1; b >= 0; b--) {
+      if (cur[b]) { lastBeat = b; break; }
+    }
+    if (lastBeat < 0) continue;
+    // Find the next bar's first placed note. Will sit at beat 0 in
+    // typical scale-walk output, but a bar with a chord starting only
+    // on beat 2 (rare for our generators, but possible upstream) will
+    // have the first note further in.
+    let firstBeatNext = -1;
+    for (let b = 0; b < next.length; b++) {
+      if (next[b]) { firstBeatNext = b; break; }
+    }
+    if (firstBeatNext < 0) continue;
+    const target = next[firstBeatNext];
+    if (typeof target.pitch !== 'number' || typeof target.tpc !== 'number') continue;
+
+    const below = chromBelow(target.pitch, target.tpc);
+    const above = chromAbove(target.pitch, target.tpc);
+
+    // Direction-driven default: ascending → below; descending →
+    // above. If the default lands on the same pitch class the bar
+    // just played (last scale note), flip to the opposite. This is
+    // the "if already a half step in that direction, use the
+    // opposite" rule the spec describes.
+    const prev = cur[lastBeat];
+    const prevPc  = (((prev.pitch  % 12) + 12) % 12);
+    const belowPc = (((below.pitch % 12) + 12) % 12);
+    const abovePc = (((above.pitch % 12) + 12) % 12);
+    const dir = barEndDir[bi];
+    let chosen;
+    if (dir > 0) {
+      chosen = (belowPc === prevPc) ? above : below;
+    } else {
+      chosen = (abovePc === prevPc) ? below : above;
+    }
+    cur[scaleNotes] = { pitch: chosen.pitch, tpc: chosen.tpc };
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Blank Staff generator: emits NO notes — every bar gets an invisible
+// whole rest (or dotted-half rest in 3/4) which keeps the voice's tick
+// count valid for VexFlow but paints nothing. The result is a clean
+// staff with clef, key signature, time signature, bar lines, and the
+// chord symbols above each bar — perfect for printing as practice
+// manuscript paper or for hand-writing your own line over the changes.
+//
+// The "blank" flag is recognized by renderChart (search for `bp.blank`)
+// which builds the rest tickable with a transparent style. Beat
+// markers and the Notes overlay still respect their own dropdown
+// toggles, so a print-ready worksheet is just: pick Blank Staff,
+// turn the overlays off, and Print.
+function generateBlankExercise(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  // Pick a duration that exactly fills the bar so VexFlow doesn't
+  // complain about mismatched ticks. 4/4 → whole; 3/4 → dotted half;
+  // 2/4 → half; anything else falls back to whole and lets the
+  // formatter loosen up via setStrict(false).
+  const blankDur = beatsPerBar === 3 ? 'h.'
+                 : beatsPerBar === 2 ? 'h'
+                 : 'w';
+  const results = bars.map(() => {
+    const arr = new Array(beatsPerBar).fill(null);
+    arr[0] = { blank: true, duration: blankDur };
+    return arr;
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// ===== Test Me =====
+// Photograph a printed worksheet, send it (plus the chord
+// progression context) to a server-side vision proxy, and render
+// the AI's parsed notes onto the chart with red highlighting on
+// any pitch that doesn't fit the chord's scale.
+//
+// REQUIRES a server-side endpoint at TEST_ME_API_URL that holds
+// the vision-API key and proxies the call to Anthropic / OpenAI /
+// Gemini. The browser sends:
+//   POST {TEST_ME_API_URL}
+//   { title, chordProgression: [[chord, ...], ...], beatsPerBar, image: dataURL }
+// and expects:
+//   { bars: [ { barIdx, notes: [ { beat, pitch, duration }, ... ] }, ... ] }
+// where `pitch` is a string like "F3" / "Bb2" / "C#4" reading the
+// bass clef without 8vb compensation (the client subtracts 12 to
+// convert to sounding pitch).
+const TEST_ME_API_URL = 'https://song-practice-vision.ikaris.workers.dev';
+
+// Cached parsed-notes JSON from the most recent photo. null = no
+// photo yet → generateTestMeFromDetected falls back to Blank Staff
+// so the user sees an empty worksheet to compare against. Set by
+// the photo handler, read by the dispatch.
+let _testDetectedNotes = null;
+
+// Pitch-string parser for "F3" / "Bb2" / "C#4". Returns the
+// internal { pitch, tpc } shape — sounding MIDI on bass-clef-8vb,
+// and TPC for accurate accidental rendering. Returns null if the
+// string doesn't parse.
+const _TESTME_NATURAL_TPC = { F:13, C:14, G:15, D:16, A:17, E:18, B:19 };
+const _TESTME_PC_OF_LETTER = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
+function parsePitchString(str) {
+  const m = /^([A-G])([#♯b♭]?)(-?\d+)$/i.exec(String(str || '').trim());
+  if (!m) return null;
+  const letter = m[1].toUpperCase();
+  const accChar = m[2];
+  const octave = parseInt(m[3], 10);
+  let pc = _TESTME_PC_OF_LETTER[letter];
+  let tpc = _TESTME_NATURAL_TPC[letter];
+  if (accChar === '#' || accChar === '♯') { pc++; tpc += 7; }
+  else if (accChar === 'b' || accChar === '♭') { pc--; tpc -= 7; }
+  const writtenMidi = pc + (octave + 1) * 12;
+  // Bass clef is rendered 8vb in this app — what's "F3 on the
+  // staff" sounds as F2. The vision model reads the staff, so we
+  // convert written → sounding here so the rest of the pipeline
+  // (which expects sounding MIDI) just works.
+  return { pitch: writtenMidi - 12, tpc };
+}
+
+// Test Me generator: returns the cached detected notes mapped onto
+// the chart's per-beat slots, with bp.invalid set on any note whose
+// pitch class isn't in the chord's scale at that beat. When no
+// photo has been taken yet we fall back to Blank Staff so the user
+// has something to look at while they prepare to take the photo.
+function generateTestMeFromDetected(bars, ts) {
+  if (!_testDetectedNotes) return generateBlankExercise(bars, ts);
+
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  // Effective chord-scale at a given (barIdx, beatIdx). Used to
+  // validate each detected note against the harmony at its slot.
+  function effectiveAtBeat(barIdx, beatIdx) {
+    for (let i = 0; i < chordEvents.length; i++) {
+      const ce = chordEvents[i];
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return effective[i];
+    }
+    return null;
+  }
+  // True iff `midi`'s pitch class is one of the chord's scale
+  // tones. Returns true for unknown chords so we don't mark every
+  // note red on N.C. or unparseable chord symbols.
+  function fitsScale(midi, eff) {
+    if (!eff || !eff.scale) return true;
+    const noteCp = (((midi % 12) + 12) % 12);
+    const rootPc = eff.root.pitchClass;
+    for (let i = 0; i < eff.scale.length; i++) {
+      const tonePc = (((rootPc + eff.scale[i].s) % 12) + 12) % 12;
+      if (tonePc === noteCp) return true;
+    }
+    return false;
+  }
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  const detectedBars = (_testDetectedNotes && _testDetectedNotes.bars) || [];
+  detectedBars.forEach(d => {
+    const barIdx = d && typeof d.barIdx === 'number' ? d.barIdx : -1;
+    if (barIdx < 0 || barIdx >= bars.length) return;
+    const beats = (d && d.notes) || [];
+    beats.forEach(n => {
+      const beat = Math.floor(Number(n && n.beat) || 0);
+      if (beat < 0 || beat >= beatsPerBar) return;
+      if (results[barIdx][beat]) return; // first detected note wins on duplicates
+      const parsed = parsePitchString(n && n.pitch);
+      if (!parsed) return;
+      const eff = effectiveAtBeat(barIdx, beat);
+      const valid = fitsScale(parsed.pitch, eff);
+      results[barIdx][beat] = {
+        pitch: parsed.pitch,
+        tpc: parsed.tpc,
+        duration: (n && n.duration) || 'q',
+        invalid: !valid
+      };
+    });
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Take Photo button handler: click → file input → upload → render.
+// Wires the camera path end-to-end on the client; the only piece
+// the user has to deploy themselves is the TEST_ME_API_URL backend.
+(function bindTakePhoto() {
+  const btn = document.getElementById('takePhotoBtn');
+  const fileInput = document.getElementById('photoFileInput');
+  if (!btn || !fileInput) return;
+  btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    fileInput.value = ''; // reset so picking the same file twice still fires
+    if (!file) return;
+    if (!window.currentSong) return;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = 'Analyzing…';
+    try {
+      const dataUrl = await _readFileAsDataUrl(file);
+      const songBars = window.currentSong.bars || [];
+      // Strip down to just the chord text per bar — the vision model
+      // doesn't need iRealPro markers, repeats, etc. Slashes ("/")
+      // and N.C. are filtered out so the proxy gets a clean array.
+      const chordsPerBar = songBars.map(b =>
+        (b.chords || [])
+          .filter(c => !c.slash && !c.nc)
+          .map(c => chordText(c))
+      );
+      const ts = parseTimesig(window.currentSong.timesig);
+      const resp = await fetch(TEST_ME_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: (window.currentSong.song && window.currentSong.song.title) || '',
+          chordProgression: chordsPerBar,
+          beatsPerBar: ts.num,
+          image: dataUrl
+        })
+      });
+      if (!resp.ok) throw new Error('Server error: ' + resp.status);
+      const json = await resp.json();
+      _testDetectedNotes = json;
+      if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    } catch (err) {
+      console.error('Test Me photo analysis failed:', err);
+      // Surface a friendly message — the most common cause is the
+      // user not having deployed the proxy endpoint yet.
+      alert('Could not analyze the photo: ' + (err && err.message ? err.message : err));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  });
+})();
+
+// FileReader → Promise wrapper for the photo upload path. Returns
+// a base64 data URL ("data:image/jpeg;base64,...") which the vision
+// proxy can decode directly.
+function _readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload  = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
 // Cantus Firmus generator: one tone per chord, held for the chord's full
 // duration by repeating the same pitch on every beat. The melody descends
 // slowly — the next note is the lowest diatonic tone within a whole step
@@ -3439,6 +3847,8 @@ function updateScoreTitle(songArg) {
   let exLabel = '';
   if (exerciseMode === 'head') {
     exLabel = 'Head';
+  } else if (exerciseMode === 'testme') {
+    exLabel = 'Test Me';
   } else {
     const sel = document.getElementById('exerciseSelect');
     if (sel && sel.selectedIndex >= 0) {
@@ -3579,6 +3989,15 @@ function renderChart(song, barsIn, timesigStr) {
   //   - "enclosures"    → q (above) + q (below) + h (1/3/5 target) per bar
   //   - "longEnclosures"→ pair-of-bars enclosures: 4 diatonic quarters into
   //                       a regular q-q-h enclosure on the next bar
+  //   - "scaleChromatic"→ scale walk with each bar's last beat replaced
+  //                       by a half-step chromatic approach to the next
+  //                       bar's first note (e.g. D E F F♯ | G A B D♭).
+  //   - "blank"         → empty staff with chord symbols above; for
+  //                       hand-writing or printing as practice paper.
+  //   - "testme"        → renders the AI-detected handwritten notes
+  //                       from the most recent Take Photo upload, with
+  //                       chord-scale validation (red for non-fitting).
+  //                       Falls back to Blank Staff before any photo.
   const bars = expandBarsByRepeats(barsIn, songRepeats);
   const gen = exerciseMode === 'head' ? generateHeadFromScore
             : exerciseMode === 'chord' ? generate1357QuarterNotes
@@ -3588,6 +4007,9 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === 'range3579' ? generateRange3579HalfNotes
             : exerciseMode === 'enclosures' ? generateEnclosuresQuarterNotes
             : exerciseMode === 'longEnclosures' ? generateLongEnclosuresQuarterNotes
+            : exerciseMode === 'scaleChromatic' ? generateScaleChromaticQuarterNotes
+            : exerciseMode === 'blank' ? generateBlankExercise
+            : exerciseMode === 'testme' ? generateTestMeFromDetected
             : exerciseMode === '1235' ? generate1235EighthNotes
             : exerciseMode === '3579' ? generate3579EighthNotes
             : generateQuarterNotes;
@@ -3627,7 +4049,7 @@ function renderChart(song, barsIn, timesigStr) {
   // right.
   const eighthNoteExercise =
     exerciseMode === '1235' || exerciseMode === '3579' || exerciseMode === 'head';
-  const measureWidth = Math.round(chartSize * (eighthNoteExercise ? 1.6 : 1));
+  let measureWidth = Math.round(chartSize * (eighthNoteExercise ? 1.6 : 1));
   const leftPadding = 14;
   const rightPadding = 14;
   const firstMeasureClefWidth = 68; // bass clef + 8vb + time sig on line 1
@@ -3654,7 +4076,35 @@ function renderChart(song, barsIn, timesigStr) {
   // text. Each row is 6 px taller as a result.
   const patternTextY = 150;         // baseline of the scale label
   const patternLineY = patternTextY + 6; // underline just below descenders
-  const staffHeight  = patternLineY + 10;
+  // SVG height per row. When the Chord-scales overlay is OFF we drop
+  // the chord-scale band entirely — the staff bottom sits at y≈116,
+  // beat markers (if Beats overlay is on) reach y≈133, so 138 leaves
+  // a few pixels of bottom margin and saves ~28 px of vertical real
+  // estate per row compared to the chord-scales-ON layout (166).
+  const staffHeight  = overlayChordScalesOn ? patternLineY + 10 : 138;
+  // Bottom of the per-bar selection-highlight rect. Tracks staffHeight
+  // so the highlight wash always covers everything we render — when
+  // the chord-scale band is hidden, the highlight stops at the staff
+  // instead of including a now-empty band underneath.
+  const barHighlightBottom = overlayChordScalesOn ? patternLineY + 3 : staffHeight - 4;
+
+  // Print sizing: widen `measureWidth` so the row's natural aspect
+  // ratio (rowWidth/staffHeight, roughly the SVG's aspect ratio)
+  // matches an 8.5×11in page in landscape-of-the-row sense. The CSS
+  // print rules pin each row to a 1in HEIGHT — without this widen
+  // step the row stays at its on-screen aspect (~5–6 : 1) and ends
+  // up only ~5–6in wide on a 7.5in-printable page, leaving a fat
+  // empty band on each side. With aspect ≈ 7.4 the SVG renders a
+  // hair under full page width, so a slim margin keeps the staff
+  // ink from touching the page edge.
+  if (_printMode) {
+    const targetAspect = 7.4;
+    const targetRowWidth = staffHeight * targetAspect;
+    measureWidth = Math.max(
+      measureWidth,
+      Math.round((targetRowWidth - leftPadding - rightPadding) / mpl)
+    );
+  }
 
   const formSize = barsIn.length; // length of one pass of the form
   // Coda break-points: bar indices that should start a fresh row
@@ -3692,8 +4142,15 @@ function renderChart(song, barsIn, timesigStr) {
     // Only the first row shows the bass clef. Continuation rows omit it
     // entirely; the width that used to hold the clef is redistributed to
     // the row's measures as additional note space.
-    const clefExtra = isFirstRow ? firstMeasureClefWidth : 0;
-    const extraPerBar = isFirstRow ? 0 : Math.floor(clefOnlyExtra / mpl);
+    // In print mode, ALL bars across ALL rows get the same width.
+    // The clef + time sig on the first row's first bar still RENDER
+    // (VexFlow calls inside the bar-loop add them) — they just live
+    // inside that bar's shared width budget instead of pushing it
+    // wider. That gives a clean grid of identical-sized cells across
+    // the whole worksheet, which is what the user expects of a
+    // printed practice page.
+    const clefExtra   = (_printMode || !isFirstRow) ? 0 : firstMeasureClefWidth;
+    const extraPerBar = (_printMode || isFirstRow)  ? 0 : Math.floor(clefOnlyExtra / mpl);
     const barWidth = measureWidth + extraPerBar;
     // Always size the row as if it were a full MPL row so short rows (last
     // row, end-of-pass) keep the same per-bar width as full rows and the
@@ -3771,9 +4228,16 @@ function renderChart(song, barsIn, timesigStr) {
       const live = bar.chords.filter(c => !c.slash);
       return Math.max(1, live.length);
     }
-    const weights = rowBars.map((bar, i) =>
-      Math.max(barNoteWeight(rowStart + i), barChordCount(bar))
-    );
+    // Blank-Staff exercise: every bar is empty (one invisible whole
+    // rest) so chord-count and note-density weighting is the only
+    // thing left to differ — and as a worksheet the user wants the
+    // grid uniform regardless of whether one bar has a single chord
+    // and the next has three. Force flat weights so the proportional
+    // split below produces identical bar widths.
+    const weights = rowBars.map((bar, i) => {
+      if (exerciseMode === 'blank') return 1;
+      return Math.max(barNoteWeight(rowStart + i), barChordCount(bar));
+    });
     const sumWeight = weights.reduce((a, b) => a + b, 0) || 1;
     const totalContent = rowBars.length * barWidth;
     // Pass 1: pure proportional split.
@@ -4006,6 +4470,25 @@ function renderChart(song, barsIn, timesigStr) {
           // dropped, and the bar's tick total wouldn't match — which
           // VexFlow recovers from by drawing a row of fallback
           // eighth-rest glyphs.
+          // Blank Staff exercise: emit a rest tickable that VexFlow
+          // counts toward the bar's tick total but paints transparent
+          // so no glyph appears. The bar shows just the staff, key/
+          // time signatures, bar lines, and the chord symbols above —
+          // exactly what you want as a fill-in-the-blank worksheet.
+          if (bp.blank) {
+            let blankBase = dur;
+            let blankDots = 0;
+            while (blankBase.endsWith('.')) { blankDots++; blankBase = blankBase.slice(0, -1); }
+            const r = new VF.StaveNote({ clef: 'bass', keys: ['d/3'], duration: blankBase + 'r' });
+            if (blankDots > 0 && VF.Dot && VF.Dot.buildAndAttach) {
+              VF.Dot.buildAndAttach([r], { all: true });
+            }
+            r.setStyle({ fillStyle: 'transparent', strokeStyle: 'transparent' });
+            notes.push(r);
+            barNoteData.push(null);
+            b += consume;
+            continue;
+          }
           if (bp.rest) {
             let restBase = dur;
             let restDots = 0;
@@ -4074,6 +4557,14 @@ function renderChart(song, barsIn, timesigStr) {
           const n = new VF.StaveNote({ clef: 'bass', keys: [key], duration: noteDur, stem_direction: stemDir });
           if (dotCount > 0 && VF.Dot && VF.Dot.buildAndAttach) {
             VF.Dot.buildAndAttach([n], { all: true });
+          }
+          // Test Me mode flags notes whose pitch class isn't in the
+          // chord scale via `bp.invalid`. Color those notes red so
+          // the user can see at a glance which handwritten pitches
+          // don't fit. Other modes never set `invalid`, so the style
+          // stays at VexFlow's default black.
+          if (bp.invalid) {
+            n.setStyle({ fillStyle: '#cc0000', strokeStyle: '#cc0000' });
           }
 
           // Decide whether to show an accidental on this note.
@@ -4496,8 +4987,8 @@ function renderChart(song, barsIn, timesigStr) {
       // Beat markers under the staff — blue circles with white "1"/"2"
       // /etc. on each downbeat, smaller blue dots on each "and"
       // (off-beat eighth). Always painted; visibility is gated by
-      // `body.overlay-on` via CSS so the Overlay toggle just flips a
-      // class instead of triggering a full chart re-render.
+      // `body.overlay-beats-on` via CSS so the Beats overlay toggle
+      // just flips a class instead of triggering a full chart re-render.
       //
       // Markers anchor to the actual rendered StaveNote x at each
       // beat (or interpolate between flanking notes when a beat
@@ -4683,7 +5174,7 @@ function renderChart(song, barsIn, timesigStr) {
       // wash visibly covers both the staff and the key label under it.
       barElements[barIdx] = {
         rowEl, x, y: staffY, w: width,
-        h: patternLineY + 3 - (staffY - 4),
+        h: barHighlightBottom - (staffY - 4),
         noteStartX: stave.getNoteStartX(),
         noteEndX: stave.getNoteEndX(),
         noteEls: barNoteEls,
@@ -4761,10 +5252,13 @@ function renderChart(song, barsIn, timesigStr) {
 
     // Draw pattern overlays (bold key name + underline spanning the pattern).
     // For patterns that cross row boundaries, each row draws its own segment.
+    // Skipped entirely when the Chord-scales overlay is off — and because
+    // staffHeight was already shrunk above, the saved vertical space
+    // actually compresses each row visibly on screen.
     const rowSvg = rowEl.querySelector('svg');
     const rowFirstBar = rowStart;
     const rowLastBar = rowStart + rowBars.length - 1;
-    patterns.forEach(pat => {
+    if (overlayChordScalesOn) patterns.forEach(pat => {
       const firstCE = chordEvents[pat.firstIdx];
       const lastCE = chordEvents[pat.lastIdx];
       const patFirst = firstCE.barIdx;
@@ -4999,6 +5493,12 @@ function renderChart(song, barsIn, timesigStr) {
   if (loopIn != null && loopIn >= totalBars) loopIn = null;
   if (loopOut != null && loopOut >= totalBars) loopOut = null;
   redrawLoopBrackets();
+
+  // Re-paint the Notes overlay across the freshly-rendered bars.
+  // The overlay is global (every bar gets it when the toggle is on),
+  // and renderChart just destroyed every bar's SVG, so any prior
+  // overlay groups are gone with them. No-op when the toggle is off.
+  if (typeof renderAllNotesOverlays === 'function') renderAllNotesOverlays();
 }
 
 // ===== Chord-to-notes =====
@@ -5407,7 +5907,6 @@ function stopPlayback() {
   btn.classList.remove('playing');
   clearHighlight();
   clearNoteHighlight();
-  clearFingeringOverlay();
   updateLoopControls();
   updateChordNav();
 }
@@ -5471,37 +5970,56 @@ function clearHighlight() {
   document.querySelectorAll('svg .hi-overlay').forEach(el => el.remove());
 }
 
-// ===== Fingering overlay =====
-// State for the legacy "Overlay" toggle, which now ONLY paints the
-// note-letter inside each notehead. The old position-based fingering
-// system (1st/half/upper, with red/green/blue ring colours on the
-// Note Info panel) is gone — superseded by the user-authored Edit
-// Fingering data, which lives in songs/fingerings/<title>.json and
-// renders separately.
+// ===== Notes overlay =====
+// State for the "Notes" entry in the Overlays dropdown. When on,
+// every notehead in every bar gets the note letter painted inside
+// it (white text on filled noteheads, black text on a small white
+// disc for hollow whole/half notes). Independent of the "Beats"
+// overlay, which only flips a body class to reveal the beat-marker
+// circles renderChart already painted.
+//
+// The old position-based fingering system (1st/half/upper rings on
+// the Note Info panel) was removed long ago; the user-authored Edit
+// Fingering data is what replaces it. The function name and class
+// `fingering-overlay` are kept here because removing them would be a
+// large rename touching renderer hooks; conceptually this is now
+// just the "note letter overlay".
 
-let fingeringOn = false;
-let fingeringOverlayEl = null;
-let fingeringOverlayBarIdx = -1;
+let overlayNotesOn = false;
+let overlayBeatsOn = false;
+// Chord-scale lines (the bold key-name + colored underline showing
+// which span of bars belongs to which key). On by default — they're
+// the most useful sight-reading aid the chart offers. When off, the
+// renderer skips the underline pass entirely AND shrinks the SVG
+// height so the saved space actually compresses the score on screen
+// (instead of leaving an empty band under each row). Default reflects
+// the matching `checked` attribute on #overlayChordScalesToggle.
+let overlayChordScalesOn = true;
 
-function clearFingeringOverlay() {
-  if (fingeringOverlayEl && fingeringOverlayEl.parentNode) {
-    fingeringOverlayEl.parentNode.removeChild(fingeringOverlayEl);
-  }
-  fingeringOverlayEl = null;
-  fingeringOverlayBarIdx = -1;
+// Remove every per-bar note-letter overlay group from the chart.
+// We use a class selector so we don't have to track each painted
+// group individually — there's one per rendered bar SVG.
+function clearNotesOverlay() {
+  document.querySelectorAll('.fingering-overlay').forEach(n => {
+    if (n.parentNode) n.parentNode.removeChild(n);
+  });
 }
 
-// Paint upper / half fingering labels above each note in the given
-// bar. Labels stack — upper 1st on top, half below. For notes that
-// sit on or below the top staff line (top line = written A3 = MIDI
-// 57, here info.y + 40 in viewBox units), labels use a fixed Y just
-// above the staff. For higher notes using ledger lines, the labels
-// are pushed further up so they clear the note head + ledger lines.
-function updateFingeringOverlay(barIdx) {
-  if (!fingeringOn) { clearFingeringOverlay(); return; }
-  if (barIdx == null || barIdx < 0) { clearFingeringOverlay(); return; }
-  if (barIdx === fingeringOverlayBarIdx && fingeringOverlayEl) return;
-  clearFingeringOverlay();
+// Paint note-letter labels inside every notehead of every bar.
+// Called when the Notes overlay is toggled on, and again after every
+// chart re-render (the SVGs are recreated, taking the overlays with
+// them). Cheap enough to recompute in full — typical songs have a
+// few dozen bars and a few hundred notes total.
+function renderAllNotesOverlays() {
+  clearNotesOverlay();
+  if (!overlayNotesOn) return;
+  for (let bi = 0; bi < barElements.length; bi++) {
+    if (barElements[bi]) paintNotesOverlayForBar(bi);
+  }
+}
+
+function paintNotesOverlayForBar(barIdx) {
+  if (barIdx == null || barIdx < 0) return;
   const info = barElements[barIdx];
   if (!info || !info.noteEls || !info.noteData) return;
   const svg = info.rowEl.querySelector('svg');
@@ -5607,8 +6125,6 @@ function updateFingeringOverlay(barIdx) {
     }
   }
 
-  fingeringOverlayEl = g;
-  fingeringOverlayBarIdx = barIdx;
 }
 
 function appendFingeringLabel(parent, x, y, txt, color, opts) {
@@ -5649,33 +6165,75 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
   }
 }
 
-// Bind the Upper / Half Fingering switch and kick off an initial
-// overlay paint on the selected / playing bar when turned on.
-(function bindFingeringSwitch() {
-  const sw = document.getElementById('fingeringToggle');
-  if (!sw) return;
-  // Sync the body class on first bind too, so a checked-on-load
-  // toggle reveals the beat-marker SVG elements that renderChart
-  // already painted but left hidden via CSS.
-  document.body.classList.toggle('overlay-on', !!sw.checked);
-  sw.addEventListener('change', (e) => {
-    fingeringOn = e.target.checked;
-    // Beat markers (the blue 1/2/3/4 circles + offbeat dots under
-    // each bar) live in the SVG with class .beat-marker and are
-    // hidden by default — flipping `body.overlay-on` reveals them
-    // without a chart re-render.
-    document.body.classList.toggle('overlay-on', fingeringOn);
-    if (!fingeringOn) {
-      clearFingeringOverlay();
-      return;
-    }
-    // Decide which bar to label: the currently playing bar if we're
-    // playing, otherwise the user's selected bar.
-    const target = (playState === 'playing' && currentPlayingBar != null)
-      ? currentPlayingBar
-      : selectedBar;
-    if (target != null) updateFingeringOverlay(target);
+// Bind the Overlays dropdown — a top-toolbar button that opens a
+// fixed-position checkbox menu. Each entry toggles one overlay:
+//   - "Notes": paint the note letter inside every notehead in
+//     every bar, all the time (delegated to renderAllNotesOverlays).
+//   - "Beats": flip body.overlay-beats-on to reveal the beat-marker
+//     SVG elements renderChart already painted under each bar.
+// Both default off; clicking entries doesn't close the menu so the
+// user can flip several on/off in one trip. The menu closes on a
+// click outside (or Escape) — see the document-level handlers below.
+(function bindOverlaysMenu() {
+  const btn   = document.getElementById('overlaysBtn');
+  const menu  = document.getElementById('overlaysMenu');
+  const notes = document.getElementById('overlayNotesToggle');
+  const beats = document.getElementById('overlayBeatsToggle');
+  if (!btn || !menu) return;
+
+  function openMenu() {
+    const r = btn.getBoundingClientRect();
+    menu.hidden = false;
+    menu.style.top = (r.bottom + 4) + 'px';
+    // Right-align the menu's right edge with the button's right
+    // edge so it doesn't poke off the side of the screen on phones.
+    menu.style.right = (window.innerWidth - r.right) + 'px';
+    menu.style.left  = 'auto';
+    btn.setAttribute('aria-expanded', 'true');
+  }
+  function closeMenu() {
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+  }
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) openMenu();
+    else             closeMenu();
   });
+  document.addEventListener('click', (e) => {
+    if (menu.hidden) return;
+    if (menu.contains(e.target) || btn.contains(e.target)) return;
+    closeMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !menu.hidden) closeMenu();
+  });
+
+  if (notes) {
+    notes.addEventListener('change', (e) => {
+      overlayNotesOn = !!e.target.checked;
+      renderAllNotesOverlays();
+    });
+  }
+  if (beats) {
+    beats.addEventListener('change', (e) => {
+      overlayBeatsOn = !!e.target.checked;
+      document.body.classList.toggle('overlay-beats-on', overlayBeatsOn);
+    });
+  }
+  // Chord scales: full chart re-render when toggled. Unlike Notes
+  // (SVG group append/remove) and Beats (CSS class toggle on already-
+  // painted markers), the chord-scale band changes the SVG's viewBox
+  // height — every row needs to be redrawn at the new size so the
+  // saved space actually shrinks the score on screen.
+  const chordScales = document.getElementById('overlayChordScalesToggle');
+  if (chordScales) {
+    chordScales.addEventListener('change', (e) => {
+      overlayChordScalesOn = !!e.target.checked;
+      if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    });
+  }
 })();
 
 // Piano embellishment (extra randomized stabs). Defaults to on; when
@@ -6002,8 +6560,6 @@ function extendBarSelection(idx) {
   }
   selectedBarRangeEnd = idx;
   clearHighlight();
-  // Re-attach the per-bar fingering overlay to the anchor bar.
-  updateFingeringOverlay(selectedBar);
   const a = Math.min(selectedBar, idx);
   const b = Math.max(selectedBar, idx);
   for (let bi = a; bi <= b; bi++) paintBarSelectionRect(bi);
@@ -6017,9 +6573,6 @@ function extendBarSelection(idx) {
 
 function highlightBar(idx) {
   clearHighlight();
-  // Refresh the Upper/Half fingering overlay so it follows the
-  // current bar (or user-selected bar when paused/stopped).
-  updateFingeringOverlay(idx);
   paintBarSelectionRect(idx);
   // Use the current barElements[idx] for downstream scroll math.
   const info = barElements[idx];
@@ -7151,6 +7704,10 @@ function loadFromURL(url) {
     // regardless of whether a head was found.
     headLoaded: false
   };
+  // Clear any Test Me detected notes from the previous song so the
+  // new song starts from a blank-staff baseline if the user
+  // switches to Test Me without taking a fresh photo.
+  if (typeof _testDetectedNotes !== 'undefined') _testDetectedNotes = null;
   // Edit Mode toggle is gated on (Head mode + head loaded). At
   // this exact moment headLoaded is false, so this disables the
   // toggle for the brief window between "song picked" and "head
@@ -7562,13 +8119,14 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   if (!sel) return;
   sel.addEventListener('change', async () => {
     const ex = sel.value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === '1235' || ex === '3579')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'blank' || ex === '1235' || ex === '3579')
       ? ex : 'scale';
     // Auto-flip the mode seg to "Exercise" — picking from the
     // dropdown is an implicit "I want an exercise" gesture.
     document.querySelectorAll('#modeSeg button').forEach(b => {
       b.classList.toggle('active', b.dataset.mode === 'exercise');
     });
+    if (typeof _updateModeUIVisibility === 'function') _updateModeUIVisibility();
     updateScoreTitle();
     rerenderCurrent();
     // Re-evaluate Play button state — switching to/from Head with a
@@ -7584,10 +8142,28 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   });
 })();
 
+// Show/hide the Exercise dropdown and the Take-Photo button based
+// on the current mode:
+//   - Head     → both hidden (no exercise to pick, no photo flow).
+//   - Exercise → dropdown visible, photo button hidden.
+//   - Test Me  → dropdown hidden, photo button visible — the
+//                button is the only knob in this mode.
+// Called from the mode-seg click handler below and once on page
+// load so the initial "Head" state hides both controls.
+function _updateModeUIVisibility() {
+  const sel      = document.getElementById('exerciseSelect');
+  const photoBtn = document.getElementById('takePhotoBtn');
+  const isExercise = (exerciseMode !== 'head' && exerciseMode !== 'testme');
+  if (sel)      sel.hidden      = !isExercise;
+  if (photoBtn) photoBtn.hidden = (exerciseMode !== 'testme');
+}
+
 // Mode segmented button: switches between Head (play the song's
-// melody as parsed from MusicXML / MIDI) and Exercise (one of the
-// generators picked in the dropdown to the right). On "Exercise" we
-// restore exerciseMode from the dropdown's current value so toggling
+// melody as parsed from MusicXML / MIDI), Exercise (one of the
+// generators picked in the dropdown to the right), and Test Me
+// (photograph a worksheet, AI reads the handwritten notes,
+// non-fitting notes are rendered red). On "Exercise" we restore
+// exerciseMode from the dropdown's current value so toggling
 // Head off returns to the user's last-picked exercise.
 (function bindModeSeg() {
   const seg = document.getElementById('modeSeg');
@@ -7599,12 +8175,15 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
       const mode = btn.dataset.mode;
       if (mode === 'head') {
         exerciseMode = 'head';
+      } else if (mode === 'testme') {
+        exerciseMode = 'testme';
       } else {
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === '1235' || ex === '3579')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'blank' || ex === '1235' || ex === '3579')
           ? ex : 'scale';
       }
+      _updateModeUIVisibility();
       updateScoreTitle();
       rerenderCurrent();
       // Switching INTO Head on a song without one disables Play;
@@ -7619,6 +8198,11 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
       }
     });
   });
+  // Page-load sync: the default exerciseMode is 'head', which means
+  // BOTH the Exercise dropdown and the Take-Photo button should
+  // start hidden. Without this call the dropdown stays visible
+  // until the user clicks a mode button.
+  _updateModeUIVisibility();
 })();
 
 document.querySelectorAll('#drumSeg button').forEach(b => {
@@ -8824,27 +9408,35 @@ function emUpdateAvailability() {
 let emClipboard = null; // null OR { entries: [{ fingering, position }, ...] }
 
 // Update kebab visibility + enabled state. Mirrors the rules for
-// the Edit Mode switch:
-//   - hidden entirely on non-editor devices
-//   - shown but disabled when Edit Mode is off (the kebab itself,
-//     so the menu can't open and copy/paste can't fire)
-//   - enabled when Edit Mode is on; Paste sub-item disabled when
-//     the clipboard is empty.
+// the Edit Mode switch and the user's device:
+//   - hidden entirely on mobile (none of the menu items work there —
+//     Print needs a desktop print dialog and the fingering tools need
+//     File System Access API).
+//   - on any desktop browser (Mac/Linux/Windows) the kebab is always
+//     SHOWN and always ENABLED. Print Worksheet is always live; the
+//     fingering items disable individually when Edit Mode is off
+//     (or when the device can't host the editor — e.g. Mac/Linux).
+//   - Paste also disables when the clipboard is empty even within
+//     an active Edit Mode.
 function emUpdateKebabState() {
   const btn = document.getElementById('editKebabBtn');
   const menu = document.getElementById('editKebabMenu');
   if (!btn) return;
-  if (!emIsEditorDevice()) {
+  if (emIsMobile()) {
     btn.hidden = true;
     if (menu) menu.hidden = true;
     return;
   }
   btn.hidden = false;
-  btn.disabled = !emEnabled;
-  // Closing the menu when Edit Mode flips off keeps the UI tidy.
-  if (!emEnabled && menu) menu.hidden = true;
-  const paste = document.getElementById('pasteFingeringsBtn');
-  if (paste) paste.disabled = !(emClipboard && emClipboard.entries && emClipboard.entries.length > 0);
+  btn.disabled = false;
+  const fingeringEnabled = emEnabled && emIsEditorDevice();
+  const copy   = document.getElementById('copyFingeringsBtn');
+  const paste  = document.getElementById('pasteFingeringsBtn');
+  const delAll = document.getElementById('deleteAllFingeringsBtn');
+  if (copy)   copy.disabled   = !fingeringEnabled;
+  if (paste)  paste.disabled  = !fingeringEnabled
+    || !(emClipboard && emClipboard.entries && emClipboard.entries.length > 0);
+  if (delAll) delAll.disabled = !fingeringEnabled;
 }
 
 function emOpenKebabMenu() {
@@ -8974,17 +9566,31 @@ function emPasteFingerings() {
   const btn = document.getElementById('editKebabBtn');
   const menu = document.getElementById('editKebabMenu');
   if (!btn || !menu) return;
-  if (!emIsEditorDevice()) return; // stays hidden via emUpdateKebabState
+  // The kebab is now visible on every desktop browser (Print is the
+  // common item; the fingering tools live behind their own
+  // emEnabled+emIsEditorDevice gates). Bail out only on mobile,
+  // where Print and the editor would both be useless.
+  if (emIsMobile()) return;
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (btn.disabled) return;
     if (menu.hidden) emOpenKebabMenu();
     else             emCloseKebabMenu();
   });
+  // Print Worksheet → fires the system print dialog. Used to save
+  // a PDF or print to paper. The active @media print stylesheet
+  // strips the toolbar/footer/panels and leaves just the score.
+  const printBtn = document.getElementById('printScoreBtn');
+  if (printBtn) {
+    printBtn.addEventListener('click', () => {
+      emCloseKebabMenu();
+      window.print();
+    });
+  }
   const copyBtn  = document.getElementById('copyFingeringsBtn');
   const pasteBtn = document.getElementById('pasteFingeringsBtn');
   if (copyBtn) {
     copyBtn.addEventListener('click', () => {
+      if (copyBtn.disabled) return;
       emCopyFingerings();
       emCloseKebabMenu();
     });
@@ -8999,6 +9605,7 @@ function emPasteFingerings() {
   const deleteAllBtn = document.getElementById('deleteAllFingeringsBtn');
   if (deleteAllBtn) {
     deleteAllBtn.addEventListener('click', () => {
+      if (deleteAllBtn.disabled) return;
       emDeleteAllFingerings();
       emCloseKebabMenu();
     });
@@ -9014,6 +9621,44 @@ function emPasteFingerings() {
     if (e.key === 'Escape' && !menu.hidden) emCloseKebabMenu();
   });
   emUpdateKebabState();
+})();
+
+// Print sizing: temporarily force a 4-bars-per-row layout while
+// printing so the worksheet packs 9 rows × 4 bars = 36 bars per
+// page regardless of what the user has Bars/Line set to on screen.
+// The matching @media print CSS pins each row to ~1in tall, so a
+// standard letter page (10in printable height after 0.5in margins,
+// minus the score title) reliably fits 9 rows.
+//
+// _printMode is also read by renderChart itself to (a) widen each
+// bar so the row's natural aspect ratio fills the page width
+// instead of leaving big side margins, and (b) split the row into
+// equal-width bars (overriding the note-density weighting that
+// makes some bars wider than others on screen).
+//
+// Hooks into the browser-level beforeprint/afterprint events so it
+// works equivalently for menu-clicked Print Worksheet, Ctrl/Cmd+P,
+// right-click Print, and Save-as-PDF — the sizing is a property of
+// "the page is being printed" not of any one entry point.
+let _printMode = false;
+(function bindPrintLayout() {
+  let savedMpl = null;
+  window.addEventListener('beforeprint', () => {
+    if (!window.currentSong) return;
+    if (typeof measuresPerLine === 'undefined') return;
+    savedMpl = measuresPerLine;
+    measuresPerLine = 4;
+    _printMode = true;
+    if (typeof rerenderCurrent === 'function') rerenderCurrent();
+  });
+  window.addEventListener('afterprint', () => {
+    _printMode = false;
+    if (savedMpl != null) {
+      measuresPerLine = savedMpl;
+      savedMpl = null;
+    }
+    if (typeof rerenderCurrent === 'function') rerenderCurrent();
+  });
 })();
 
 // Re-render overlays after every chart re-render. renderChart wipes
