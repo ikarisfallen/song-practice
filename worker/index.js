@@ -28,12 +28,8 @@
 // with no Access-Control-Allow-Origin header (the browser then
 // blocks the response).
 const ALLOWED_ORIGINS = [
-  // Both plausible GitHub-Pages origins for this repo. Whichever
-  // one your site actually serves from will be the one the browser
-  // sends as the Origin header. The unused entry is harmless — it
-  // just sits in the array.
-  'https://ikari.github.io',
-  'https://ikaris.github.io',
+  // Production: the GitHub Pages site that serves the PWA.
+  'https://ikarisfallen.github.io',
   // Localhost ports for development.
   'http://localhost:8000',
   'http://127.0.0.1:8000',
