@@ -3664,7 +3664,15 @@ function updateFingerboard(state) {
 }
 
 // ===== Render (sheet music via VexFlow) =====
-let measuresPerLine = 2;
+// Default Bars/Line: 4 on desktop (4-bar phrases read like a typical
+// lead sheet), 2 on mobile (narrower screens benefit from fewer bars
+// per row so each one reads at a comfortable size). The mobile/
+// desktop split is a one-time decision at page load — the segmented
+// button still lets the user override afterwards.
+let measuresPerLine = (function () {
+  try { return (typeof emIsMobile === 'function' && emIsMobile()) ? 2 : 4; }
+  catch (e) { return 4; }
+})();
 // Per-measure viewBox width in VexFlow units. The "Size" segmented
 // control sets this. A SMALLER value squeezes each measure's notes
 // into fewer viewBox units; since the SVG still stretches to fill
@@ -3673,7 +3681,9 @@ let measuresPerLine = 2;
 // corresponds to a smaller measureWidth, giving a big-notes look at
 // any Per line count. Tight internal spacing is fine for sparse
 // exercises like Cantus Firmus.
-let chartSize = 180;
+// Default is M (120) — middle of the road; users who want smaller
+// or larger notes flip the segs.
+let chartSize = 120;
 let songRepeats = 1;
 let exerciseMode = 'head'; // 'head' = play the song's melody from the head file;
                             // 'scale' = walk the scale, 'chord' = 1-3-5-7 arpeggio,
@@ -3968,19 +3978,21 @@ function renderChart(song, barsIn, timesigStr) {
     : 0;
   const chordNotesY2 = chordNotesY1 + CHORD_NOTES_LINE_HEIGHT;
   // SVG height per row. Four cases driven by the two overlays:
-  //   neither       → 138 (compact, just the staff)
+  //   neither       → 148 (compact: staff + room for triplet brackets)
   //   only scales   → 166 (current chord-scale band)
   //   only notes    → reach the bottom of chord-notes line 2 + 5
   //   both          → reach the bottom of chord-notes line 2 + 5
-  // Beat markers (when Beats overlay is on) reach y≈133, so 138 is
-  // the floor in every case.
+  // Beat markers (when Beats overlay is on) reach y≈133, and triplet
+  // brackets drawn at LOCATION_BOTTOM extend to ~y=144, so the
+  // chord-scales-off floor is 148 — anything tighter clipped the
+  // bottom of the "3" bracket on bars with quarter triplets.
   let staffHeight;
   if (overlayChordNotesOn) {
     staffHeight = chordNotesY2 + 5;
   } else if (overlayChordScalesOn) {
     staffHeight = patternLineY + 10; // 166
   } else {
-    staffHeight = 138;
+    staffHeight = 148;
   }
   // Bottom of the per-bar selection-highlight rect. Tracks the
   // bottom of whichever band is active (chord notes if on, chord
@@ -3991,16 +4003,17 @@ function renderChart(song, barsIn, timesigStr) {
     : (overlayChordScalesOn ? patternLineY + 3 : staffHeight - 4);
 
   // Print sizing: widen `measureWidth` so the row's natural aspect
-  // ratio (rowWidth/staffHeight, roughly the SVG's aspect ratio)
-  // matches an 8.5×11in page in landscape-of-the-row sense. The CSS
-  // print rules pin each row to a 1in HEIGHT — without this widen
-  // step the row stays at its on-screen aspect (~5–6 : 1) and ends
-  // up only ~5–6in wide on a 7.5in-printable page, leaving a fat
-  // empty band on each side. With aspect ≈ 7.4 the SVG renders a
-  // hair under full page width, so a slim margin keeps the staff
-  // ink from touching the page edge.
+  // ratio (rowWidth/staffHeight) matches whatever the user's S/M/L
+  // selection chose for this print run. _printTargetAspect comes
+  // from the beforeprint handler and is one of three values:
+  //   S → 9.5 (short rows, smaller notes, wider bars)
+  //   M → 7.4 (default)
+  //   L → 5.5 (tall rows, bigger notes, denser bars)
+  // The CSS pins each row to width:100%; height auto-derives from
+  // the aspect, so a smaller targetAspect makes paper rows taller
+  // and the fixed-size notehead glyph paints proportionally bigger.
   if (_printMode) {
-    const targetAspect = 7.4;
+    const targetAspect = _printTargetAspect;
     const targetRowWidth = staffHeight * targetAspect;
     measureWidth = Math.max(
       measureWidth,
@@ -7987,6 +8000,16 @@ document.querySelectorAll('#mplSeg button').forEach(b => {
     rerenderCurrent();
   });
 });
+// On mobile devices, the IIFE that initialized `measuresPerLine`
+// picked 2 (instead of the desktop default of 4). Sync the seg's
+// active class to match — without this, the on-screen state is
+// inconsistent ("4" highlighted even though we're rendering 2).
+(function syncMplSegToMobileDefault() {
+  const want = String(measuresPerLine);
+  document.querySelectorAll('#mplSeg button').forEach(b => {
+    b.classList.toggle('active', b.dataset.mpl === want);
+  });
+})();
 
 document.querySelectorAll('#sizeSeg button').forEach(b => {
   b.addEventListener('click', () => {
@@ -8978,7 +9001,12 @@ function emRenderFingerings() {
     //   - High notes (geom.y < 82) → baseline = geom.y - 14.
     //   - Very high notes (geom.y ≤ 70) → floor at baseline=56 so
     //     the text top (≈47) doesn't crash into the position line.
-    const FINGER_BASELINE_FLOOR   = 56;
+    // Fingering baseline runs in a band ABOVE the staff. Floor
+    // bumped from 56 → 58 so the now-larger font-15 glyph (cap
+    // height ~11) doesn't crash into the position line at y=45 —
+    // text top sits at y≈47 in the default case, leaving the
+    // standard 2 px gap.
+    const FINGER_BASELINE_FLOOR   = 58;
     const FINGER_BASELINE_CEILING = EM_TOP_LINE_Y - 8; // 68
     // Compute the baseline as if the row were at the default
     // staff position, then apply the row's annotation shift so
@@ -8995,12 +9023,11 @@ function emRenderFingerings() {
     t.setAttribute('text-anchor', 'middle');
     t.setAttribute('font-family', 'serif');
     t.setAttribute('font-weight', 'bold');
-    // 12 instead of 14 — tightens the text height to ~9 px so the
-    // adaptive layout above can squeeze a fingering between the
-    // position line at y=45 and a ledger-line notehead at y=60..70
-    // without overlapping either. The slight readability cost is
-    // worth the clean visual stack.
-    t.setAttribute('font-size', '12');
+    // 15 to match the chord-symbol size — bigger fingering reads
+    // much better when sight-reading at distance. The position
+    // line's adaptive raise logic uses FINGER_FONT_HEIGHT below
+    // to predict where this text's top will land.
+    t.setAttribute('font-size', '15');
     t.setAttribute('fill', fillColor);
     t.setAttribute('stroke', 'none');
     t.textContent = value;
@@ -9046,11 +9073,11 @@ function emRenderPositions() {
   if (typeof exerciseMode !== 'undefined' && exerciseMode !== 'head') return;
   // Vertical stack above the staff:
   //   chord row    y ≈ 19..30 (baseline 30, font 15)
-  //   position     label y ≈ 31..39 (baseline 39, font 10),
-  //                line y = 43 default, OR raised to clear a high
+  //   position     label y ≈ 31..41 (baseline 41, font 12),
+  //                line y = 45 default, OR raised to clear a high
   //                fingering in the group (down to y=43 minimum
   //                where the label still clears chord-bottom).
-  //   fingering    y ≈ 47..58 (baseline 56-68, font 12) — adapts
+  //   fingering    y ≈ 47..58 (baseline 58-68, font 15) — adapts
   //                to per-note y, see emRenderFingerings.
   //   top staff    y = 76
   // The line raises by 2 px (45→43) when fingering text in the
@@ -9062,14 +9089,16 @@ function emRenderPositions() {
   const POS_LINE_DEFAULT_Y = 45;
   const POS_LINE_RAISED_Y  = 43; // when fingering forces line up
   const POS_LABEL_GAP      = 4;  // line-to-label-baseline gap
-  const POS_FONT_SIZE      = 10;
-  const POS_TEXT_HEIGHT    = 11; // approx font-size * 0.8
+  // Position label font bumped from 10 → 12 to keep proportional
+  // pace with the bigger fingering size below (12 → 15).
+  const POS_FONT_SIZE      = 12;
+  const POS_TEXT_HEIGHT    = 13; // approx font-size * 0.8 + 1 for ascent
 
   // Mirror emRenderFingerings's clamps so we can predict where
   // the fingering will land for each note in this group.
-  const FINGER_BASELINE_FLOOR   = 56;
+  const FINGER_BASELINE_FLOOR   = 58;
   const FINGER_BASELINE_CEILING = EM_TOP_LINE_Y - 8; // 68
-  const FINGER_FONT_HEIGHT      = 9;                 // font 12 → ~9 px tall
+  const FINGER_FONT_HEIGHT      = 11;                // font 15 → ~11 px cap height
   const LINE_FINGER_GAP         = 4;                 // min gap line→fingering top
 
   // Drawing color follows the same edit-mode convention as the
@@ -9588,33 +9617,67 @@ function emPasteFingerings() {
   emUpdateKebabState();
 })();
 
-// Print sizing: temporarily force a 4-bars-per-row layout while
-// printing so the worksheet packs 9 rows × 4 bars = 36 bars per
-// page regardless of what the user has Bars/Line set to on screen.
-// The matching @media print CSS pins each row to ~1in tall, so a
-// standard letter page (10in printable height after 0.5in margins,
-// minus the score title) reliably fits 9 rows.
+// Print sizing: bars-per-row is fixed by the song's time signature
+// (4 for 4/4, 3 for 3/4), and the user's S/M/L selection controls
+// only the VERTICAL ZOOM by varying the print target aspect ratio:
+//                  aspect    row height   notehead size
+//   S (180)        9.5        0.79in       0.048in
+//   M (120)        7.4        1.01in       0.061in
+//   L (80)         5.5        1.36in       0.082in
+// Lower aspect → taller row → bigger notes (notehead glyph is a
+// fixed viewBox size, so when the SVG renders at 7.5in width the
+// glyph paints proportionally bigger when the viewBox is shorter).
+// Per-bar paper width stays constant within a meter — 1.875in for
+// 4/4, 2.5in for 3/4 — so inter-note spacing is the same across
+// S/M/L; only the staff and noteheads scale up or down.
+//
+// To preview on screen before printing, toggle S/M/L in the
+// Options panel — the screen rendering uses chartSize directly,
+// so smaller chartSize (L) zooms the score up. The screen aspect
+// won't precisely match the print aspect, but the relative sizing
+// (L bigger than M than S) is the same either way.
 //
 // _printMode is also read by renderChart itself to (a) widen each
 // bar so the row's natural aspect ratio fills the page width
 // instead of leaving big side margins, and (b) split the row into
 // equal-width bars (overriding the note-density weighting that
 // makes some bars wider than others on screen).
-//
-// Hooks into the browser-level beforeprint/afterprint events so it
-// works equivalently for menu-clicked Print Worksheet, Ctrl/Cmd+P,
-// right-click Print, and Save-as-PDF — the sizing is a property of
-// "the page is being printed" not of any one entry point.
 let _printMode = false;
+let _printTargetAspect = 7.4;
 (function bindPrintLayout() {
   let savedMpl = null;
   window.addEventListener('beforeprint', () => {
     if (!window.currentSong) return;
     if (typeof measuresPerLine === 'undefined') return;
     savedMpl = measuresPerLine;
-    measuresPerLine = 4;
+    // mpl is dictated by the song's time signature: 3 for 3/4,
+    // 4 for everything else (4/4 is the dominant case; uncommon
+    // meters like 5/4 fall back to 4 — the layout still works,
+    // just with one bar on its own at the end of a row).
+    const ts = parseTimesig(window.currentSong.timesig);
+    measuresPerLine = (ts && ts.num === 3) ? 3 : 4;
+    // chartSize → aspect. Thresholds at 150 / 100 catch the
+    // existing chartSize values (180 / 120 / 80) cleanly.
+    const cs = (typeof chartSize !== 'undefined') ? chartSize : 120;
+    if (cs >= 150) {            // S — short row, small notes
+      _printTargetAspect = 9.5;
+    } else if (cs >= 100) {     // M — default
+      _printTargetAspect = 7.4;
+    } else {                    // L — tall row, big notes
+      _printTargetAspect = 5.5;
+    }
     _printMode = true;
     if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    // The wrapped renderChart re-paints fingerings via a Promise's
+    // .then() callback — that's a microtask, which Chromium doesn't
+    // always drain before capturing the print preview's DOM. Result:
+    // the fingerings are missing on paper even though they're back
+    // on screen the moment the dialog closes. Force a SYNCHRONOUS
+    // overlay re-paint here so the printed output matches the
+    // on-screen state. The data lives in `emFingerings` already,
+    // populated on the first render of the current song; we just
+    // need to draw it into the freshly-rendered SVGs.
+    if (typeof emRenderOverlays === 'function') emRenderOverlays();
   });
   window.addEventListener('afterprint', () => {
     _printMode = false;
@@ -9623,6 +9686,7 @@ let _printMode = false;
       savedMpl = null;
     }
     if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    if (typeof emRenderOverlays === 'function') emRenderOverlays();
   });
 })();
 

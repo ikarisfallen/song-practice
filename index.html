@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=90" />
+<link rel="stylesheet" href="style.css?v=91" />
 </head>
 <body>
 <div id="app">
@@ -125,15 +125,15 @@
         <span class="drum-label">Bars / Line</span>
         <div class="seg" id="mplSeg" role="tablist">
           <button type="button" data-mpl="1">1</button>
-          <button type="button" data-mpl="2" class="active">2</button>
+          <button type="button" data-mpl="2">2</button>
           <button type="button" data-mpl="3">3</button>
-          <button type="button" data-mpl="4">4</button>
+          <button type="button" data-mpl="4" class="active">4</button>
           <button type="button" data-mpl="6">6</button>
         </div>
         <span class="drum-label">Size</span>
         <div class="seg" id="sizeSeg" role="tablist">
-          <button type="button" data-size="180" class="active">S</button>
-          <button type="button" data-size="120">M</button>
+          <button type="button" data-size="180">S</button>
+          <button type="button" data-size="120" class="active">M</button>
           <button type="button" data-size="80">L</button>
         </div>
       </div>
@@ -243,7 +243,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v2.50</span>
+      <span class="app-version" id="appVersion">v2.57</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -251,7 +251,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=368"></script>
+<script src="app.js?v=374"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

@@ -1066,19 +1066,22 @@ body.overlay-beats-on .beat-marker {
     background: transparent !important;
     text-align: center;
   }
-  /* Each row's SVG is given a fixed HEIGHT and auto width so the
-     row's natural aspect ratio is preserved. With chord-scale band
-     visible (staffHeight=166) or hidden (138), the SVG centers
-     horizontally at whatever width the aspect ratio yields and
-     never exceeds the page's printable width. The 1in target
-     leaves enough vertical headroom that 9 rows + the 16pt title
-     reliably fit on a letter page. */
+  /* Each row's SVG fills the full printable WIDTH; height is
+     derived from the SVG's natural aspect ratio. Using
+     `width:100%` instead of `height:1in` is what makes the bar
+     lines hit the left and right margins of the page — the old
+     fixed-height approach left a margin on either side whenever
+     the row's natural width came up short of 7.5in (Head mode,
+     chord-notes overlay on, etc.). With `width:100%` instead,
+     every row spans the full content area and the height
+     auto-derives. The print mode still aims for an aspect ratio
+     near 7.4 so 9 rows × ~1in + the title fits a letter page. */
   .staff-row svg {
-    height: 1in !important;
-    width: auto !important;
+    width: 100% !important;
+    height: auto !important;
     max-width: 100% !important;
-    display: inline-block !important;
-    margin: 0 auto !important;
+    display: block !important;
+    margin: 0 !important;
   }
   /* Page setup. 0.5in margins all around fit a typical letter/A4
      printer without wasting paper. */
