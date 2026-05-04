@@ -39,10 +39,14 @@ const ALLOWED_ORIGINS = [
 ];
 
 // Pick the cheapest model that still reads handwritten music
-// reliably. Sonnet is the sweet spot today; Haiku is cheaper but
-// drops accidentals on handwriting. Switch by editing this string —
-// no other code changes needed.
-const MODEL = 'claude-3-5-sonnet-20241022';
+// reliably. Sonnet is the sweet spot; Haiku is cheaper but drops
+// accidentals on handwriting. Using the `-latest` alias instead
+// of a pinned date so the Worker tracks whatever Anthropic
+// currently considers the Sonnet 3.5 line — pinned dated names
+// (`claude-3-5-sonnet-20241022` etc.) eventually retire and
+// return 404. Switch this string for other tiers without
+// touching anything else.
+const MODEL = 'claude-3-5-sonnet-latest';
 
 export default {
   async fetch(request, env) {

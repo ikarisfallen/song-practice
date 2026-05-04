@@ -1203,7 +1203,21 @@ function generateTestMeFromDetected(bars, ts) {
           image: dataUrl
         })
       });
-      if (!resp.ok) throw new Error('Server error: ' + resp.status);
+      if (!resp.ok) {
+        // Surface as much of the upstream error as we can — the
+        // proxy returns a JSON body with `error` and optionally
+        // `detail` keys when something goes wrong, so plain status
+        // codes alone (404 / 502 / 500) aren't enough to debug.
+        let bodyText = '';
+        try {
+          const errJson = await resp.json();
+          bodyText = errJson.error || '';
+          if (errJson.detail) bodyText += ' — ' + errJson.detail;
+        } catch (e) {
+          try { bodyText = await resp.text(); } catch (e2) { /* ignore */ }
+        }
+        throw new Error('Server ' + resp.status + (bodyText ? ': ' + bodyText : ''));
+      }
       const json = await resp.json();
       _testDetectedNotes = json;
       if (typeof rerenderCurrent === 'function') rerenderCurrent();
