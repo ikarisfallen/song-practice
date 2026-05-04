@@ -300,6 +300,11 @@ const SCALE_LOCRIAN =          [{s:0,t:0},{s:1,t:-5},{s:3,t:-3},{s:5,t:-1},{s:6,
 const SCALE_DIMINISHED =       [{s:0,t:0},{s:2,t:2},{s:3,t:-3},{s:5,t:-1},{s:6,t:-6},{s:8,t:-4},{s:9,t:3},{s:11,t:5}];
 const SCALE_MELODIC_MINOR =    [{s:0,t:0},{s:2,t:2},{s:3,t:-3},{s:5,t:-1},{s:7,t:1},{s:9,t:3},{s:11,t:5}];
 const SCALE_PHRYGIAN_DOMINANT =[{s:0,t:0},{s:1,t:-5},{s:4,t:4},{s:5,t:-1},{s:7,t:1},{s:8,t:-4},{s:10,t:-2}];
+// 1 ♭2 3 4 5 6 ♭7 — Mixolydian with a flatted 9. Used over a 7♭9
+// chord that resolves to a MAJOR chord (instead of minor); the
+// natural 6 foreshadows the resolution's major 3rd. Differs from
+// Phrygian Dominant only in its 6th degree (♮6 vs ♭6).
+const SCALE_MIXOLYDIAN_B9 =    [{s:0,t:0},{s:1,t:-5},{s:4,t:4},{s:5,t:-1},{s:7,t:1},{s:9,t:3},{s:10,t:-2}];
 
 function exParseRoot(chordText) {
   const letterToSemi = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
@@ -399,6 +404,37 @@ function exGetScale(chordText) {
   if (/sus/i.test(q)) return SCALE_MIXOLYDIAN;
   if (/aug|\+/i.test(q)) return SCALE_IONIAN;
   return SCALE_IONIAN;
+}
+
+// True if a chord is "minor-resolving" — i.e. a 7♭9 that lands on
+// it should treat the resolution as V → minor i. Covers plain
+// minor (m / min / mi / hyphen), half-diminished (ø / m7♭5 / h),
+// and fully-diminished (dim / °).
+function isMinorResolutionChord(chordTextStr) {
+  if (!chordTextStr) return false;
+  const q = String(chordTextStr).replace(/^[A-Ga-g][#♯b♭]?/, '');
+  if (/[øØ]/.test(q)) return true;
+  if (/m7[b♭]5|min7[b♭]5|mi7[b♭]5/i.test(q)) return true;
+  if (/^h/i.test(q)) return true;
+  if (/dim|°/i.test(q)) return true;
+  if (/^o/i.test(q)) return true;
+  if (/^(m(?!a)|min|mi|\-|−)/i.test(q)) return true;
+  return false;
+}
+
+// Context-aware scale lookup: same as exGetScale for every chord
+// quality EXCEPT 7♭9, where we look at the next chord to decide
+// between Phrygian Dominant (V → minor i, the harmonic-minor-
+// derived "tense" sound with ♭6) and Mixolydian ♭9 (V → major I,
+// natural 6 foreshadowing the major resolution).
+function exGetScaleContextual(chordTextStr, nextChordTextStr) {
+  const q = String(chordTextStr).replace(/^[A-Ga-g][#♯b♭]?/, '');
+  if (/^[0-9]/.test(q) && /[b♭]9/.test(q)) {
+    return isMinorResolutionChord(nextChordTextStr)
+      ? SCALE_PHRYGIAN_DOMINANT
+      : SCALE_MIXOLYDIAN_B9;
+  }
+  return exGetScale(chordTextStr);
 }
 
 function buildScaleTones(rootPc, rootTpc, scale) {
@@ -3662,6 +3698,8 @@ function updateScoreTitle(songArg) {
   let exLabel = '';
   if (exerciseMode === 'head') {
     exLabel = 'Head';
+  } else if (exerciseMode === 'blank') {
+    exLabel = 'Blank';
   } else {
     const sel = document.getElementById('exerciseSelect');
     if (sel && sel.selectedIndex >= 0) {
@@ -3694,6 +3732,38 @@ function expandBarsByRepeats(bars, n) {
   for (let r = 0; r < reps; r++) for (let i = 0; i < body.length; i++) out.push(body[i]);
   for (let i = 0; i < coda.length; i++) out.push(coda[i]);
   return out;
+}
+
+// Scale-notes string for the "Chord notes" overlay. Returns the
+// chord's own scale spelled out from the chord's root, e.g. CMaj7 →
+// "C D E F G A B"; D7 → "D E F♯ G A B C"; Bbm7♭5 → "B♭ C D♭ E♭ F♭ G♭ A♭".
+// Uses Unicode flat / sharp glyphs so they render the same as the
+// chord labels themselves. Returns "" for chords we can't parse
+// (slashes, N.C., empty), so the caller can skip drawing.
+//
+// The `nextCh` argument lets the picker make a context-aware call
+// for 7♭9 chords specifically: Phrygian Dominant (♭6, harmonic-
+// minor-derived) when the next chord is minor (V → i), Mixolydian
+// ♭9 (♮6) otherwise. For A Foggy Day's D7♭9 → Gm7, that resolves
+// to Phrygian Dominant — the song's parent F major has B♭ in it,
+// and the V-i in temporary G minor wants the harmonic-minor sound.
+function chordScaleNotesText(ch, nextCh) {
+  if (!ch || ch.slash || ch.nc) return '';
+  const canonical = chordToCanonical(ch);
+  const root = exParseRoot(canonical);
+  if (!root) return '';
+  const nextCanonical = (nextCh && !nextCh.slash && !nextCh.nc)
+    ? chordToCanonical(nextCh) : null;
+  const scale = exGetScaleContextual(canonical, nextCanonical);
+  if (!scale || !scale.length) return '';
+  const ACC_GLYPHS = { '': '', '#': '♯', 'b': '♭', '##': '𝄪', 'bb': '𝄫' };
+  const out = [];
+  for (let i = 0; i < scale.length; i++) {
+    const tpc = root.tpc + scale[i].t;
+    const { letter, acc } = tpcToLetterAcc(tpc);
+    out.push(letter + (ACC_GLYPHS[acc] || ''));
+  }
+  return out.join(' ');
 }
 
 function chordText(ch) {
@@ -3884,17 +3954,41 @@ function renderChart(song, barsIn, timesigStr) {
   // text. Each row is 6 px taller as a result.
   const patternTextY = 150;         // baseline of the scale label
   const patternLineY = patternTextY + 6; // underline just below descenders
-  // SVG height per row. When the Chord-scales overlay is OFF we drop
-  // the chord-scale band entirely — the staff bottom sits at y≈116,
-  // beat markers (if Beats overlay is on) reach y≈133, so 138 leaves
-  // a few pixels of bottom margin and saves ~28 px of vertical real
-  // estate per row compared to the chord-scales-ON layout (166).
-  const staffHeight  = overlayChordScalesOn ? patternLineY + 10 : 138;
-  // Bottom of the per-bar selection-highlight rect. Tracks staffHeight
-  // so the highlight wash always covers everything we render — when
-  // the chord-scale band is hidden, the highlight stops at the staff
-  // instead of including a now-empty band underneath.
-  const barHighlightBottom = overlayChordScalesOn ? patternLineY + 3 : staffHeight - 4;
+  // Chord-notes overlay sits in the bottom band of the row, near
+  // where the chord-scale ink lives. When the Chord-scales overlay
+  // is ALSO on, chord notes go BELOW the chord-scale line so the
+  // two don't overlap. When chord scales is off, chord notes take
+  // the chord-scale band's vertical position itself.
+  // Font size matches the chord-scale label (16) at the user's
+  // request — the line-height is therefore 17 (font + 1 px gap)
+  // and the y offsets give the larger glyph body room to breathe.
+  const CHORD_NOTES_LINE_HEIGHT = 17;
+  const chordNotesY1 = overlayChordNotesOn
+    ? (overlayChordScalesOn ? patternLineY + 18 : 148)
+    : 0;
+  const chordNotesY2 = chordNotesY1 + CHORD_NOTES_LINE_HEIGHT;
+  // SVG height per row. Four cases driven by the two overlays:
+  //   neither       → 138 (compact, just the staff)
+  //   only scales   → 166 (current chord-scale band)
+  //   only notes    → reach the bottom of chord-notes line 2 + 5
+  //   both          → reach the bottom of chord-notes line 2 + 5
+  // Beat markers (when Beats overlay is on) reach y≈133, so 138 is
+  // the floor in every case.
+  let staffHeight;
+  if (overlayChordNotesOn) {
+    staffHeight = chordNotesY2 + 5;
+  } else if (overlayChordScalesOn) {
+    staffHeight = patternLineY + 10; // 166
+  } else {
+    staffHeight = 138;
+  }
+  // Bottom of the per-bar selection-highlight rect. Tracks the
+  // bottom of whichever band is active (chord notes if on, chord
+  // scales if on, staff otherwise) so the highlight wash always
+  // covers everything we render.
+  const barHighlightBottom = overlayChordNotesOn
+    ? chordNotesY2 + 3
+    : (overlayChordScalesOn ? patternLineY + 3 : staffHeight - 4);
 
   // Print sizing: widen `measureWidth` so the row's natural aspect
   // ratio (rowWidth/staffHeight, roughly the SVG's aspect ratio)
@@ -4781,6 +4875,88 @@ function renderChart(song, barsIn, timesigStr) {
           // ♭ glyph doesn't sit inside a wide metric box on Android.
           appendChordLabelTspans(t, chordText(ch));
           svg.appendChild(t);
+
+          // Chord-notes overlay: tiny grey list of the chord-scale
+          // tones rooted at this chord (e.g. "C D E F G A B" under a
+          // CMaj7 label). Drawn just below the chord symbol; uses
+          // the next chord's start x as its right boundary so a
+          // bar with multiple chords doesn't bleed each chord's
+          // notes into the next chord's slot. If the rendered text
+          // overflows the slot, the notes are split across two lines
+          // via a second <tspan>.
+          if (overlayChordNotesOn) {
+            // Find the chord that follows this one in song order —
+            // either the next chord in the same bar, or the first
+            // non-empty chord of a later bar. The contextual scale
+            // picker uses this to pick Phrygian Dominant vs.
+            // Mixolydian ♭9 for 7♭9 chords (V → minor i vs.
+            // V → major I).
+            let nextCh = null;
+            if (ci + 1 < displayChords.length) {
+              nextCh = displayChords[ci + 1];
+            } else {
+              for (let nbi = barIdx + 1; nbi < bars.length; nbi++) {
+                const nextChords = (bars[nbi].chords || []).filter(c => !c.slash);
+                if (nextChords.length) { nextCh = nextChords[0]; break; }
+              }
+            }
+            const noteStr = chordScaleNotesText(ch, nextCh);
+            if (noteStr) {
+              // Slot width: from this chord's cx to the next chord's
+              // cx (or to the bar's right edge for the last chord).
+              let slotEndX = labelAreaX0 + labelAreaW;
+              if (ci < n - 1) {
+                const next = chordBeatRange(n, ci + 1, beatsPerBarLabel);
+                slotEndX = labelAreaX0 + (next.startBeat / beatsPerBarLabel) * labelAreaW;
+              }
+              const slotW = Math.max(20, slotEndX - cx - 2); // 2px gap
+              const tn = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+              tn.setAttribute('class', 'chord-notes');
+              tn.setAttribute('x', cx);
+              // Bottom-band placement — chord notes live in the
+              // same vertical region as chord scales, BELOW the
+              // staff, not stacked under the chord symbol above.
+              // chordNotesY1 was computed at the top of renderChart
+              // (it depends on whether chord scales is also on, so
+              // both bands fit without overlap).
+              tn.setAttribute('y', chordNotesY1);
+              tn.setAttribute('text-anchor', 'start');
+              tn.setAttribute('font-family', 'sans-serif');
+              // Match the chord-scale label's 16 px so the two
+              // bottom-band overlays read at the same visual weight.
+              tn.setAttribute('font-size', 16);
+              tn.setAttribute('fill', '#888');
+              tn.setAttribute('stroke', 'none');
+              setSvgTextWithFlatFix(tn, noteStr);
+              svg.appendChild(tn);
+              // Wrap if the line is wider than the slot. getBBox is
+              // reliable here because the text is already in the DOM.
+              let bbox = null;
+              try { bbox = tn.getBBox(); } catch (e) { /* ignore */ }
+              if (bbox && bbox.width > slotW) {
+                // Split notes roughly in half; bias the first line
+                // slightly larger so a 7-note scale becomes 4 + 3
+                // (which reads more natural than 3 + 4).
+                const tokens = noteStr.split(' ');
+                const firstCount = Math.ceil(tokens.length / 2);
+                const line1 = tokens.slice(0, firstCount).join(' ');
+                const line2 = tokens.slice(firstCount).join(' ');
+                while (tn.firstChild) tn.removeChild(tn.firstChild);
+                const span1 = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+                span1.setAttribute('x', cx);
+                setSvgTextWithFlatFix(span1, line1);
+                tn.appendChild(span1);
+                const span2 = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+                span2.setAttribute('x', cx);
+                // Same line-height the y-offset constants use so
+                // the wrapped second line stays inside the
+                // staffHeight reserved at the top of renderChart.
+                span2.setAttribute('dy', String(CHORD_NOTES_LINE_HEIGHT));
+                setSvgTextWithFlatFix(span2, line2);
+                tn.appendChild(span2);
+              }
+            }
+          }
         });
       }
 
@@ -5795,6 +5971,11 @@ let overlayBeatsOn = false;
 // (instead of leaving an empty band under each row). Default reflects
 // the matching `checked` attribute on #overlayChordScalesToggle.
 let overlayChordScalesOn = true;
+// Chord notes: tiny grey list of the chord-scale tones written under
+// each chord symbol (e.g. CMaj7 → "C D E F G A B"). Off by default;
+// flipping it triggers a chart re-render so the per-chord text gets
+// painted into the same SVG region as the chord labels themselves.
+let overlayChordNotesOn = false;
 
 // Remove every per-bar note-letter overlay group from the chart.
 // We use a class selector so we don't have to track each painted
@@ -6031,6 +6212,17 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
   if (chordScales) {
     chordScales.addEventListener('change', (e) => {
       overlayChordScalesOn = !!e.target.checked;
+      if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    });
+  }
+  // Chord notes: also a re-render trigger. The notes are drawn as
+  // SVG <text> children of each row's chord-symbol pass, which
+  // only runs inside renderChart — so toggling without re-rendering
+  // would leave the previous state on screen.
+  const chordNotes = document.getElementById('overlayChordNotesToggle');
+  if (chordNotes) {
+    chordNotes.addEventListener('change', (e) => {
+      overlayChordNotesOn = !!e.target.checked;
       if (typeof rerenderCurrent === 'function') rerenderCurrent();
     });
   }
@@ -7915,14 +8107,13 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   if (!sel) return;
   sel.addEventListener('change', async () => {
     const ex = sel.value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'blank' || ex === '1235' || ex === '3579')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === '1235' || ex === '3579')
       ? ex : 'scale';
     // Auto-flip the mode seg to "Exercise" — picking from the
     // dropdown is an implicit "I want an exercise" gesture.
     document.querySelectorAll('#modeSeg button').forEach(b => {
       b.classList.toggle('active', b.dataset.mode === 'exercise');
     });
-    if (typeof _updateModeUIVisibility === 'function') _updateModeUIVisibility();
     updateScoreTitle();
     rerenderCurrent();
     // Re-evaluate Play button state — switching to/from Head with a
@@ -7938,21 +8129,13 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   });
 })();
 
-// Hide the Exercise dropdown when the user is in Head mode (no
-// exercise to pick) and show it when they switch to Exercise.
-// Called from the mode-seg click handler below and once on page
-// load so the initial "Head" state starts with the dropdown
-// hidden.
-function _updateModeUIVisibility() {
-  const sel = document.getElementById('exerciseSelect');
-  if (sel) sel.hidden = (exerciseMode === 'head');
-}
-
 // Mode segmented button: switches between Head (play the song's
-// melody as parsed from MusicXML / MIDI) and Exercise (one of the
-// generators picked in the dropdown to the right). On "Exercise"
-// we restore exerciseMode from the dropdown's current value so
-// toggling Head off returns to the user's last-picked exercise.
+// melody as parsed from MusicXML / MIDI), Blank (empty staves with
+// chord changes above, for hand-writing or printing as practice
+// paper), and Exercise (one of the generators picked in the
+// dropdown to the right). On "Exercise" we restore exerciseMode
+// from the dropdown's current value so toggling Head off returns
+// to the user's last-picked exercise.
 (function bindModeSeg() {
   const seg = document.getElementById('modeSeg');
   if (!seg) return;
@@ -7963,13 +8146,14 @@ function _updateModeUIVisibility() {
       const mode = btn.dataset.mode;
       if (mode === 'head') {
         exerciseMode = 'head';
+      } else if (mode === 'blank') {
+        exerciseMode = 'blank';
       } else {
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'blank' || ex === '1235' || ex === '3579')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === '1235' || ex === '3579')
           ? ex : 'scale';
       }
-      _updateModeUIVisibility();
       updateScoreTitle();
       rerenderCurrent();
       // Switching INTO Head on a song without one disables Play;
@@ -7984,10 +8168,6 @@ function _updateModeUIVisibility() {
       }
     });
   });
-  // Page-load sync: the default exerciseMode is 'head', so the
-  // dropdown should start hidden. Without this call it stays
-  // visible until the user clicks a mode button.
-  _updateModeUIVisibility();
 })();
 
 document.querySelectorAll('#drumSeg button').forEach(b => {
