@@ -305,6 +305,14 @@ const SCALE_PHRYGIAN_DOMINANT =[{s:0,t:0},{s:1,t:-5},{s:4,t:4},{s:5,t:-1},{s:7,t
 // natural 6 foreshadows the resolution's major 3rd. Differs from
 // Phrygian Dominant only in its 6th degree (♮6 vs ♭6).
 const SCALE_MIXOLYDIAN_B9 =    [{s:0,t:0},{s:1,t:-5},{s:4,t:4},{s:5,t:-1},{s:7,t:1},{s:9,t:3},{s:10,t:-2}];
+// 1 ♭9 ♭3 3 ♯11 5 13 ♭7 — Half-Whole Diminished, the symmetric 8-note
+// scale that contains every chord tone of a 7♭9 (root, 3rd, 5th, ♭7,
+// ♭9), plus the ♯9, ♯11, and 13 as fully usable color tones. Spelled
+// here with b3 (matches the chord's ♯9) and ♯11 (above the 5) for the
+// most common Levine/Aebersold reading. Spans semitones
+// 0,1,3,4,6,7,9,10.
+const SCALE_HALF_WHOLE_DIMINISHED =
+                               [{s:0,t:0},{s:1,t:-5},{s:3,t:-3},{s:4,t:4},{s:6,t:6},{s:7,t:1},{s:9,t:3},{s:10,t:-2}];
 
 function exParseRoot(chordText) {
   const letterToSemi = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
@@ -399,7 +407,11 @@ function exGetScale(chordText) {
   if (/[Δ∆\^]/.test(q)) return SCALE_IONIAN;
   if (/^m|^-|^−/i.test(q)) return SCALE_DORIAN;
   if (/^6/.test(q)) return SCALE_IONIAN;
-  if (/^[0-9]/.test(q) && /[b♭]9/.test(q)) return SCALE_PHRYGIAN_DOMINANT;
+  // 7♭9 → Half-Whole Diminished. Contains all chord tones (R, 3, 5,
+  // ♭7, ♭9) plus ♯9 / ♯11 / 13 as color tones, regardless of whether
+  // the chord resolves to major or minor. Replaces the older
+  // Phrygian-Dominant / Mixolydian-♭9 split.
+  if (/^[0-9]/.test(q) && /[b♭]9/.test(q)) return SCALE_HALF_WHOLE_DIMINISHED;
   if (/^[0-9]/.test(q)) return SCALE_MIXOLYDIAN;
   if (/sus/i.test(q)) return SCALE_MIXOLYDIAN;
   if (/aug|\+/i.test(q)) return SCALE_IONIAN;
@@ -422,19 +434,36 @@ function isMinorResolutionChord(chordTextStr) {
   return false;
 }
 
-// Context-aware scale lookup: same as exGetScale for every chord
-// quality EXCEPT 7♭9, where we look at the next chord to decide
-// between Phrygian Dominant (V → minor i, the harmonic-minor-
-// derived "tense" sound with ♭6) and Mixolydian ♭9 (V → major I,
-// natural 6 foreshadowing the major resolution).
+// Context-aware scale lookup. Identical to exGetScale now that 7♭9
+// uses Half-Whole Diminished regardless of resolution direction —
+// the previous Phrygian Dominant (V → minor i) vs Mixolydian ♭9
+// (V → major I) split has been collapsed. The signature is kept so
+// existing callers don't need to change.
 function exGetScaleContextual(chordTextStr, nextChordTextStr) {
-  const q = String(chordTextStr).replace(/^[A-Ga-g][#♯b♭]?/, '');
-  if (/^[0-9]/.test(q) && /[b♭]9/.test(q)) {
-    return isMinorResolutionChord(nextChordTextStr)
-      ? SCALE_PHRYGIAN_DOMINANT
-      : SCALE_MIXOLYDIAN_B9;
-  }
   return exGetScale(chordTextStr);
+}
+
+// Effective scale for a chord event when the song is being read inside
+// a key pattern. Major-key patterns ordinarily flatten every chord to
+// the parent's Ionian (so an Eb^7 in a Bb-major 251 reads as Bb major,
+// not Eb Lydian) — but a 7♭9 chord must KEEP its own Half-Whole
+// Diminished scale even when nested inside a major pattern, otherwise
+// the b9 (and the rest of the altered tones) drop out of the scale
+// set. Used by every generator's `effective` map and by the
+// note-info-panel's per-chord scale label.
+function pickEffectiveScale(ce, pat) {
+  const canonical = chordToCanonical(ce.chord);
+  const restRaw = String(canonical).replace(/^[A-Ga-g][#♯b♭]?/, '');
+  // 7♭9 detection: dominant-flavoured quality (numeric) with a ♭9
+  // alteration. ALWAYS uses HW Diminished, pattern or not.
+  const is7b9 = /^[0-9]/.test(restRaw) && /[b♭]9/.test(restRaw);
+  if (is7b9) {
+    return { root: ce.root, scale: SCALE_HALF_WHOLE_DIMINISHED };
+  }
+  if (pat && pat.keyMode === 'major') {
+    return { root: pat.keyRoot, scale: SCALE_IONIAN };
+  }
+  return { root: ce.root, scale: exGetScale(canonical) };
 }
 
 function buildScaleTones(rootPc, rootTpc, scale) {
@@ -789,14 +818,10 @@ function generateQuarterNotes(bars, ts) {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
     // Major-key patterns: use the key's Ionian for every chord. All diatonic
     // modes share the same pitch classes, so each chord's notes stay inside
-    // the parent major (e.g. Eb^7 as IV of Bb uses A, not Ab).
-    if (pat && pat.keyMode === 'major') {
-      return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    }
-    // Minor-key patterns and standalone chords: use the chord's OWN scale,
-    // because the three chords of a minor ii°-V-i use genuinely different
-    // pitch classes (Am7b5 Locrian has F natural, D7 Mixolydian has F#, etc.)
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    // the parent major (e.g. Eb^7 as IV of Bb uses A, not Ab). 7♭9 chords
+    // are an exception — they keep their own Half-Whole Diminished scale
+    // even inside a major pattern (handled inside pickEffectiveScale).
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -897,10 +922,7 @@ function generateScaleChromaticQuarterNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') {
-      return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    }
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -1062,8 +1084,7 @@ function generateBlankExercise(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   // Pick a duration that exactly fills the bar so VexFlow doesn't
@@ -1101,8 +1122,7 @@ function generateDescendingQuarterNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -1422,8 +1442,7 @@ function generateCantusFirmusQuarterNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -1531,8 +1550,7 @@ function generateRange3579HalfNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -1668,8 +1686,7 @@ function generateEnclosuresQuarterNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -1890,8 +1907,7 @@ function generateLongEnclosuresQuarterNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -2130,8 +2146,7 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -2285,8 +2300,7 @@ function makeQuarterNoteArpeggioGenerator(degScaleIdx) {
     const patterns = detectKeyPatterns(chordEvents);
     const effective = chordEvents.map((ce, i) => {
       const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-      if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-      return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+      return pickEffectiveScale(ce, pat);
     });
 
     const results = bars.map(() => new Array(beatsPerBar).fill(null));
@@ -3007,8 +3021,7 @@ function generateHeadFromScore(bars, ts) {
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
     const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+    return pickEffectiveScale(ce, pat);
   });
 
   const results = bars.map(() => new Array(stepsPerBar).fill(null));
@@ -3265,8 +3278,7 @@ function makeChordToneGenerator(pattern44, pattern34, opts = {}) {
     const patterns = detectKeyPatterns(chordEvents);
     const effective = chordEvents.map((ce, i) => {
       const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-      if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
-      return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+      return pickEffectiveScale(ce, pat);
     });
 
     const results = bars.map(() => new Array(stepsPerBar).fill(null));
@@ -3508,6 +3520,18 @@ function intervalTpcOffset(semi, rest) {
     case 9:  return isDim ? -9 : 3; // ♭♭7 for dim7, else 6
     case 10: return -2;   // ♭7 (minor seventh, dominant)
     case 11: return 5;    // 7 (major seventh)
+    // Compound intervals (above the octave). Spelled as a 9th/11th/13th
+    // rather than collapsed to b2/4/b6, because they're a distinct
+    // chord function — and #9 specifically must spell as an augmented
+    // 2nd (D♯ above C), not a minor 3rd (E♭), even though they share a
+    // pitch class.
+    case 13: return -5;   // ♭9
+    case 14: return 2;    // 9
+    case 15: return 8;    // ♯9 (augmented 2nd: D♯, A♯, …)
+    case 17: return -1;   // 11
+    case 18: return 6;    // ♯11
+    case 20: return -4;   // ♭13
+    case 21: return 3;    // 13
     default: return 0;
   }
 }
@@ -3534,15 +3558,28 @@ function chordTonesMap(ch) {
   // letter + accidental (e.g. BMaj7 → B D♯ F♯ A♯, not B E♭ G♭ B♭).
   const rootParsed = exParseRoot(chordToCanonical(ch));
   const rootTpc = rootParsed ? rootParsed.tpc : 14;
-  const ivs = intervalsFor(ch.rest || '').filter(i => i < 12);
+  // Use ALL intervals (including extensions ≥ 12) for the displayed
+  // names list, so altered tensions like the ♭9 in G7♭9 appear as
+  // chord tones (G B D F A♭). The on-fingerboard chord-tone marker
+  // map (byPc) stays restricted to the basic chord tones — root,
+  // 3rd, 5th, 7th — since those are the only intervals that
+  // degreeFromInterval has labels for and that read cleanly as
+  // ringed degrees on the board.
+  const allIvs = intervalsFor(ch.rest || '');
   const byPc = {};
   const names = [];
-  ivs.forEach(i => {
+  const seenPc = new Set();
+  allIvs.forEach(i => {
     const pc = (rootPc + i) % 12;
-    const deg = degreeFromInterval(i, ch.rest || '');
-    if (deg && !(pc in byPc)) byPc[pc] = deg;
-    const tpc = rootTpc + intervalTpcOffset(i, ch.rest || '');
-    names.push(tpcToNoteName(tpc));
+    if (i < 12) {
+      const deg = degreeFromInterval(i, ch.rest || '');
+      if (deg && !(pc in byPc)) byPc[pc] = deg;
+    }
+    if (!seenPc.has(pc)) {
+      seenPc.add(pc);
+      const tpc = rootTpc + intervalTpcOffset(i, ch.rest || '');
+      names.push(tpcToNoteName(tpc));
+    }
   });
   return { byPc, names };
 }
@@ -3580,6 +3617,17 @@ const MODE_NAMES = {
 // because their parent isn't a major scale — writing "GMaj" would be
 // wrong (G major has B♮ and E♮, not Bb/Eb).
 const PHRYGIAN_DOMINANT_SIG = '0,1,4,5,7,8,10';
+
+// Whole-Half Diminished — the 8-note symmetric scale used over a fully
+// diminished 7 chord (W-H-W-H-W-H-W-H from the root). Distinct from
+// Half-Whole Diminished, which is used over dom7♭9; for the dim7 case
+// we want the W-H spelling so the chord tones (1, ♭3, ♭5, ♭♭7) sit on
+// odd scale degrees instead of every-other note in the H-W spelling.
+const DIMINISHED_WH_SIG = '0,2,3,5,6,8,9,11';
+// Half-Whole Diminished — H-W-H-W-H-W-H-W from the root, used over a
+// 7♭9 chord. Contains every chord tone (R, 3, 5, ♭7, ♭9) plus the ♯9,
+// ♯11, and 13 as available color tones.
+const DIMINISHED_HW_SIG = '0,1,3,4,6,7,9,10';
 
 // Parent-major root PC for the effective scale (used to pick flat/sharp
 // spelling on the fingerboard).
@@ -3655,6 +3703,17 @@ function relatedScaleLabel(eff, patternKeyName) {
     const modeName = MODE_NAMES[sig];
     if (modeName === null) return names[rootPc] + ' Major';
     return names[rootPc] + ' ' + modeName + ' (' + names[parent] + ' Major)';
+  }
+  // Whole-Half Diminished — labeled by its own root (no parent-major
+  // equivalent: the symmetric 8-note scale doesn't sit inside any
+  // diatonic major). E.g. Bbdim7 → "B♭ Whole-Half Diminished".
+  if (sig === DIMINISHED_WH_SIG) {
+    return names[rootPc] + ' Whole-Half Diminished';
+  }
+  // Half-Whole Diminished — used over 7♭9. Same symmetric 8-note set
+  // shifted by a semitone; also no parent-major equivalent.
+  if (sig === DIMINISHED_HW_SIG) {
+    return names[rootPc] + ' Half-Whole Diminished';
   }
   return names[rootPc];
 }
