@@ -1324,20 +1324,33 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
     }
   }
 
-  // Build beams over consecutive 8th notes within the same beat.
-  // Pickup is short (≤ a few beats), so a simple beat-boundary grouper
-  // is enough — no need for the half-bar grouping the main renderer
-  // uses. Without this, eighth notes draw with individual flags, which
-  // looks wrong next to the rest of the chart.
+  // Build beams over consecutive 8th notes within a half-bar group,
+  // matching the main renderer's grouping (4 eighths in 4/4, 3 eighths
+  // in 3/4) so a long pickup reads as one or two clean beams. The
+  // pickup is the TAIL of an imaginary preceding bar, so group
+  // boundaries line up to that bar's half-bar grid — not to the
+  // pickup-local step 0. Concretely: a 3.5-beat pickup in 4/4 starts
+  // at beat 0.5 of the imaginary bar (local step 0 = imaginary step
+  // 3), so the first group break falls 9 local steps in, producing
+  // a 3-then-4 grouping that matches how the rest of the chart
+  // would be beamed.
   const pickupBeams = [];
   {
+    // group span in 24th-note steps: 4/4 → 12 steps (half-bar / 4
+    // eighths), 3/4 → 9 steps (3 eighths). Anything else falls back
+    // to a half-bar group based on the time signature's numerator.
+    const groupSteps = ts.num === 3 ? 9 : 12;
+    // Offset from the imaginary preceding bar's start to the pickup's
+    // first step. The pickup occupies the LAST `leadInBeats` of that
+    // bar, so the offset is (beatsPerBar - leadInBeats) * 6 steps.
+    const barStartOffsetSteps = Math.round((ts.num - leadInBeats) * 6);
     let pending = [];
-    let pendingBeat = -1;
+    let pendingGroup = -1;
     let stepCursor = 0;
     const flush = () => {
       if (pending.length >= 2) pickupBeams.push(new VF.Beam(pending.slice(), true));
       pending = [];
-      pendingBeat = -1;
+      pendingGroup = -1;
     };
     let i = 0;
     let bb = 0;
@@ -1347,12 +1360,13 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
         const consume = DUR_TO_STEPS[bp.duration] || 6;
         const note = notes[i++];
         if (bp.duration === '8' && note && !(note.isRest && note.isRest())) {
-          const beatAtStart = Math.floor(stepCursor / 6);
-          const beatAtEnd   = Math.floor((stepCursor + consume - 1) / 6);
-          if (pending.length > 0 && pendingBeat !== beatAtStart) flush();
-          if (pending.length > 0 && beatAtStart !== beatAtEnd) flush();
+          const absStart = stepCursor + barStartOffsetSteps;
+          const groupAtStart = Math.floor(absStart / groupSteps);
+          const groupAtEnd   = Math.floor((absStart + consume - 1) / groupSteps);
+          if (pending.length > 0 && pendingGroup !== groupAtStart) flush();
+          if (pending.length > 0 && groupAtStart !== groupAtEnd) flush();
           pending.push(note);
-          pendingBeat = beatAtStart;
+          pendingGroup = groupAtStart;
         } else {
           flush();
         }
@@ -4497,17 +4511,36 @@ function renderChart(song, barsIn, timesigStr) {
     // printed practice page.
     const clefExtra   = (_printMode || !isFirstRow) ? 0 : firstMeasureClefWidth;
     const extraPerBar = (_printMode || isFirstRow)  ? 0 : Math.floor(clefOnlyExtra / mpl);
-    const barWidth = measureWidth + extraPerBar;
     // Pickup (anacrusis) — a partial bar carried at the very start
     // of row 1, OUTSIDE the iRealPro `bars[]` array so bar numbering
     // and fingering indexing stay aligned with bar 1 = bars[0].
     // leadInBeats comes from MusicXML detection at parse time.
-    const leadInBeats = isFirstRow
+    // Pickup is HEAD-MODE-ONLY: in Blank and Exercise modes, there is
+    // no melody to render in the partial bar (it would be all rests)
+    // and the playback would schedule nothing useful. Forcing
+    // leadInBeats to 0 outside of head mode also zeroes pickupWidth,
+    // pickupShrinkPerBar, and the row-1 bar-number offset so layout
+    // matches a normal song-without-pickup.
+    const _isHeadMode = (typeof exerciseMode !== 'undefined' && exerciseMode === 'head');
+    const leadInBeats = (isFirstRow && _isHeadMode)
       ? (window.currentSong && window.currentSong.head && window.currentSong.head.leadInBeats) || 0
       : 0;
     const pickupWidth = leadInBeats > 0
       ? Math.round((leadInBeats / ts.num) * measureWidth)
       : 0;
+    // Pickup-shrink: when row 1 carries an anacrusis, the pickup's
+    // horizontal slice is part of the row's total width budget.
+    // Without compensation, row 1 would be wider than every other
+    // row; since the SVG scales (viewBox + width:100%) to fit the
+    // container, that wider row renders visually SMALLER on screen
+    // (bars 1-N look squashed compared to bars on later rows).
+    // Subtract an equal share of pickupWidth from each bar on row 1
+    // so the row's total width matches the other rows and the global
+    // scale stays uniform.
+    const pickupShrinkPerBar = (leadInBeats > 0 && mpl > 0)
+      ? Math.floor(pickupWidth / mpl)
+      : 0;
+    const barWidth = measureWidth + extraPerBar - pickupShrinkPerBar;
     // Always size the row as if it were a full MPL row so short rows (last
     // row, end-of-pass) keep the same per-bar width as full rows and the
     // remainder of the staff sits as empty space to the right.
@@ -7211,7 +7244,12 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
   // so toggling Lead during playback flips the pickup audibility
   // along with everything else.
   const pickupHead = window.currentSong && window.currentSong.head;
-  if (pickupHead && pickupHead.leadInBeats > 0
+  // Pickup playback is HEAD-MODE-ONLY. In Blank and Exercise modes the
+  // melody isn't being rendered in the partial bar, so playing pickup
+  // notes there would be audio-only ghost notes with nothing on the
+  // staff to match them.
+  const _pickupHeadMode = (typeof exerciseMode !== 'undefined' && exerciseMode === 'head');
+  if (_pickupHeadMode && pickupHead && pickupHead.leadInBeats > 0
       && Array.isArray(pickupHead.pickupNotes) && pickupHead.pickupNotes.length
       && startBarIdx === 0 && countInBars > 0) {
     const leadInBeats = pickupHead.leadInBeats;
