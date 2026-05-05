@@ -1082,6 +1082,320 @@ function generateBlankExercise(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// Descending generator: at every PAIR of bars (1-2, 3-4, 5-6, ...) the
+// line restarts on the highest 1, 3, or 5 of the pair's first chord
+// (whichever of the three lands highest in the F1..F3 cello range)
+// and then walks down ONE diatonic scale step per beat. Each step's
+// scale comes from the chord active at that beat, so the descent
+// follows the harmony — e.g. on FMaj7 → D7♭9 the line might go
+// F3 E3 D3 C3 | B♭2 A2 G2 F♯2 (F major's E,D,C in bar 1, then
+// D7♭9's Phrygian Dominant tones B♭, A, G, F♯ in bar 2).
+//
+// "Restart on the highest" each pair means odd-numbered pairs jump
+// back UP to a new starting tone — there's an audible reset every
+// 2 bars. The 8 quarter notes in between (4+4 in 4/4, 3+3 in 3/4)
+// are stepwise descending.
+function generateDescendingQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    if (pat && pat.keyMode === 'major') return { root: pat.keyRoot, scale: SCALE_IONIAN };
+    return { root: ce.root, scale: exGetScale(chordToCanonical(ce.chord)) };
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // Effective scale at a (barIdx, beatIdx). Used by the DESCENT
+  // step — for major-key patterns the effective scale is the
+  // parent key's Ionian, which has the same pitch set as the
+  // chord's own mode but anchors the descent inside the key
+  // signature without surprise alterations.
+  function effAtBeat(barIdx, beatIdx) {
+    for (let i = 0; i < chordEvents.length; i++) {
+      const ce = chordEvents[i];
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return effective[i];
+    }
+    return null;
+  }
+  // Chord event at (barIdx, beatIdx). Used to read the chord's OWN
+  // root and scale for the start-tone pick — "1, 3, or 5 of the
+  // chord" must mean the chord's own 1/3/5, NOT the parent key's
+  // (e.g. Cm7 inside B♭ major: chord 1/3/5 is C/E♭/G, parent-key
+  // 1/3/5 would be B♭/D/F — wrong starting note).
+  function chordAtBeat(barIdx, beatIdx) {
+    for (let i = 0; i < chordEvents.length; i++) {
+      const ce = chordEvents[i];
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return ce;
+    }
+    return null;
+  }
+
+  // Highest pitch among the chord's own 1, 3, and 5 that fits in
+  // the cello range. Reads the chord's own scale (via exGetScale)
+  // so the result is always rooted at the actual chord root —
+  // independent of any major-key pattern grouping that might
+  // recolor the descent later.
+  function highestRootThirdFifth(ce) {
+    if (!ce) return null;
+    const scale = exGetScale(chordToCanonical(ce.chord));
+    if (!scale || !scale.length) return null;
+    const rootPc  = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    let best = null;
+    for (const di of [0, 2, 4]) {
+      if (di >= scale.length) continue;
+      const sd = scale[di];
+      const pc = (((rootPc + sd.s) % 12) + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      let highest = -1;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) highest = p;
+      }
+      if (highest >= 0 && (best === null || highest > best.pitch)) {
+        best = { pitch: highest, tpc };
+      }
+    }
+    return best;
+  }
+
+  // Highest scale tone strictly LOWER than `abovePitch`, in the
+  // given scale, within the cello range. Returns null if nothing
+  // qualifies (the line has reached the bottom of the range — the
+  // remaining beats stay null and render as rests).
+  function diatonicBelow(scale, rootPc, rootTpc, abovePitch) {
+    let best = null;
+    for (let oct = 0; oct <= 7; oct++) {
+      for (let i = 0; i < scale.length; i++) {
+        const pitch = rootPc + scale[i].s + oct * 12;
+        if (pitch < EX_LOW || pitch > EX_HIGH) continue;
+        if (pitch >= abovePitch) continue;
+        if (best === null || pitch > best.pitch) {
+          best = { pitch, tpc: rootTpc + scale[i].t };
+        }
+      }
+    }
+    return best;
+  }
+
+  for (let pairStart = 0; pairStart < bars.length; pairStart += 2) {
+    const pairEnd = Math.min(pairStart + 2, bars.length);
+    // Read the chord event (not the effective scale) so the start
+    // tone is "1/3/5 of the chord written above the bar", not 1/3/5
+    // of the parent key.
+    const startCe = chordAtBeat(pairStart, 0);
+    if (!startCe) continue;
+    const startTone = highestRootThirdFifth(startCe);
+    if (!startTone) continue;
+
+    // First note of the pair: the start tone exactly. Subsequent
+    // beats step down one scale degree at a time, picking the
+    // scale of whichever chord owns each beat.
+    let prevPitch = startTone.pitch;
+    let placed = false;
+    pair: for (let bi = pairStart; bi < pairEnd; bi++) {
+      for (let beat = 0; beat < beatsPerBar; beat++) {
+        if (!placed) {
+          results[bi][beat] = { pitch: startTone.pitch, tpc: startTone.tpc };
+          prevPitch = startTone.pitch;
+          placed = true;
+          continue;
+        }
+        const eff = effAtBeat(bi, beat);
+        if (!eff) continue;
+        const next = diatonicBelow(
+          eff.scale, eff.root.pitchClass, eff.root.tpc, prevPitch
+        );
+        if (!next) {
+          // Bottom of the cello range — stop the descent; the
+          // remaining beats in this pair stay rests.
+          break pair;
+        }
+        results[bi][beat] = { pitch: next.pitch, tpc: next.tpc };
+        prevPitch = next.pitch;
+      }
+    }
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Render a pickup-bar stave at (x, staffY) with the given total
+// width. Carries the bass clef + time signature on row 1, then any
+// pickup notes from the head (in Head mode) or just rests (other
+// modes). Returns the constructed stave so the caller can position
+// downstream bars after it.
+//
+// Used by renderChart's row-1 layout when currentSong.head.leadInBeats
+// > 0. Phase 2 of pickup support: makes the user's MusicXML pickup
+// melody actually appear on the chart, while keeping the iRealPro-
+// chart `bars[]` indexing untouched (pickup is a phantom prefix
+// outside of `bars[]`, so fingerings keyed by bar index don't shift).
+function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHeadMode, pickupNotes) {
+  // VF is defined locally inside renderChart, not globally — pull it
+  // from the same Vex.Flow source so this helper is self-contained.
+  if (!window.Vex || !window.Vex.Flow) return null;
+  const VF = window.Vex.Flow;
+  const stave = new VF.Stave(x, staffY, totalWidth, { left_bar: false, right_bar: false });
+  stave.addClef('bass', undefined, '8vb');
+  stave.addTimeSignature(ts.str);
+  stave.setBegBarType(VF.Barline.type.NONE);
+  // Double barline (two thin lines) at the boundary with bar 1 —
+  // a clean section-divider glyph that demarcates the pickup from
+  // the form proper without the heaviness of an end-of-piece
+  // (thin + thick) barline.
+  stave.setEndBarType(VF.Barline.type.DOUBLE);
+  stave.setContext(context).draw();
+
+  // Build a per-step array (24th-note resolution, matching the head
+  // generator) covering the pickup span. Notes go in their stepStart
+  // slots; empty slots will become rests.
+  const pickupSteps = leadInBeats * 6;
+  const beatPitches = new Array(pickupSteps).fill(null);
+  if (isHeadMode && Array.isArray(pickupNotes)) {
+    for (const n of pickupNotes) {
+      const slot = Math.round(n.stepStart || 0);
+      if (slot < 0 || slot >= pickupSteps) continue;
+      // Map durationSteps → standard duration token. Picks the
+      // largest token that fits; falls back to 8th for fragments.
+      const ds = Math.round(n.durationSteps || 6);
+      const dur = ds >= 24 ? 'w'
+                : ds >= 18 ? 'h.'
+                : ds >= 12 ? 'h'
+                : ds >= 9  ? 'q.'
+                : ds >= 6  ? 'q'
+                : '8';
+      beatPitches[slot] = { pitch: n.midi, tpc: n.tpc, duration: dur };
+    }
+  }
+
+  // Walk the slot array, building VF.StaveNote tickables. Pitched
+  // notes use midiTpcToVexKey + an Accidental modifier when needed;
+  // empty runs are coalesced into the largest standard rest that fits.
+  const DUR_TO_STEPS = { 'w': 24, 'h.': 18, 'h': 12, 'q.': 9, 'q': 6, '8': 3 };
+  const ACC_GLYPH = { '-2': 'bb', '-1': 'b', '0': 'n', '1': '#', '2': '##' };
+  const restOpts = [
+    { dur: 'h', steps: 12 },
+    { dur: 'q', steps: 6 },
+    { dur: '8', steps: 3 }
+  ];
+  const notes = [];
+  let b = 0;
+  while (b < pickupSteps) {
+    const bp = beatPitches[b];
+    if (bp) {
+      const dur = bp.duration || 'q';
+      const consume = DUR_TO_STEPS[dur] || 6;
+      const { key, level } = midiTpcToVexKey(bp.pitch, bp.tpc);
+      const stemDir = bp.pitch >= 38 ? VF.Stem.DOWN : VF.Stem.UP;
+      let baseDur = dur;
+      let dotCount = 0;
+      while (baseDur.endsWith('.')) { dotCount++; baseDur = baseDur.slice(0, -1); }
+      const sn = new VF.StaveNote({
+        clef: 'bass', keys: [key], duration: baseDur, stem_direction: stemDir
+      });
+      if (dotCount > 0 && VF.Dot && VF.Dot.buildAndAttach) {
+        VF.Dot.buildAndAttach([sn], { all: true });
+      }
+      if (level !== 0) {
+        sn.addModifier(new VF.Accidental(ACC_GLYPH[String(level)]), 0);
+      }
+      notes.push(sn);
+      b += consume;
+    } else {
+      let run = 0;
+      while (b + run < pickupSteps && !beatPitches[b + run]) run++;
+      while (run > 0) {
+        let chosen = restOpts[restOpts.length - 1];
+        for (const opt of restOpts) {
+          if (opt.steps <= run) { chosen = opt; break; }
+        }
+        notes.push(new VF.StaveNote({
+          clef: 'bass', keys: ['d/3'], duration: chosen.dur + 'r'
+        }));
+        b += chosen.steps;
+        run -= chosen.steps;
+      }
+    }
+  }
+
+  // Build beams over consecutive 8th notes within the same beat.
+  // Pickup is short (≤ a few beats), so a simple beat-boundary grouper
+  // is enough — no need for the half-bar grouping the main renderer
+  // uses. Without this, eighth notes draw with individual flags, which
+  // looks wrong next to the rest of the chart.
+  const pickupBeams = [];
+  {
+    let pending = [];
+    let pendingBeat = -1;
+    let stepCursor = 0;
+    const flush = () => {
+      if (pending.length >= 2) pickupBeams.push(new VF.Beam(pending.slice(), true));
+      pending = [];
+      pendingBeat = -1;
+    };
+    let i = 0;
+    let bb = 0;
+    while (bb < pickupSteps) {
+      const bp = beatPitches[bb];
+      if (bp) {
+        const consume = DUR_TO_STEPS[bp.duration] || 6;
+        const note = notes[i++];
+        if (bp.duration === '8' && note && !(note.isRest && note.isRest())) {
+          const beatAtStart = Math.floor(stepCursor / 6);
+          const beatAtEnd   = Math.floor((stepCursor + consume - 1) / 6);
+          if (pending.length > 0 && pendingBeat !== beatAtStart) flush();
+          if (pending.length > 0 && beatAtStart !== beatAtEnd) flush();
+          pending.push(note);
+          pendingBeat = beatAtStart;
+        } else {
+          flush();
+        }
+        bb += consume;
+        stepCursor += consume;
+      } else {
+        // Rest run: walk and skip the rest tickables we generated.
+        let run = 0;
+        while (bb + run < pickupSteps && !beatPitches[bb + run]) run++;
+        flush();
+        while (run > 0) {
+          let chosenSteps = 3;
+          if (12 <= run) chosenSteps = 12;
+          else if (6 <= run) chosenSteps = 6;
+          i++; // skip the rest tickable
+          bb += chosenSteps;
+          stepCursor += chosenSteps;
+          run -= chosenSteps;
+        }
+      }
+    }
+    flush();
+  }
+
+  // Voice and draw. setStrict(false) tolerates whatever rounding the
+  // duration tokens introduced; the formatter packs notes into the
+  // stave's note-area (between getNoteStartX and getNoteEndX). Using
+  // those VexFlow-reported boundaries — with a small right-margin —
+  // keeps notes from crowding the closing double barline.
+  const voice = new VF.Voice({
+    num_beats: leadInBeats, beat_value: ts.denom, resolution: VF.RESOLUTION
+  });
+  voice.setStrict(false);
+  voice.addTickables(notes);
+  const noteStartX = stave.getNoteStartX();
+  const noteEndX = stave.getNoteEndX();
+  const fmtWidth = Math.max(20, (noteEndX - noteStartX) - 14);
+  new VF.Formatter().joinVoices([voice]).format([voice], fmtWidth);
+  voice.draw(context, stave);
+  pickupBeams.forEach(beam => beam.setContext(context).draw());
+  return stave;
+}
+
 // Cantus Firmus generator: one tone per chord, held for the chord's full
 // duration by repeating the same pitch on every beat. The melody descends
 // slowly — the next note is the lowest diatonic tone within a whole step
@@ -2289,6 +2603,92 @@ async function loadSongMusicXML(title) {
   }
 }
 
+// Detect a pickup (anacrusis / lead-in) on the first measure of the
+// MusicXML document. Returns the pickup length in beats (0 if there
+// is none). Three signals, in order of trust:
+//   1. <measure implicit="yes"> — explicitly marked.
+//   2. <measure number="0">     — common engraver convention.
+//   3. First measure's note durations sum to LESS than the time
+//      signature's beat count AND the measure has at least one
+//      pitched note.
+// MuseScore exports usually set the first two signals; engravers
+// that don't are caught by the duration check. False positives are
+// limited to "first measure has a leading rest the same length as a
+// pickup," which the duration sum would mistakenly call full — but
+// if we reach the duration check it means neither metadata flag
+// fired, so that case is rare and the user can override via
+// songs/leadIns.json (future work).
+function detectLeadIn(doc, beatsPerBar) {
+  const score = doc.querySelector('score-partwise') || doc.querySelector('score-timewise');
+  if (!score) return 0;
+  const part = score.querySelector('part');
+  if (!part) return 0;
+  const firstMeasure = part.querySelector('measure');
+  if (!firstMeasure) return 0;
+
+  // If the caller didn't pass beatsPerBar, pull it from the doc's
+  // first <time> declaration. Falls back to 4 (4/4) for documents
+  // that don't declare a time signature explicitly.
+  if (!Number.isFinite(beatsPerBar) || beatsPerBar <= 0) {
+    const beatsEl = score.querySelector('attributes > time > beats');
+    beatsPerBar = beatsEl ? (parseInt(beatsEl.textContent, 10) || 4) : 4;
+  }
+
+  // Helper: divisions-per-quarter from the score's first <attributes>
+  // (or the measure itself if the file declares it inline).
+  function divisionsFor(measure) {
+    const local = measure.querySelector('attributes > divisions');
+    if (local) return parseInt(local.textContent, 10) || 1;
+    const global = score.querySelector('attributes > divisions');
+    if (global) return parseInt(global.textContent, 10) || 1;
+    return 1;
+  }
+  // Sum the duration of the measure's primary-voice notes / rests /
+  // forward markers, in quarter-note beats. <chord/> notes don't
+  // advance the cursor (they're simultaneous with the prior note),
+  // so they're skipped.
+  function measureBeats(measure) {
+    const div = divisionsFor(measure);
+    if (div <= 0) return 0;
+    let totalDur = 0;
+    measure.querySelectorAll(':scope > note, :scope > forward, :scope > backup').forEach(el => {
+      if (el.tagName === 'note' && el.querySelector('chord')) return;
+      // Skip non-voice-1 notes — most MusicXML keeps voice 1 as the
+      // melody and parallel voices for harmony/accompaniment.
+      if (el.tagName === 'note') {
+        const v = el.querySelector('voice');
+        if (v && parseInt(v.textContent, 10) !== 1) return;
+      }
+      const d = el.querySelector('duration');
+      if (!d) return;
+      const ticks = parseInt(d.textContent, 10) || 0;
+      // <backup> moves the cursor back; for a beat-count we want
+      // forward progress only.
+      if (el.tagName === 'backup') totalDur -= ticks;
+      else                          totalDur += ticks;
+    });
+    return totalDur / div;
+  }
+
+  // Strong signals from the engraver.
+  if (firstMeasure.getAttribute('implicit') === 'yes') {
+    return Math.max(0, measureBeats(firstMeasure));
+  }
+  if (firstMeasure.getAttribute('number') === '0') {
+    return Math.max(0, measureBeats(firstMeasure));
+  }
+  // Weak signal: a short measure that contains at least one pitched
+  // note. Pure-rest first measures (e.g. an intro silent bar) don't
+  // qualify — those should be modeled as bar 1 of rests, not as a
+  // pickup.
+  const beats = measureBeats(firstMeasure);
+  if (beats > 0 && beats < beatsPerBar) {
+    const hasPitch = firstMeasure.querySelector('note > pitch') != null;
+    if (hasPitch) return beats;
+  }
+  return 0;
+}
+
 // Parse a MusicXML document into a flat list of melody notes. Uses
 // the first <part>, voice 1, first staff. Chord notes (<chord/>)
 // collapse to the top voice — we keep the highest MIDI at each
@@ -2471,7 +2871,35 @@ function parseMusicXML(doc) {
     absStep = measureEnd;
   }
 
-  return { notes };
+  // Pickup detection: if the first measure is a lead-in, partition
+  // the notes so the head's MAIN array starts cleanly at bar-1
+  // downbeat (stepStart = 0), and stash the pickup notes separately
+  // for a future render pass to draw before bar 1. Without this
+  // partition, both the pickup notes (stepStart 0..pickupSteps-1)
+  // AND the first real bar's notes (stepStart pickupSteps..) end up
+  // mapped to bars[0] by `Math.floor(stepStart / stepsPerBar)`,
+  // overlapping each other and rendering as a mess.
+  const leadInBeats = detectLeadIn(doc);
+  const leadInSteps = Math.round(leadInBeats * 6); // 24th-note grid
+  const pickupNotes = [];
+  let mainNotes = notes;
+  if (leadInSteps > 0) {
+    mainNotes = [];
+    for (const n of notes) {
+      if (n.stepStart < leadInSteps) {
+        // Pickup note — keep its stepStart relative to the START of
+        // the pickup measure so a future renderer can paint it.
+        pickupNotes.push(n);
+      } else {
+        // Main note — shift left so bar 1 starts at stepStart=0,
+        // matching how the renderer's iReal `bars[0]` lines up.
+        mainNotes.push(Object.assign({}, n, {
+          stepStart: n.stepStart - leadInSteps
+        }));
+      }
+    }
+  }
+  return { notes: mainNotes, leadInBeats, pickupNotes };
 }
 
 // Convert a parsed @tonejs/midi Midi object to the same note shape
@@ -3887,6 +4315,8 @@ function renderChart(song, barsIn, timesigStr) {
   //                       bar's first note (e.g. D E F F♯ | G A B D♭).
   //   - "blank"         → empty staff with chord symbols above; for
   //                       hand-writing or printing as practice paper.
+  //   - "descending"    → restart on the highest 1/3/5 every 2 bars,
+  //                       walk down one diatonic step per beat.
   const bars = expandBarsByRepeats(barsIn, songRepeats);
   const gen = exerciseMode === 'head' ? generateHeadFromScore
             : exerciseMode === 'chord' ? generate1357QuarterNotes
@@ -3898,6 +4328,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === 'longEnclosures' ? generateLongEnclosuresQuarterNotes
             : exerciseMode === 'scaleChromatic' ? generateScaleChromaticQuarterNotes
             : exerciseMode === 'blank' ? generateBlankExercise
+            : exerciseMode === 'descending' ? generateDescendingQuarterNotes
             : exerciseMode === '1235' ? generate1235EighthNotes
             : exerciseMode === '3579' ? generate3579EighthNotes
             : generateQuarterNotes;
@@ -4067,10 +4498,20 @@ function renderChart(song, barsIn, timesigStr) {
     const clefExtra   = (_printMode || !isFirstRow) ? 0 : firstMeasureClefWidth;
     const extraPerBar = (_printMode || isFirstRow)  ? 0 : Math.floor(clefOnlyExtra / mpl);
     const barWidth = measureWidth + extraPerBar;
+    // Pickup (anacrusis) — a partial bar carried at the very start
+    // of row 1, OUTSIDE the iRealPro `bars[]` array so bar numbering
+    // and fingering indexing stay aligned with bar 1 = bars[0].
+    // leadInBeats comes from MusicXML detection at parse time.
+    const leadInBeats = isFirstRow
+      ? (window.currentSong && window.currentSong.head && window.currentSong.head.leadInBeats) || 0
+      : 0;
+    const pickupWidth = leadInBeats > 0
+      ? Math.round((leadInBeats / ts.num) * measureWidth)
+      : 0;
     // Always size the row as if it were a full MPL row so short rows (last
     // row, end-of-pass) keep the same per-bar width as full rows and the
     // remainder of the staff sits as empty space to the right.
-    const rowWidth = leftPadding + clefExtra + mpl * barWidth + rightPadding;
+    const rowWidth = leftPadding + clefExtra + pickupWidth + mpl * barWidth + rightPadding;
     // Per-bar width allocation. A row of [whole-note, 4-quarter,
     // 4-quarter, 4-quarter] used to give every bar an equal slice
     // even though the whole-note bar only needs ~25% of the four-
@@ -4212,9 +4653,15 @@ function renderChart(song, barsIn, timesigStr) {
     const context = renderer.getContext();
     context.setFont('Arial', 10);
 
-    // Measure number
+    // Measure number — labels the row's first NON-PICKUP bar so the
+    // "1" lands next to bar 1 instead of next to the pickup. For all
+    // other rows (and rows without a pickup) the number sits at x=4
+    // in the left margin as before.
     const num = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    num.setAttribute('x', 4);
+    const numX = (isFirstRow && leadInBeats > 0)
+      ? leftPadding + clefExtra + pickupWidth - 10
+      : 4;
+    num.setAttribute('x', numX);
     num.setAttribute('y', staffY + 2);
     num.setAttribute('font-family', 'serif');
     num.setAttribute('font-style', 'italic');
@@ -4224,6 +4671,31 @@ function renderChart(song, barsIn, timesigStr) {
     // insertion happens after svg exists below
 
     let x = leftPadding;
+    // Render the pickup stave first on row 1 (when present). The
+    // pickup carries the clef + time signature; bars[0]'s stave
+    // therefore skips its clef+sig in this case (see the !leadInBeats
+    // checks in the rowBars loop below). Wrapped in try/catch so
+    // any rendering issue inside the pickup helper doesn't take down
+    // the whole chart — the bars[] rendering below stays intact and
+    // the user just doesn't see the pickup.
+    if (leadInBeats > 0 && isFirstRow) {
+      const pickupTotalWidth = clefExtra + pickupWidth;
+      try {
+        const isHeadMode = (exerciseMode === 'head');
+        const pickupNotes = (window.currentSong && window.currentSong.head && window.currentSong.head.pickupNotes) || [];
+        renderPickupStave(
+          context, x, staffY, pickupTotalWidth,
+          leadInBeats, ts, isHeadMode, pickupNotes
+        );
+      } catch (e) {
+        // Surface the failure in the console (so we can diagnose)
+        // but continue with the bars[] rendering. The pickup space
+        // will be empty on screen, but the rest of the chart still
+        // appears.
+        console.error('Pickup render failed:', e);
+      }
+      x += pickupTotalWidth;
+    }
     const barPosInRow = []; // { barIdx, noteStartX, noteEndX } for pattern overlays
     // Cross-bar tie state: the most recent note in this row that was
     // flagged `tieToNext`. When the next bar's first note is flagged
@@ -4243,16 +4715,21 @@ function renderChart(song, barsIn, timesigStr) {
       // distribution above; the clefExtra is reserved space for
       // the bass clef + 8vb + time-sig glyphs, only present on
       // the very first measure of the score.
-      const width = barWidths[i] + (isFirstInRow ? clefExtra : 0);
+      // When the row has a pickup, the pickup stave already drew the
+      // clef + time signature, so bars[0] doesn't need clefExtra and
+      // doesn't add the clef again.
+      const carriesClef = isFirstRow && isFirstInRow && leadInBeats === 0;
+      const width = barWidths[i] + (carriesClef ? clefExtra : 0);
       // left_bar/right_bar default to true in VexFlow, which draws grey
       // vertical edges at the stave's left and right — the "border" around
       // each measure. Turn them off; we manage measure boundaries via
       // Barline modifiers only (and only for repeats / final / double).
       const stave = new VF.Stave(x, staffY, width, { left_bar: false, right_bar: false });
-      // Clef + time signature only on the very first measure of the score.
+      // Clef + time signature only on the very first measure of the score
+      // when there's no pickup (otherwise the pickup carries them).
       // Continuation rows skip the clef to keep the reading surface dense
       // and to make more note space available inside each bar.
-      if (isFirstRow && isFirstInRow) {
+      if (carriesClef) {
         stave.addClef('bass', undefined, '8vb');
         stave.addTimeSignature(ts.str);
       }
@@ -6723,6 +7200,50 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       }, `${cb}:${beat}:0`);
     }
   }
+  // Pickup melody (anacrusis): schedule each pickup note to play at
+  // the matching beat of the LAST count-in bar so the lead-in
+  // approaches bar 1's downbeat from the previous bar's tail. Lives
+  // outside the playbackPart's bars[]-driven schedule because the
+  // pickup is conceptually before bar 1, not part of it. Plays only
+  // when starting from bar 0 with at least one count-in bar (no
+  // count-in → no room to fit the pickup; mid-song restart → the
+  // pickup is irrelevant). Gated by playScoreOn inside the callback
+  // so toggling Lead during playback flips the pickup audibility
+  // along with everything else.
+  const pickupHead = window.currentSong && window.currentSong.head;
+  if (pickupHead && pickupHead.leadInBeats > 0
+      && Array.isArray(pickupHead.pickupNotes) && pickupHead.pickupNotes.length
+      && startBarIdx === 0 && countInBars > 0) {
+    const leadInBeats = pickupHead.leadInBeats;
+    const pickupBarIdx = countInBars - 1;
+    // Same key shift as generateHeadFromScore (rawOffset only — the
+    // octave-correction step that pulls the head into the cello
+    // range isn't replicated here, so a heavily transposed pickup
+    // may land an octave away from the head's main melody. Common
+    // case (no transpose / song stays in its original key) is fine.
+    const rawOffset = (KEY_TO_PC[currentKey] - KEY_TO_PC[originalKey] + 12) % 12;
+    for (const n of pickupHead.pickupNotes) {
+      if (n.rest || typeof n.midi !== 'number') continue;
+      // 24-step grid → beats. stepStart is 0-indexed inside the pickup.
+      const beatInPickup = (n.stepStart || 0) / 6;
+      const beatPos = beatsPerBar - leadInBeats + beatInPickup;
+      const beatInt = Math.floor(beatPos);
+      const sub16 = Math.round((beatPos - beatInt) * 4);
+      const time = `${pickupBarIdx}:${beatInt}:${sub16}`;
+      const transposedMidi = n.midi + rawOffset;
+      // +12 mirrors the same convention the in-Part lead playback
+      // uses: head pitches are stored at sounding-bass-clef MIDI,
+      // so we shift up an octave to hit the actual played pitch on
+      // the guitar sampler.
+      const noteName = midiToName(transposedMidi + 12);
+      const durSec = ((n.durationSteps || 6) / 6) * (60 / currentTempo);
+      Tone.Transport.scheduleOnce(t => {
+        if (playScoreOn && guitar && guitar.loaded) {
+          try { guitar.triggerAttackRelease(noteName, durSec, t, 0.7); } catch (e) {}
+        }
+      }, time);
+    }
+  }
 
   for (let barNum = 0; barNum < playlist.length; barNum++) {
     const entry = playlist[barNum];
@@ -8020,11 +8541,35 @@ document.querySelectorAll('#sizeSeg button').forEach(b => {
   });
 });
 
+// Tracks the user's last-clicked Repeats value so we can restore
+// it when leaving Head mode. Head mode forces an effective value of
+// 1 (the head plays once); switching back to Blank or Exercise mode
+// restores whatever the user had last selected.
+let _userRepeatChoice = 1;
+
+// Sync the Repeats segmented control to the current exerciseMode:
+// in Head mode the seg locks to "1" and every button is disabled
+// (clicking does nothing); otherwise the seg follows _userRepeatChoice
+// and stays interactive. Also normalizes the live `songRepeats`
+// global so generators/playback see the right effective value.
+function _updateRepeatsSegLock() {
+  const isHead = (typeof exerciseMode !== 'undefined' && exerciseMode === 'head');
+  const buttons = document.querySelectorAll('#repeatSeg button');
+  songRepeats = isHead ? 1 : _userRepeatChoice;
+  buttons.forEach(b => {
+    b.disabled = isHead;
+    const r = parseInt(b.dataset.r, 10) || 1;
+    b.classList.toggle('active', r === songRepeats);
+  });
+}
+
 document.querySelectorAll('#repeatSeg button').forEach(b => {
   b.addEventListener('click', async () => {
+    if (b.disabled) return; // locked in Head mode
     document.querySelectorAll('#repeatSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
-    songRepeats = parseInt(b.dataset.r, 10) || 1;
+    _userRepeatChoice = parseInt(b.dataset.r, 10) || 1;
+    songRepeats = _userRepeatChoice;
     rerenderCurrent();
     if (playState === 'playing' && window.currentSong) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
@@ -8032,6 +8577,8 @@ document.querySelectorAll('#repeatSeg button').forEach(b => {
     }
   });
 });
+// Sync once on load so the seg reflects the initial Head-mode default.
+_updateRepeatsSegLock();
 
 document.getElementById('drumVol').addEventListener('input', e => {
   const v = parseInt(e.target.value, 10) / 100;
@@ -8130,13 +8677,14 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   if (!sel) return;
   sel.addEventListener('change', async () => {
     const ex = sel.value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === '1235' || ex === '3579')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '3579')
       ? ex : 'scale';
     // Auto-flip the mode seg to "Exercise" — picking from the
     // dropdown is an implicit "I want an exercise" gesture.
     document.querySelectorAll('#modeSeg button').forEach(b => {
       b.classList.toggle('active', b.dataset.mode === 'exercise');
     });
+    if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
     updateScoreTitle();
     rerenderCurrent();
     // Re-evaluate Play button state — switching to/from Head with a
@@ -8174,9 +8722,14 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
       } else {
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === '1235' || ex === '3579')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '3579')
           ? ex : 'scale';
       }
+      // Repeats lock to 1 in Head mode; restored from the user's
+      // last choice when switching out. _updateRepeatsSegLock also
+      // updates the live `songRepeats` global so the rerender picks
+      // up the right effective count.
+      if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
       updateScoreTitle();
       rerenderCurrent();
       // Switching INTO Head on a song without one disables Play;

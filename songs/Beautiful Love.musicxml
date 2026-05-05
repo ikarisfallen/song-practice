@@ -11,7 +11,7 @@
 This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</rights>
     <encoding>
       <software>MuseScore 3.6.2</software>
-      <encoding-date>2026-04-27</encoding-date>
+      <encoding-date>2026-05-04</encoding-date>
       <supports element="accidental" type="yes"/>
       <supports element="beam" type="yes"/>
       <supports element="print" attribute="new-page" type="yes" value="yes"/>
@@ -40,15 +40,15 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</rights>
     </defaults>
   <credit page="1">
     <credit-type>title</credit-type>
-    <credit-words default-x="600" default-y="1611.86" justify="center" valign="top" font-weight="bold" font-family="Edwin" font-size="28">BEAUTIFUL LOVE</credit-words>
+    <credit-words default-x="600" default-y="1612.29" justify="center" valign="top" font-weight="bold" font-family="Edwin" font-size="28">BEAUTIFUL LOVE</credit-words>
     </credit>
   <credit page="1">
     <credit-type>lyricist</credit-type>
-    <credit-words default-x="40.0001" default-y="1531.86" justify="left" valign="top" font-family="Edwin">Haven Gillespie</credit-words>
+    <credit-words default-x="40.0001" default-y="1532.29" justify="left" valign="top" font-family="Edwin">Haven Gillespie</credit-words>
     </credit>
   <credit page="1">
     <credit-type>composer</credit-type>
-    <credit-words default-x="1160" default-y="1531.86" justify="right" valign="top" font-family="Edwin">Victor Young, Wayne King,
+    <credit-words default-x="1160" default-y="1532.29" justify="right" valign="top" font-family="Edwin">Victor Young, Wayne King,
 </credit-words>
     <credit-words>and Egbert Van Alstyne</credit-words>
     </credit>
@@ -74,7 +74,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
       </score-part>
     </part-list>
   <part id="P1">
-    <measure number="1" width="311.37">
+    <measure number="1" width="242.22">
       <print>
         <system-layout>
           <system-margins>
@@ -99,13 +99,45 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           <clef-octave-change>-1</clef-octave-change>
           </clef>
         </attributes>
+      <note default-x="92.81" default-y="-20.00">
+        <pitch>
+          <step>D</step>
+          <octave>2</octave>
+          </pitch>
+        <duration>2</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <stem>down</stem>
+        </note>
+      <note default-x="142.01" default-y="-15.00">
+        <pitch>
+          <step>E</step>
+          <octave>2</octave>
+          </pitch>
+        <duration>2</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <stem>up</stem>
+        </note>
+      <note default-x="191.21" default-y="-10.00">
+        <pitch>
+          <step>F</step>
+          <octave>2</octave>
+          </pitch>
+        <duration>2</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <stem>up</stem>
+        </note>
+      </measure>
+    <measure number="2" width="187.58">
       <harmony print-frame="no">
         <root>
           <root-step>E</root-step>
           </root>
         <kind text="m7(b5)()" parentheses-degrees="yes">half-diminished</kind>
         </harmony>
-      <note default-x="99.81" default-y="0.00">
+      <note default-x="15.50" default-y="0.00">
         <pitch>
           <step>A</step>
           <octave>2</octave>
@@ -116,7 +148,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <dot/>
         <stem>up</stem>
         </note>
-      <note default-x="238.48" default-y="-5.00">
+      <note default-x="128.08" default-y="-5.00">
         <pitch>
           <step>G</step>
           <octave>2</octave>
@@ -127,7 +159,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="2" width="294.92">
+    <measure number="3" width="255.44">
       <harmony print-frame="no">
         <root>
           <root-step>A</root-step>
@@ -150,7 +182,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <dot/>
         <stem>up</stem>
         </note>
-      <note default-x="98.18" default-y="-15.00">
+      <note default-x="86.42" default-y="-15.00">
         <pitch>
           <step>E</step>
           <octave>2</octave>
@@ -160,7 +192,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>eighth</type>
         <stem>up</stem>
         </note>
-      <note default-x="140.56" default-y="-20.00">
+      <note default-x="122.77" default-y="-20.00">
         <pitch>
           <step>D</step>
           <octave>2</octave>
@@ -170,7 +202,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>quarter</type>
         <stem>up</stem>
         </note>
-      <note default-x="208.36" default-y="-15.00">
+      <note default-x="180.94" default-y="-15.00">
         <pitch>
           <step>E</step>
           <octave>2</octave>
@@ -181,7 +213,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         <beam number="1">begin</beam>
         </note>
-      <note default-x="250.74" default-y="-10.00">
+      <note default-x="217.29" default-y="-10.00">
         <pitch>
           <step>F</step>
           <octave>2</octave>
@@ -197,7 +229,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="3" width="203.16">
+    <measure number="4" width="163.69">
       <harmony print-frame="no">
         <root>
           <root-step>D</root-step>
@@ -218,14 +250,14 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="4" width="260.55">
+    <measure number="5" width="221.07">
       <note>
         <rest/>
         <duration>1</duration>
         <voice>1</voice>
         <type>eighth</type>
         </note>
-      <note default-x="52.95" default-y="-10.00">
+      <note default-x="46.54" default-y="-10.00">
         <pitch>
           <step>F</step>
           <octave>2</octave>
@@ -236,7 +268,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <dot/>
         <stem>up</stem>
         </note>
-      <note default-x="130.90" default-y="-5.00">
+      <note default-x="111.96" default-y="-5.00">
         <pitch>
           <step>G</step>
           <octave>2</octave>
@@ -246,7 +278,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>quarter</type>
         <stem>up</stem>
         </note>
-      <note default-x="194.83" default-y="0.00">
+      <note default-x="165.62" default-y="0.00">
         <pitch>
           <step>A</step>
           <octave>2</octave>
@@ -257,7 +289,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="5" width="292.77">
+    <measure number="6" width="290.11">
       <print new-system="yes">
         <system-layout>
           <system-margins>
@@ -284,7 +316,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <dot/>
         <stem>down</stem>
         </note>
-      <note default-x="218.69" default-y="5.00">
+      <note default-x="216.93" default-y="5.00">
         <pitch>
           <step>B</step>
           <alter>-1</alter>
@@ -296,7 +328,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>down</stem>
         </note>
       </measure>
-    <measure number="6" width="298.45">
+    <measure number="7" width="295.79">
       <harmony print-frame="no">
         <root>
           <root-step>C</root-step>
@@ -314,7 +346,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <dot/>
         <stem>up</stem>
         </note>
-      <note default-x="99.23" default-y="-5.00">
+      <note default-x="98.44" default-y="-5.00">
         <pitch>
           <step>G</step>
           <octave>2</octave>
@@ -324,7 +356,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>eighth</type>
         <stem>up</stem>
         </note>
-      <note default-x="142.15" default-y="-10.00">
+      <note default-x="140.95" default-y="-10.00">
         <pitch>
           <step>F</step>
           <octave>2</octave>
@@ -334,7 +366,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>quarter</type>
         <stem>up</stem>
         </note>
-      <note default-x="210.82" default-y="-5.00">
+      <note default-x="208.97" default-y="-5.00">
         <pitch>
           <step>G</step>
           <octave>2</octave>
@@ -345,7 +377,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         <beam number="1">begin</beam>
         </note>
-      <note default-x="253.74" default-y="0.00">
+      <note default-x="251.48" default-y="0.00">
         <pitch>
           <step>A</step>
           <octave>2</octave>
@@ -361,7 +393,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="7" width="206.70">
+    <measure number="8" width="204.04">
       <harmony print-frame="no">
         <root>
           <root-step>F</root-step>
@@ -382,7 +414,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="8" width="322.08">
+    <measure number="9" width="330.06">
       <harmony print-frame="no">
         <root>
           <root-step>E</root-step>
@@ -395,7 +427,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <voice>1</voice>
         <type>eighth</type>
         </note>
-      <note default-x="65.05" default-y="0.00">
+      <note default-x="66.35" default-y="0.00">
         <pitch>
           <step>A</step>
           <octave>2</octave>
@@ -412,7 +444,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </root>
         <kind text="7">dominant</kind>
         </harmony>
-      <note default-x="161.72" default-y="5.00">
+      <note default-x="165.55" default-y="5.00">
         <pitch>
           <step>B</step>
           <octave>2</octave>
@@ -423,7 +455,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <accidental>natural</accidental>
         <stem>down</stem>
         </note>
-      <note default-x="241.00" default-y="10.00">
+      <note default-x="246.91" default-y="10.00">
         <pitch>
           <step>C</step>
           <alter>1</alter>
@@ -436,12 +468,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>down</stem>
         </note>
       </measure>
-    <measure number="9" width="347.39">
+    <measure number="10" width="347.39">
       <print new-system="yes">
         <system-layout>
           <system-margins>
             <left-margin>0.00</left-margin>
-            <right-margin>0.00</right-margin>
+            <right-margin>-0.00</right-margin>
             </system-margins>
           <system-distance>137.96</system-distance>
           </system-layout>
@@ -502,7 +534,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="10" width="278.89">
+    <measure number="11" width="278.89">
       <harmony print-frame="no">
         <root>
           <root-step>G</root-step>
@@ -561,7 +593,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="11" width="216.92">
+    <measure number="12" width="216.92">
       <harmony print-frame="no">
         <root>
           <root-step>B</root-step>
@@ -584,7 +616,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>whole</type>
         </note>
       </measure>
-    <measure number="12" width="276.81">
+    <measure number="13" width="276.81">
       <harmony print-frame="no">
         <root>
           <root-step>A</root-step>
@@ -629,7 +661,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="13" width="302.24">
+    <measure number="14" width="302.24">
       <print new-system="yes">
         <system-layout>
           <system-margins>
@@ -655,7 +687,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>whole</type>
         </note>
       </measure>
-    <measure number="14" width="272.20">
+    <measure number="15" width="272.20">
       <harmony print-frame="no">
         <root>
           <root-step>G</root-step>
@@ -691,7 +723,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="15" width="242.84">
+    <measure number="16" width="242.84">
       <harmony print-frame="no">
         <root>
           <root-step>E</root-step>
@@ -708,7 +740,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>whole</type>
         </note>
       </measure>
-    <measure number="16" width="302.73">
+    <measure number="17" width="302.73">
       <harmony print-frame="no">
         <root>
           <root-step>A</root-step>
@@ -753,7 +785,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="17" width="307.27">
+    <measure number="18" width="307.27">
       <print new-system="yes">
         <system-layout>
           <system-margins>
@@ -767,7 +799,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <root>
           <root-step>E</root-step>
           </root>
-        <kind text="m7(b5)()"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="77.68" default-y="0.00">
         <pitch>
@@ -791,12 +823,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="18" width="312.95">
+    <measure number="19" width="312.95">
       <harmony print-frame="no">
         <root>
           <root-step>A</root-step>
           </root>
-        <kind text="7(#5)"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="15.50" default-y="-10.00">
         <pitch>
@@ -856,12 +888,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="19" width="221.19">
+    <measure number="20" width="221.19">
       <harmony print-frame="no">
         <root>
           <root-step>D</root-step>
           </root>
-        <kind text="m6"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="15.50" default-y="-10.00">
         <pitch>
@@ -877,7 +909,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="20" width="278.58">
+    <measure number="21" width="278.58">
       <note>
         <rest/>
         <duration>1</duration>
@@ -916,7 +948,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="21" width="292.77">
+    <measure number="22" width="297.80">
       <print new-system="yes">
         <system-layout>
           <system-margins>
@@ -930,7 +962,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <root>
           <root-step>G</root-step>
           </root>
-        <kind text="m7"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="77.68" default-y="10.00">
         <pitch>
@@ -943,7 +975,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <dot/>
         <stem>down</stem>
         </note>
-      <note default-x="218.69" default-y="5.00">
+      <note default-x="222.01" default-y="5.00">
         <pitch>
           <step>B</step>
           <alter>-1</alter>
@@ -955,12 +987,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>down</stem>
         </note>
       </measure>
-    <measure number="22" width="298.45">
+    <measure number="23" width="303.48">
       <harmony print-frame="no">
         <root>
           <root-step>C</root-step>
           </root>
-        <kind text="7"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="15.50" default-y="0.00">
         <pitch>
@@ -973,7 +1005,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <dot/>
         <stem>up</stem>
         </note>
-      <note default-x="99.23" default-y="-5.00">
+      <note default-x="100.73" default-y="-5.00">
         <pitch>
           <step>G</step>
           <octave>2</octave>
@@ -983,7 +1015,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>eighth</type>
         <stem>up</stem>
         </note>
-      <note default-x="142.15" default-y="-10.00">
+      <note default-x="144.41" default-y="-10.00">
         <pitch>
           <step>F</step>
           <octave>2</octave>
@@ -993,7 +1025,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>quarter</type>
         <stem>up</stem>
         </note>
-      <note default-x="210.82" default-y="-5.00">
+      <note default-x="214.31" default-y="-5.00">
         <pitch>
           <step>G</step>
           <octave>2</octave>
@@ -1004,7 +1036,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>down</stem>
         <beam number="1">begin</beam>
         </note>
-      <note default-x="253.74" default-y="0.00">
+      <note default-x="257.99" default-y="0.00">
         <pitch>
           <step>A</step>
           <octave>2</octave>
@@ -1020,12 +1052,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="23" width="206.70">
+    <measure number="24" width="211.72">
       <harmony print-frame="no">
         <root>
           <root-step>F</root-step>
           </root>
-        <kind text="maj7"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="15.50" default-y="0.00">
         <pitch>
@@ -1041,12 +1073,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
           </notations>
         </note>
       </measure>
-    <measure number="24" width="322.08">
+    <measure number="25" width="307.01">
       <harmony print-frame="no">
         <root>
           <root-step>E</root-step>
           </root>
-        <kind text="m7(b5)()"></kind>
+        <kind></kind>
         </harmony>
       <note>
         <rest/>
@@ -1054,7 +1086,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <voice>1</voice>
         <type>eighth</type>
         </note>
-      <note default-x="65.05" default-y="0.00">
+      <note default-x="62.60" default-y="0.00">
         <pitch>
           <step>A</step>
           <octave>2</octave>
@@ -1069,9 +1101,9 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <root>
           <root-step>A</root-step>
           </root>
-        <kind text="7"></kind>
+        <kind></kind>
         </harmony>
-      <note default-x="161.72" default-y="5.00">
+      <note default-x="154.49" default-y="5.00">
         <pitch>
           <step>B</step>
           <octave>2</octave>
@@ -1082,7 +1114,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <accidental>natural</accidental>
         <stem>down</stem>
         </note>
-      <note default-x="241.00" default-y="10.00">
+      <note default-x="229.85" default-y="10.00">
         <pitch>
           <step>C</step>
           <alter>1</alter>
@@ -1095,12 +1127,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>down</stem>
         </note>
       </measure>
-    <measure number="25" width="347.39">
+    <measure number="26" width="347.39">
       <print new-system="yes">
         <system-layout>
           <system-margins>
             <left-margin>0.00</left-margin>
-            <right-margin>0.00</right-margin>
+            <right-margin>-0.00</right-margin>
             </system-margins>
           <system-distance>137.96</system-distance>
           </system-layout>
@@ -1109,7 +1141,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <root>
           <root-step>D</root-step>
           </root>
-        <kind text="m7"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="77.68" default-y="20.00">
         <pitch>
@@ -1161,12 +1193,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="26" width="278.89">
+    <measure number="27" width="278.89">
       <harmony print-frame="no">
         <root>
           <root-step>G</root-step>
           </root>
-        <kind text="m7"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="16.50" default-y="10.00">
         <pitch>
@@ -1220,13 +1252,13 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="27" width="216.92">
+    <measure number="28" width="216.92">
       <harmony print-frame="no">
         <root>
           <root-step>B</root-step>
           <root-alter>-1</root-alter>
           </root>
-        <kind text="7(#11)"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="15.50" default-y="-15.00">
         <pitch>
@@ -1238,12 +1270,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>whole</type>
         </note>
       </measure>
-    <measure number="28" width="276.81">
+    <measure number="29" width="276.81">
       <harmony print-frame="no">
         <root>
           <root-step>A</root-step>
           </root>
-        <kind text="7"></kind>
+        <kind></kind>
         </harmony>
       <note>
         <rest/>
@@ -1283,7 +1315,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="29" width="338.34">
+    <measure number="30" width="343.76">
       <print new-system="yes">
         <system-layout>
           <system-margins>
@@ -1297,7 +1329,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <root>
           <root-step>D</root-step>
           </root>
-        <kind text="m"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="77.68" default-y="0.00">
         <pitch>
@@ -1313,9 +1345,9 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <root>
           <root-step>B</root-step>
           </root>
-        <kind text="7"></kind>
+        <kind></kind>
         </harmony>
-      <note default-x="192.73" default-y="-25.00">
+      <note default-x="195.14" default-y="-25.00">
         <pitch>
           <step>C</step>
           <alter>1</alter>
@@ -1327,7 +1359,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <accidental>sharp</accidental>
         <stem>up</stem>
         </note>
-      <note default-x="264.64" default-y="-20.00">
+      <note default-x="268.55" default-y="-20.00">
         <pitch>
           <step>D</step>
           <octave>2</octave>
@@ -1338,13 +1370,13 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="30" width="259.99">
+    <measure number="31" width="254.54">
       <harmony print-frame="no">
         <root>
           <root-step>B</root-step>
           <root-alter>-1</root-alter>
           </root>
-        <kind text="7"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="15.50" default-y="-10.00">
         <pitch>
@@ -1360,9 +1392,9 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <root>
           <root-step>A</root-step>
           </root>
-        <kind text="7"></kind>
+        <kind></kind>
         </harmony>
-      <note default-x="136.84" default-y="-15.00">
+      <note default-x="134.12" default-y="-15.00">
         <pitch>
           <step>E</step>
           <octave>2</octave>
@@ -1373,12 +1405,12 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <stem>up</stem>
         </note>
       </measure>
-    <measure number="31" width="227.72">
+    <measure number="32" width="233.13">
       <harmony print-frame="no">
         <root>
           <root-step>D</root-step>
           </root>
-        <kind text="m"></kind>
+        <kind></kind>
         </harmony>
       <note default-x="15.50" default-y="-20.00">
         <pitch>
@@ -1390,25 +1422,24 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>whole</type>
         </note>
       </measure>
-    <measure number="32" width="293.95">
+    <measure number="33" width="288.57">
       <note>
         <rest/>
-        <duration>1</duration>
+        <duration>2</duration>
         <voice>1</voice>
-        <type>eighth</type>
+        <type>quarter</type>
         </note>
-      <note default-x="56.95" default-y="-20.00">
+      <note default-x="79.23" default-y="-20.00">
         <pitch>
           <step>D</step>
           <octave>2</octave>
           </pitch>
-        <duration>3</duration>
+        <duration>2</duration>
         <voice>1</voice>
         <type>quarter</type>
-        <dot/>
-        <stem>up</stem>
+        <stem>down</stem>
         </note>
-      <note default-x="142.68" default-y="-15.00">
+      <note default-x="145.46" default-y="-15.00">
         <pitch>
           <step>E</step>
           <octave>2</octave>
@@ -1418,7 +1449,7 @@ This arrangement © MMXXII by James T. Bartlett – Roanoke, VA</credit-words>
         <type>quarter</type>
         <stem>up</stem>
         </note>
-      <note default-x="212.99" default-y="-10.00">
+      <note default-x="211.69" default-y="-10.00">
         <pitch>
           <step>F</step>
           <octave>2</octave>

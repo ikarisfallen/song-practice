@@ -378,6 +378,11 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
 .seg button + button { border-left: 1px solid #334654; }
 .seg button.active { background: #3da9fc; color: #052033; font-weight: 600; }
 .seg button:active { transform: scale(0.97); }
+/* Disabled state — used by the Repeats seg in Head mode (the head
+   plays once; multiplying it by N would mean "play the head N times"
+   which doesn't match how anyone reads a head). */
+.seg button:disabled { opacity: 0.4; cursor: default; }
+.seg button:disabled:active { transform: none; }
 .tempo-seg { flex: 1; }
 .tempo-seg button { flex: 1; padding: 8px 6px; }
 /* Key transpose control: 12 buttons arranged as 2 rows of 6 so there
