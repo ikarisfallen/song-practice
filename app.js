@@ -2677,43 +2677,47 @@ let _songDirIndexPromise = null;
 function loadSongDirectoryIndex() {
   if (_songDirIndexPromise) return _songDirIndexPromise;
   _songDirIndexPromise = (async () => {
-    // Manifest first — works regardless of directory-listing support.
+    const map = Object.create(null);
+    // 1. Manifest. Works on GitHub Pages (no directory listing) and
+    //    is the canonical source on production. May be stale during
+    //    local dev because the GitHub Action regenerates it on push,
+    //    not on every file drop.
     try {
       const res = await fetch('songs/manifest.json', { cache: 'no-store' });
       if (res.ok) {
         const json = await res.json();
         if (Array.isArray(json)) {
-          const map = Object.create(null);
           for (const fn of json) {
             const s = String(fn);
             map[s.toLowerCase()] = s;
           }
-          return map;
         }
       }
-    } catch (e) { /* fall through to HTML listing */ }
-    // HTML directory listing fallback.
+    } catch (e) { /* skip — we'll still try the listing */ }
+    // 2. HTML directory listing (Python's http.server, most dev
+    //    servers). Merged on TOP of the manifest so a file dropped
+    //    into songs/ during local dev shows up immediately without
+    //    needing the manifest workflow to run. On GitHub Pages this
+    //    typically 404s and the loop is a no-op, so production
+    //    behavior is unchanged.
     try {
       const res = await fetch('songs/', { cache: 'no-store' });
-      if (!res.ok) return Object.create(null);
-      const text = await res.text();
-      const map = Object.create(null);
-      const re = /<a\s+[^>]*href="([^"]+)"/gi;
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        let href;
-        try { href = decodeURIComponent(m[1]); } catch (e) { continue; }
-        // Skip parent / self / any directory entries.
-        if (!href || href === '../' || href === './' || href.endsWith('/')) continue;
-        // Skip anything with a path separator — we only care about
-        // files directly inside songs/.
-        if (href.includes('/')) continue;
-        map[href.toLowerCase()] = href;
+      if (res.ok) {
+        const text = await res.text();
+        const re = /<a\s+[^>]*href="([^"]+)"/gi;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          let href;
+          try { href = decodeURIComponent(m[1]); } catch (e) { continue; }
+          // Skip parent / self / directory entries.
+          if (!href || href === '../' || href === './' || href.endsWith('/')) continue;
+          // Same-folder files only.
+          if (href.includes('/')) continue;
+          map[href.toLowerCase()] = href;
+        }
       }
-      return map;
-    } catch (e) {
-      return Object.create(null);
-    }
+    } catch (e) { /* skip */ }
+    return map;
   })();
   return _songDirIndexPromise;
 }
@@ -2750,6 +2754,95 @@ async function loadSongHead(title) {
   const midi = await loadSongMidi(title);
   if (midi) return midiToHeadNotes(midi);
   return null;
+}
+
+// Score-mode dropdown discovery. When the user is in Score mode, the
+// exercise dropdown is repurposed to show every score (.musicxml /
+// .mid) that relates to the current song:
+//   - "{Title}.musicxml" → label "Head" (the default melody)
+//   - "{Title} - {Variant}.musicxml" → label "{Variant}"
+// Variants are the after-dash portion of the filename — e.g.
+// "On Green Dolphin Street - Paul Chambers Bassline.musicxml" becomes
+// "Paul Chambers Bassline". Returns an array sorted with "Head" first
+// then variants alphabetical. Filename matching is case-insensitive
+// (Linux/iOS/Android serve files case-sensitive even when the
+// manifest casing differs from on-disk casing); the `filename` field
+// preserves the on-disk casing so the fetch URL works.
+async function listScoresForSong(title) {
+  if (!title) return [];
+  // Invalidate the cached directory index so newly-dropped files
+  // appear without a hard page reload. The cache exists to coalesce
+  // burst fetches during a single song-load (loadSongMusicXML +
+  // loadSongMidi probe back-to-back); clearing it here costs at
+  // most one extra manifest.json fetch per Score-mode interaction.
+  _songDirIndexPromise = null;
+  const index = await loadSongDirectoryIndex();
+  const lc = title.toLowerCase();
+  // Collect by variant key. When a variant has both .musicxml and
+  // .mid available, prefer .musicxml (better spelling + ties).
+  const byVariant = new Map();
+  for (const fn of Object.values(index)) {
+    const lcFn = fn.toLowerCase();
+    let ext = null;
+    if (lcFn.endsWith('.musicxml')) ext = 'musicxml';
+    else if (lcFn.endsWith('.mid')) ext = 'mid';
+    else continue;
+    const base = fn.slice(0, fn.length - ext.length - 1);
+    const baseLc = base.toLowerCase();
+    let label, key, isDefault;
+    if (baseLc === lc) {
+      label = 'Head';
+      key = '';
+      isDefault = true;
+    } else if (baseLc.startsWith(lc + ' - ')) {
+      // Slice from `base` (original case) at the title-prefix length.
+      // base.length === baseLc.length, so the offset transfers
+      // unchanged.
+      label = base.slice(title.length + 3);
+      key = label.toLowerCase();
+      isDefault = false;
+    } else continue;
+    const existing = byVariant.get(key);
+    if (!existing || (existing.ext === 'mid' && ext === 'musicxml')) {
+      byVariant.set(key, { label, filename: fn, isDefault, ext });
+    }
+  }
+  const matches = Array.from(byVariant.values());
+  matches.sort((a, b) => {
+    if (a.isDefault && !b.isDefault) return -1;
+    if (b.isDefault && !a.isDefault) return 1;
+    return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+  });
+  return matches;
+}
+
+// Load + parse a score directly from an on-disk filename (rather than
+// resolving "{title}.{ext}" via loadSongHead). Used when the user
+// picks a non-default variant from the Score-mode dropdown — that
+// filename is taken from listScoresForSong and corresponds to a real
+// entry in the directory index, so we don't need title-resolution.
+async function loadHeadFromFilename(filename) {
+  if (!filename) return null;
+  try {
+    const url = `songs/${encodeURIComponent(filename)}`;
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) return null;
+    const ext = filename.toLowerCase().split('.').pop();
+    if (ext === 'musicxml' || ext === 'xml') {
+      const text = await response.text();
+      const doc = new DOMParser().parseFromString(text, 'application/xml');
+      if (doc.querySelector('parsererror')) return null;
+      return parseMusicXML(doc);
+    }
+    if (ext === 'mid' || ext === 'midi') {
+      if (typeof Midi === 'undefined') return null;
+      const buf = await response.arrayBuffer();
+      return midiToHeadNotes(new Midi(buf));
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function loadSongMusicXML(title) {
@@ -3068,7 +3161,44 @@ function parseMusicXML(doc) {
       }
     }
   }
-  return { notes: mainNotes, leadInBeats, pickupNotes };
+  // Score key — read once from the first measure's <key> attributes.
+  // We use it to mark the Score-key button on the key seg with a
+  // square outline (and auto-transpose the chart) whenever the
+  // score's key differs from the iRealPro chart's key.
+  const keyTonic = detectKeyTonicFromMusicXML(doc);
+  return { notes: mainNotes, leadInBeats, pickupNotes, keyTonic };
+}
+
+// Read the MusicXML's <key><fifths> + <mode> from the first measure
+// and convert it to a key-seg data-key string ('C', 'Bb', 'F#' …).
+// Pitch class is derived from circle-of-fifths arithmetic; minor
+// keys offset by +9 (relative-minor tonic). Returns null when the
+// document has no key signature declaration.
+function detectKeyTonicFromMusicXML(doc) {
+  if (!doc) return null;
+  const score = doc.querySelector('score-partwise') || doc.querySelector('score-timewise');
+  if (!score) return null;
+  const part = score.querySelector('part');
+  if (!part) return null;
+  const firstMeasure = part.querySelector('measure');
+  if (!firstMeasure) return null;
+  const fifthsEl = firstMeasure.querySelector('attributes > key > fifths');
+  if (!fifthsEl) return null;
+  const fifths = parseInt(fifthsEl.textContent, 10);
+  if (!Number.isFinite(fifths) || fifths < -7 || fifths > 7) return null;
+  const modeEl = firstMeasure.querySelector('attributes > key > mode');
+  const isMinor = !!(modeEl && /minor/i.test(modeEl.textContent));
+  // Major tonic pc: each fifth up = +7 semitones (mod 12).
+  const majorPc = (((fifths * 7) % 12) + 12) % 12;
+  // Minor tonic = relative minor of the major (3 semitones below the
+  // major tonic, equivalently +9 mod 12).
+  const tonicPc = isMinor ? ((majorPc + 9) % 12) : majorPc;
+  // Map pc to one of the seg's 12 data-key strings. The seg uses
+  // sharp spellings for the four "black-key" tonics that don't have
+  // dedicated buttons (C#/Eb/F#/G#/Bb), regardless of major/minor —
+  // syncKeySegLabels handles the visual sharp↔flat alias.
+  const PC_TO_DATAKEY = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'G#', 'A', 'Bb', 'B'];
+  return PC_TO_DATAKEY[tonicPc];
 }
 
 // Convert a parsed @tonejs/midi Midi object to the same note shape
@@ -4411,7 +4541,19 @@ function updateScoreTitle(songArg) {
   // the exercise dropdown's current selection.
   let exLabel = '';
   if (exerciseMode === 'head') {
-    exLabel = 'Head';
+    // When the Score-mode dropdown is showing variants, the current
+    // dropdown text IS the score label (e.g. "Head" or "Paul Chambers
+    // Bassline"). Reflect it in the title so the user can see at a
+    // glance which score they're looking at. Falls back to plain
+    // "Head" when the dropdown hasn't been switched to score-mode
+    // yet (e.g. song still loading).
+    const sel = document.getElementById('exerciseSelect');
+    if (_dropdownMode === 'score' && sel && sel.selectedIndex >= 0) {
+      const opt = sel.options[sel.selectedIndex];
+      exLabel = (opt && opt.text) || 'Head';
+    } else {
+      exLabel = 'Head';
+    }
   } else if (exerciseMode === 'blank') {
     exLabel = 'Blank';
   } else {
@@ -7493,18 +7635,27 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
   let tick = 0;
   let lastResolved = null;
 
-  // Count-in: N bars of click before the song starts. These are scheduled
-  // directly on the Transport (not on the looping Part) so they fire once
-  // and aren't filtered out by Part's [loopStart, loopEnd) range. Count-in
-  // is skipped when starting mid-song from a user-selected bar — we assume
-  // the player already knows where they are.
+  // Count-in: N bars of click before the song starts. Fired DIRECTLY
+  // on the click synth at computed audio-context times rather than
+  // via Tone.Transport.scheduleOnce. The Transport-scheduled approach
+  // was reliably dropping the very first click — events queued at
+  // Transport position `0:0:0` lined up with Transport.start's
+  // engaged time and landed in the audio scheduler's "in the past"
+  // window. A direct `triggerAttackRelease(audioTime)` call at a
+  // future-anchored time has no such race: the audio context just
+  // queues the noise burst at the requested AudioContext time. We
+  // tie the Transport.start call below to the SAME `_audioStartTime`
+  // base so Transport.position=0 lines up with the first click.
+  const _audioStartTime = Tone.now() + 0.2;
+  const _beatSec = 60 / currentTempo;
   const offset = startBarIdx > 0 ? 0 : countInBars;
   for (let cb = 0; cb < offset; cb++) {
     for (let beat = 0; beat < beatsPerBar; beat++) {
       const accent = beat === 0;
-      Tone.Transport.scheduleOnce(t => {
+      const t = _audioStartTime + (cb * beatsPerBar + beat) * _beatSec;
+      try {
         click.triggerAttackRelease('32n', t, accent ? 0.95 : 0.55);
-      }, `${cb}:${beat}:0`);
+      } catch (e) {}
     }
   }
   // Pickup melody (anacrusis): schedule each pickup note to play at
@@ -8114,13 +8265,19 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
   if (wantPrerollCountIn) {
     const prerollStart = startBarIdx - countInBars;
     Tone.Transport.position = `${prerollStart}:0:0`;
+    // Fire count-in clicks DIRECTLY at audio-context times anchored
+    // to `_audioStartTime` (the same base used by Transport.start
+    // below, so Transport position prerollStart:0:0 lines up with
+    // the first click). Same rationale as the bar-0 count-in: the
+    // Transport.scheduleOnce path was dropping the first beat
+    // because the scheduled time matched Transport's engaged time.
     for (let cb = 0; cb < countInBars; cb++) {
-      const barTime = prerollStart + cb;
       for (let beat = 0; beat < beatsPerBar; beat++) {
         const accent = beat === 0;
-        Tone.Transport.scheduleOnce(t => {
-          try { click.triggerAttackRelease('32n', t, accent ? 0.95 : 0.55); } catch (e) {}
-        }, `${barTime}:${beat}:0`);
+        const t = _audioStartTime + (cb * beatsPerBar + beat) * _beatSec;
+        try {
+          click.triggerAttackRelease('32n', t, accent ? 0.95 : 0.55);
+        } catch (e) {}
       }
     }
     if (midSongDrum) {
@@ -8148,13 +8305,26 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
         chartEl.scrollTo({ top: Math.max(0, rowTop - padding), behavior: 'smooth' });
       }
     }
-    Tone.Transport.start();
+    // Delayed start. Tone's audio scheduler has a built-in lookahead
+    // (~50–100 ms by default), so an event whose Transport time
+    // EQUALS Transport's engaged time can land in the "already
+    // passed" window when start() actually hooks up to the audio
+    // clock — that event gets dropped. Starting 100 ms in the future
+    // gives every scheduled event (including the very first
+    // count-in click at `${prerollStart}:0:0`) headroom inside the
+    // lookahead window so it fires reliably. The 100 ms lead-in is
+    // short enough to feel instantaneous when the user taps Play.
+    Tone.Transport.start(_audioStartTime);
   } else {
     Tone.Transport.position = startBarIdx > 0 ? `${startBarIdx}:0:0` : 0;
     if (midSongDrum) {
       try { midSongDrum.entry.player.start(undefined, midSongDrum.bufOffset); } catch (e) {}
     }
-    Tone.Transport.start();
+    // Same delayed-start trick. Critical for the bar-0 case with
+    // count-in: the first click is scheduled at `0:0:0` and would
+    // otherwise tie exactly with Transport.position=0, leading the
+    // audio scheduler to drop it.
+    Tone.Transport.start(_audioStartTime);
   }
   playState = 'playing';
   pauseContext = { offset, beatsPerBar };
@@ -8480,6 +8650,112 @@ function syncKeySegOriginal(key) {
     b.classList.toggle('original', b.dataset.key === key);
   });
 }
+// Mark the button matching the iRealPro chart's PERMANENT key with
+// an "ireal-key" class so CSS can draw a square around its label.
+// Used as a "memo" indicator — only shows when a variant has
+// rebased the active originalKey to its own key (e.g. a bassline
+// scored in C over an iRealPro chart in Bb). When the chart is
+// still on its native iRealPro key, originalKey === irealKey, and
+// the existing circle (.original) already marks the spot, so the
+// square is suppressed to avoid doubling up.
+function syncKeySegIrealMarker() {
+  const ireal = window.currentSong && window.currentSong.irealKey;
+  document.querySelectorAll('#keySeg button').forEach(b => {
+    const matches = ireal != null
+      && ireal !== originalKey
+      && b.dataset.key === ireal;
+    b.classList.toggle('ireal-key', !!matches);
+  });
+}
+// Variant rebase: when a score in a different key is loaded, treat
+// the score's key as the new BASE for the song. Transpose the
+// chord chart to that key, store the result as the new
+// originalBars, move originalKey to the score's key (so the circle
+// moves with it and future Key-seg clicks compute their offsets
+// from the variant's key), and update markers. The iRealPro
+// chart's permanent reference (irealBars / irealKey) is NOT
+// touched — it survives the rebase so picking the default Head
+// later can restore from it.
+async function rebaseToScoreKey(scoreKey) {
+  if (!window.currentSong) return;
+  if (!scoreKey || !(scoreKey in KEY_TO_PC)) {
+    // No score key info — leave the chart alone, just refresh marker.
+    syncKeySegIrealMarker();
+    return;
+  }
+  // Relative-major correction. Bass parts for minor-key tunes are
+  // commonly notated with the key signature of the RELATIVE MAJOR
+  // and `<mode>major</mode>` (or no mode at all), even though the
+  // song is in minor — e.g. Autumn Leaves in Gm gets a 2-flat key
+  // signature exported as "Bb major." `detectKeyTonicFromMusicXML`
+  // takes that at face value and returns Bb, which would rebase
+  // a Gm chart to Bb-something. When iReal says the song is minor
+  // AND the detected score key is exactly the relative major
+  // (iReal tonic + 3 semitones, mod 12), substitute the iReal's
+  // own tonic — so the chart stays on Gm and the score plays at
+  // its written pitches (which are already the G-minor pitches).
+  const cs = window.currentSong;
+  if (currentIsMinor && cs.irealKey && (cs.irealKey in KEY_TO_PC)) {
+    const irealPc = KEY_TO_PC[cs.irealKey];
+    const scorePc = KEY_TO_PC[scoreKey];
+    if (((irealPc + 3) % 12) === scorePc) {
+      scoreKey = cs.irealKey;
+    }
+  }
+  // Compute the transpose offset from CURRENT originalKey (which
+  // might already be a previous variant's key) to the new scoreKey.
+  const offset = (KEY_TO_PC[scoreKey] - KEY_TO_PC[originalKey] + 12) % 12;
+  if (offset === 0 && scoreKey === originalKey) {
+    // Already on this key — no transpose needed; just refresh markers.
+    currentKey = scoreKey;
+    syncKeySegOriginal(originalKey);
+    syncKeySegActive(currentKey);
+    syncKeySegIrealMarker();
+    return;
+  }
+  const useFlats = FLAT_KEYS.has(scoreKey)
+    || (!currentIsMinor && (scoreKey === 'C#' || scoreKey === 'F#' || scoreKey === 'G#'));
+  const newBars = transposeBars(window.currentSong.originalBars, offset, useFlats);
+  window.currentSong.originalBars = newBars;
+  window.currentSong.bars = newBars;
+  originalKey = scoreKey;
+  currentKey = scoreKey;
+  syncKeySegOriginal(originalKey);
+  syncKeySegActive(currentKey);
+  syncKeySegIrealMarker();
+  renderChart(window.currentSong.song, newBars, window.currentSong.timesig);
+  if (playState === 'playing' && window.currentSong) {
+    const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+    await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+  }
+}
+// Default-Head restore: undo any prior variant rebase by snapping
+// originalKey + originalBars back to the iRealPro chart's
+// untouched reference (irealKey + irealBars). Called when the user
+// switches back to the default Head — ensures the chart is on the
+// iRealPro key whenever the head is showing, since heads are
+// authored in iRealPro key by convention.
+async function restoreIrealKeyForDefaultHead() {
+  const cs = window.currentSong;
+  if (!cs || !cs.irealKey || !cs.irealBars) return;
+  if (originalKey === cs.irealKey && cs.originalBars === cs.irealBars) {
+    // Already on iRealPro baseline — nothing to do beyond refresh.
+    syncKeySegIrealMarker();
+    return;
+  }
+  cs.originalBars = cs.irealBars;
+  cs.bars = cs.irealBars;
+  originalKey = cs.irealKey;
+  currentKey = cs.irealKey;
+  syncKeySegOriginal(originalKey);
+  syncKeySegActive(currentKey);
+  syncKeySegIrealMarker();
+  renderChart(cs.song, cs.irealBars, cs.timesig);
+  if (playState === 'playing' && window.currentSong) {
+    const expanded = expandBarsByRepeats(cs.bars, songRepeats);
+    await startPlayback(cs.song, expanded, currentPlayingBar);
+  }
+}
 // Rebuild the labels on the key segmented control.
 //  - Minor songs: append 'm' (Cm, Dm, etc.) and display sharp
 //    variants for C#, F#, G#.
@@ -8528,6 +8804,14 @@ function loadFromURL(url) {
   syncKeySegLabels(currentIsMinor);
   syncKeySegOriginal(originalKey);
   syncKeySegActive(currentKey);
+  // Clear any leftover ireal-key marker from a prior song's variant
+  // rebase. The marker depends on currentSong.irealKey vs
+  // originalKey; right after assignment they're equal, so the
+  // helper will produce no class. Calling it explicitly here also
+  // cleans stale classes that were set against the previous song.
+  document.querySelectorAll('#keySeg button.ireal-key').forEach(b => {
+    b.classList.remove('ireal-key');
+  });
   renderChart(song, bars, timesig);
   // Store both the original (untransposed) bars and the currently
   // displayed bars. Key changes re-transpose from the original so
@@ -8535,6 +8819,12 @@ function loadFromURL(url) {
   window.currentSong = {
     song, bars, timesig,
     originalBars: bars,
+    // Permanent reference to the iRealPro chart's bars + key. Stays
+    // put even when a variant score in a foreign key rebases the
+    // active originalKey/originalBars onto its own key. Picking the
+    // default Head later restores from these.
+    irealBars: bars,
+    irealKey: originalKey,
     head: null,
     // `headLoaded` stays false during the async fetch so the
     // "No head found" banner doesn't flash while we're still
@@ -8558,6 +8848,17 @@ function loadFromURL(url) {
     if (!window.currentSong || window.currentSong.song !== song) return; // user changed songs
     window.currentSong.head = head;
     window.currentSong.headLoaded = true;
+    // Recompute songRepeats from the score's bar length now that
+    // head is available. In Score mode this drives form-loops to
+    // match a multi-chorus score (e.g. a 4-chorus bassline expands
+    // a 16-bar form to 64 bars of chord changes).
+    if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
+    // The default Head is in the iRealPro chart's key by convention.
+    // Snap originalKey + originalBars back to the iRealPro reference
+    // (in case a prior variant had rebased them onto a foreign key)
+    // and clear the ireal-key marker — when originalKey === irealKey
+    // the helper produces no class so the square disappears.
+    syncKeySegIrealMarker();
     if (exerciseMode === 'head') rerenderCurrent();
     // Now that we know whether this song has a head, refresh the
     // Play button — disable it if we're in Head mode and the load
@@ -8567,6 +8868,26 @@ function loadFromURL(url) {
     // available now that we know there's a head to annotate.
     if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
   });
+  // Score-mode dropdown: refresh with this song's matching score
+  // files. Runs in parallel with the head load so the picker is
+  // ready by the time the user clicks Score. Also records the
+  // chosen "default head" filename so the picker can preselect it.
+  (async () => {
+    const scores = await listScoresForSong(song.title);
+    if (!window.currentSong || window.currentSong.song !== song) return;
+    const defaultEntry = scores.find(s => s.isDefault);
+    const defaultFilename = defaultEntry ? defaultEntry.filename : null;
+    window.currentSong.scoreFilename = defaultFilename;
+    // Store the default head's filename separately so the variant-
+    // load handler can tell whether the user just picked the default
+    // (no auto-transpose / square) vs a variant (apply both).
+    window.currentSong.defaultScoreFilename = defaultFilename;
+    if (_dropdownMode === 'score' || exerciseMode === 'head') {
+      // We're (or about to be) in Score mode — refresh the dropdown
+      // now so it shows the new song's scores.
+      populateScoreDropdown(scores, window.currentSong.scoreFilename);
+    }
+  })();
   // A freshly loaded song should start at the top of the score. The
   // chart container holds the scroll position from the previously
   // loaded song, which can leave the user halfway down an unrelated
@@ -8689,6 +9010,55 @@ document.addEventListener('keydown', e => {
     const tag = (t.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea') return;
     if (t.isContentEditable) return;
+  }
+  // Drill-back: while PLAYING, PageUp jumps back 2 bars and
+  // restarts with a count-in so the user can immediately
+  // re-attempt a tricky passage without reaching for the mouse.
+  // Page Down keeps its scroll behavior even while playing — useful
+  // for skimming ahead. When a Loop In/Out is active, we clamp the
+  // jump-target to loopIn so drill-back stays inside the loop
+  // (going before loopIn would break the loop's wraparound).
+  if (e.key === 'PageUp'
+      && playState === 'playing'
+      && window.currentSong) {
+    e.preventDefault();
+    const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
+    let target = Math.max(0, (currentPlayingBar || 0) - 2);
+    if (hasLoop && target < loopIn) target = loopIn;
+    selectedBar = target;
+    // IMMEDIATE visual feedback: snap the highlight back and scroll
+    // the chart now, before startPlayback does its teardown +
+    // setup. Without this, the user sees a half-second pause where
+    // the old bar stays highlighted while the playback rebuilds —
+    // then the count-in starts and only THEN does the highlight
+    // catch up. Doing it synchronously here makes the line visibly
+    // snap back the instant they tap PageUp; startPlayback's own
+    // highlight call later just re-applies the same state.
+    currentPlayingBar = target;
+    if (typeof highlightBar === 'function') highlightBar(target);
+    {
+      const info = barElements && barElements[target];
+      const chartEl = document.getElementById('chart');
+      if (info && info.rowEl && chartEl) {
+        const rowTop = info.rowEl.offsetTop;
+        const rowH   = info.rowEl.offsetHeight;
+        const viewH  = chartEl.clientHeight;
+        const padding = Math.max(0, (viewH - rowH) / 2);
+        const targetTop = Math.max(0, rowTop - padding);
+        if (Math.abs(targetTop - chartEl.scrollTop) >= 4) {
+          chartEl.scrollTo({ top: targetTop, behavior: 'smooth' });
+        }
+      }
+    }
+    const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+    // prerollCountIn fires the count-in only when starting mid-song
+    // (startBarIdx >= countInBars). Bar 0 with countInBars > 0
+    // routes through the regular song-start count-in path inside
+    // startPlayback, which doesn't need this flag.
+    startPlayback(window.currentSong.song, expanded, target, {
+      prerollCountIn: countInBars > 0
+    });
+    return;
   }
   const chartEl = document.getElementById('chart');
   if (!chartEl) return;
@@ -8924,15 +9294,37 @@ document.querySelectorAll('#sizeSeg button').forEach(b => {
 // restores whatever the user had last selected.
 let _userRepeatChoice = 1;
 
-// Sync the Repeats segmented control to the current exerciseMode:
-// in Head mode the seg locks to "1" and every button is disabled
-// (clicking does nothing); otherwise the seg follows _userRepeatChoice
-// and stays interactive. Also normalizes the live `songRepeats`
-// global so generators/playback see the right effective value.
+// Sync the Repeats segmented control to the current exerciseMode.
+// In Score mode the seg is locked (every button disabled) but
+// `songRepeats` is COMPUTED from the loaded score: how many times
+// the iRealPro form fits inside the score's note span. So a
+// 64-bar bassline over a 16-bar form sets songRepeats=4 and the
+// chord chart loops 4 times under the score. The pickup measure
+// doesn't count — `head.notes` already has its stepStart shifted
+// past any pickup, so the max-step calculation naturally ignores
+// it. In other modes the seg follows the user's manual choice.
+function _computeScoreRepeats() {
+  const cs = window.currentSong;
+  if (!cs || !cs.head || !Array.isArray(cs.head.notes) || !cs.head.notes.length) {
+    return 1;
+  }
+  if (!cs.bars || !cs.bars.length) return 1;
+  const beatsPerBar = (cs.timesig && cs.timesig.num) || 4;
+  const stepsPerBar = beatsPerBar * 6; // 24th-note grid
+  let maxStep = 0;
+  for (const n of cs.head.notes) {
+    const end = (n.stepStart || 0) + (n.durationSteps || 0);
+    if (end > maxStep) maxStep = end;
+  }
+  if (maxStep <= 0) return 1;
+  const headBars = Math.ceil(maxStep / stepsPerBar);
+  const formBars = cs.bars.length;
+  return Math.max(1, Math.ceil(headBars / formBars));
+}
 function _updateRepeatsSegLock() {
   const isHead = (typeof exerciseMode !== 'undefined' && exerciseMode === 'head');
   const buttons = document.querySelectorAll('#repeatSeg button');
-  songRepeats = isHead ? 1 : _userRepeatChoice;
+  songRepeats = isHead ? _computeScoreRepeats() : _userRepeatChoice;
   buttons.forEach(b => {
     b.disabled = isHead;
     const r = parseInt(b.dataset.r, 10) || 1;
@@ -9040,6 +9432,71 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   });
 })();
 
+// Dropdown duality: the same `#exerciseSelect` element holds either
+// the exercise list (in Exercise mode) or the per-song scores list
+// (in Score mode). The original exercise <option>s are stashed at
+// startup so we can swap them back when the user returns to Exercise
+// mode without rebuilding the list from scratch — and without losing
+// any options the user-facing HTML may add later (we treat the HTML
+// snippet as the source of truth for the exercise menu).
+let _exerciseDropdownHTML = null;
+let _dropdownMode = 'exercise'; // 'exercise' | 'score' | 'empty'
+let _lastExerciseValue = 'scale';
+function _stashExerciseDropdownIfNeeded() {
+  if (_exerciseDropdownHTML !== null) return;
+  const sel = document.getElementById('exerciseSelect');
+  if (sel) _exerciseDropdownHTML = sel.innerHTML;
+}
+function populateExerciseDropdown(selectedValue) {
+  _stashExerciseDropdownIfNeeded();
+  const sel = document.getElementById('exerciseSelect');
+  if (!sel) return;
+  sel.innerHTML = _exerciseDropdownHTML || '';
+  sel.disabled = false;
+  const target = selectedValue || _lastExerciseValue || 'scale';
+  if (sel.querySelector(`option[value="${target}"]`)) sel.value = target;
+  _dropdownMode = 'exercise';
+}
+function populateScoreDropdown(scores, selectedFilename) {
+  _stashExerciseDropdownIfNeeded();
+  const sel = document.getElementById('exerciseSelect');
+  if (!sel) return;
+  if (!scores || !scores.length) {
+    sel.innerHTML = '<option value="">(empty)</option>';
+    sel.disabled = true;
+    _dropdownMode = 'empty';
+    return;
+  }
+  let html = '';
+  for (const s of scores) {
+    const safeLabel = String(s.label)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeFn = String(s.filename)
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    html += `<option value="${safeFn}">${safeLabel}</option>`;
+  }
+  sel.innerHTML = html;
+  sel.disabled = false;
+  if (selectedFilename) {
+    const opt = sel.querySelector(`option[value="${CSS.escape(selectedFilename)}"]`);
+    if (opt) sel.value = selectedFilename;
+  }
+  _dropdownMode = 'score';
+}
+// Refresh the Score-mode dropdown for the currently loaded song.
+// Called when the song changes (so the picker shows that song's
+// scores) and when the user enters Score mode.
+async function refreshScoreDropdownForCurrentSong() {
+  if (!window.currentSong) {
+    populateScoreDropdown([], null);
+    return;
+  }
+  const title = window.currentSong.song && window.currentSong.song.title;
+  const scores = await listScoresForSong(title);
+  const currentFilename = window.currentSong.scoreFilename || null;
+  populateScoreDropdown(scores, currentFilename || (scores[0] && scores[0].filename));
+}
+
 // Exercise picker — regenerates the quarter notes with the selected
 // algorithm (scale-walker vs. 1-3-5-7 arpeggio). If playback is running,
 // restart so the audible notes match the re-rendered score.
@@ -9053,9 +9510,55 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
   const sel = document.getElementById('exerciseSelect');
   if (!sel) return;
   sel.addEventListener('change', async () => {
-    const ex = sel.value;
+    const value = sel.value;
+    // Score-mode dropdown: the value is a filename. Load that file
+    // as the song's head and re-render. Don't auto-flip anywhere —
+    // we stay in Score mode.
+    if (_dropdownMode === 'score') {
+      if (!value || !window.currentSong) return;
+      window.currentSong.scoreFilename = value;
+      window.currentSong.headLoaded = false;
+      const head = await loadHeadFromFilename(value);
+      if (!window.currentSong) return; // user changed songs mid-load
+      window.currentSong.head = head;
+      window.currentSong.headLoaded = true;
+      // Re-evaluate auto-repeat: a longer score (e.g. multi-chorus
+      // bassline) needs more form repeats than a single-chorus head,
+      // so the chord chart underneath stretches to match.
+      if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
+      // VARIANT scores rebase the song to the score's key — the
+      // chord chart transposes there, originalKey moves with it
+      // (so the circle marks the new base and Key-seg clicks
+      // compute offsets from it), and the iRealPro key is marked
+      // with a square as a memo. Default Head restores the
+      // iRealPro reference instead of rebasing.
+      const isDefaultHead = !!(window.currentSong.defaultScoreFilename
+        && value === window.currentSong.defaultScoreFilename);
+      if (isDefaultHead) {
+        await restoreIrealKeyForDefaultHead();
+      } else if (head && head.keyTonic) {
+        await rebaseToScoreKey(head.keyTonic);
+      } else {
+        // Variant has no <key> data — keep the chart on whatever
+        // base it's currently on, just refresh the marker.
+        syncKeySegIrealMarker();
+      }
+      if (exerciseMode === 'head') rerenderCurrent();
+      updateScoreTitle();
+      updateLoopControls();
+      if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
+      if (playState === 'playing' && window.currentSong) {
+        const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+        await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+      }
+      return;
+    }
+    if (_dropdownMode === 'empty') return;
+    // Exercise-mode dropdown: the value is an exercise key.
+    const ex = value;
     exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth')
       ? ex : 'scale';
+    _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
     // dropdown is an implicit "I want an exercise" gesture.
     document.querySelectorAll('#modeSeg button').forEach(b => {
@@ -9094,13 +9597,23 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
       const mode = btn.dataset.mode;
       if (mode === 'head') {
         exerciseMode = 'head';
+        // Score mode: dropdown becomes the per-song scores list.
+        // Defer to a Promise so the directory index can resolve;
+        // populates with "(empty)" if the song has no matches.
+        await refreshScoreDropdownForCurrentSong();
       } else if (mode === 'blank') {
         exerciseMode = 'blank';
+        // Blank mode: leave the dropdown showing the exercise list
+        // (the Exercise tab's contents) so the user can pre-pick
+        // their next exercise without first switching tabs.
+        if (_dropdownMode !== 'exercise') populateExerciseDropdown();
       } else {
+        if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
         exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth')
           ? ex : 'scale';
+        _lastExerciseValue = exerciseMode;
       }
       // Repeats lock to 1 in Head mode; restored from the user's
       // last choice when switching out. _updateRepeatsSegLock also
@@ -10345,15 +10858,33 @@ let emClipboard = null; // null OR { entries: [{ fingering, position }, ...] }
 function emUpdateKebabState() {
   const btn = document.getElementById('editKebabBtn');
   const menu = document.getElementById('editKebabMenu');
+  const printBtn = document.getElementById('printScoreBtn');
   if (!btn) return;
   if (emIsMobile()) {
     btn.hidden = true;
     if (menu) menu.hidden = true;
+    if (printBtn) printBtn.hidden = true;
     return;
   }
   btn.hidden = false;
-  btn.disabled = false;
+  // Print button lives next to the kebab and stays available
+  // whenever the kebab is visible (desktop only). It doesn't edit
+  // fingerings so it's not gated on Edit Fingering being on.
+  if (printBtn) {
+    printBtn.hidden = false;
+    printBtn.disabled = false;
+  }
+  // Kebab itself is only ENABLED when Edit Fingering is on. With the
+  // Print option moved out, every remaining menu item edits
+  // fingerings — so disabling the whole button (plus auto-closing
+  // any open menu) when fingering editing is off is cleaner than
+  // greying out each item individually.
   const fingeringEnabled = emEnabled && emIsEditorDevice();
+  btn.disabled = !fingeringEnabled;
+  if (!fingeringEnabled && menu && !menu.hidden) {
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+  }
   const copy   = document.getElementById('copyFingeringsBtn');
   const paste  = document.getElementById('pasteFingeringsBtn');
   const delAll = document.getElementById('deleteAllFingeringsBtn');
@@ -10361,6 +10892,13 @@ function emUpdateKebabState() {
   if (paste)  paste.disabled  = !fingeringEnabled
     || !(emClipboard && emClipboard.entries && emClipboard.entries.length > 0);
   if (delAll) delAll.disabled = !fingeringEnabled;
+  // Position-fingering buttons follow the same gate as the rest of
+  // the fingering tools — they edit fingerings, so they're only
+  // available when Edit Fingering is on AND we're on a desktop /
+  // editor device.
+  document.querySelectorAll('.em-position-btn').forEach(b => {
+    b.disabled = !fingeringEnabled;
+  });
 }
 
 function emOpenKebabMenu() {
@@ -10414,6 +10952,138 @@ function emCopyFingerings() {
   }
   emClipboard = { entries: entries };
   emUpdateKebabState();
+}
+
+// Cello position → MIDI → fingering tables. Ported from the user's
+// MuseScore plugins (cellofingering*.qml). Each position maps the
+// MIDI pitches it can comfortably reach to the appropriate fingering
+// label — Roman numerals (I/II/III/IV/V) for open strings, '1'..'4'
+// for stopped notes, '4+' for the half-step extension above 4, and
+// '-1' for the half-step below 1 (used in 1st position and above).
+// Notes outside a position's reach aren't in its table — the apply
+// helper below leaves those notes' existing fingerings untouched
+// rather than overwrite with '?'.
+const EM_POSITION_FINGERINGS = {
+  half: {
+    29:'V', 30:'1', 31:'2', 32:'3', 33:'4', 34:'4+',
+    36:'IV',37:'1', 38:'2', 39:'3', 40:'4', 41:'4+',
+    43:'III',44:'1',45:'2', 46:'3', 47:'4', 48:'4+',
+    50:'II',51:'1', 52:'2', 53:'3', 54:'4', 55:'4+',
+    57:'I', 58:'1', 59:'2', 60:'3', 61:'4', 62:'4+'
+  },
+  first: {
+    29:'V', 30:'-1',31:'1', 32:'2', 33:'3', 34:'4', 35:'4+',
+    36:'IV',37:'-1',38:'1', 39:'2', 40:'3', 41:'4', 42:'4+',
+    43:'III',44:'-1',45:'1',46:'2', 47:'3', 48:'4', 49:'4+',
+    50:'II',51:'-1',52:'1', 53:'2', 54:'3', 55:'4', 56:'4+',
+    57:'I', 58:'-1',59:'1', 60:'2', 61:'3', 62:'4', 63:'4+'
+  },
+  upper1st: {
+    31:'-1',32:'1', 33:'2', 34:'3', 35:'4', 36:'4+',
+    38:'-1',39:'1', 40:'2', 41:'3', 42:'4', 43:'4+',
+    45:'-1',46:'1', 47:'2', 48:'3', 49:'4', 50:'4+',
+    52:'-1',53:'1', 54:'2', 55:'3', 56:'4', 57:'4+',
+    59:'-1',60:'1', 61:'2', 62:'3', 63:'4', 64:'4+'
+  },
+  second: {
+    39:'-1',40:'1', 41:'2', 42:'3', 43:'4', 44:'4+',
+    46:'-1',47:'1', 48:'2', 49:'3', 50:'4', 51:'4+',
+    53:'-1',54:'1', 55:'2', 56:'3', 57:'4', 58:'4+',
+    60:'-1',61:'1', 62:'2', 63:'3', 64:'4', 65:'4+'
+  },
+  third: {
+    40:'-1',41:'1', 42:'2', 43:'3', 44:'4', 45:'4+',
+    47:'-1',48:'1', 49:'2', 50:'3', 51:'4', 52:'4+',
+    54:'-1',55:'1', 56:'2', 57:'3', 58:'4', 59:'4+',
+    61:'-1',62:'1', 63:'2', 64:'3', 65:'4', 66:'4+'
+  },
+  upper3rd: {
+    41:'-1',42:'1', 43:'2', 44:'3', 45:'4', 46:'4+',
+    48:'-1',49:'1', 50:'2', 51:'3', 52:'4', 53:'4+',
+    55:'-1',56:'1', 57:'2', 58:'3', 59:'4', 60:'4+',
+    62:'-1',63:'1', 64:'2', 65:'3', 66:'4', 67:'4+'
+  },
+  fourth: {
+    42:'-1',43:'1', 44:'2', 45:'3', 46:'4', 47:'4+',
+    49:'-1',50:'1', 51:'2', 52:'3', 53:'4', 54:'4+',
+    56:'-1',57:'1', 58:'2', 59:'3', 60:'4', 61:'4+',
+    63:'-1',64:'1', 65:'2', 66:'3', 67:'4', 68:'4+'
+  },
+  upper4th: {
+    43:'-1',44:'1', 45:'2', 46:'3', 47:'4', 48:'4+',
+    50:'-1',51:'1', 52:'2', 53:'3', 54:'4', 55:'4+',
+    57:'-1',58:'1', 59:'2', 60:'3', 61:'4', 62:'4+',
+    64:'-1',65:'1', 66:'2', 67:'3', 68:'4', 69:'4+'
+  },
+  fifth: {
+    44:'-1',45:'1', 46:'2', 47:'3', 48:'4', 49:'4+',
+    51:'-1',52:'1', 53:'2', 54:'3', 55:'4', 56:'4+',
+    58:'-1',59:'1', 60:'2', 61:'3', 62:'4', 63:'4+',
+    65:'-1',66:'1', 67:'2', 68:'3', 69:'4', 70:'4+'
+  }
+};
+
+// Map a data-position key to its index in EM_POSITIONS, so the
+// apply-position helper can stamp the same value emPositions[] uses
+// elsewhere (per-note position cycling, copy/paste round-trips, the
+// position-line renderer). Order MUST match EM_POSITIONS above:
+//   0 half · 1 first · 2 upper1st · 3 second · 4 third · 5 upper3rd
+//   6 fourth · 7 upper4th · 8 fifth
+const EM_POSITION_KEY_TO_IDX = {
+  half: 0, first: 1, upper1st: 2, second: 3,
+  third: 4, upper3rd: 5, fourth: 6, upper4th: 7, fifth: 8
+};
+
+// Apply a position's fingering map to every pitched note inside the
+// currently selected bar (or selected bar range). Notes whose MIDI
+// isn't covered by the chosen position are left as-is — better than
+// stomping a previously-correct fingering with '?' when a single
+// out-of-position note appears in an otherwise good range.
+// In addition, stamp emPositions on every pitched note in the
+// selection so the position-line renderer draws a single line +
+// label spanning the full selection. (Position idx 1 = "1st" is
+// the implicit default; the renderer skips drawing a line for it,
+// so applying 1st position effectively clears any prior position
+// annotation across the selection — matching the convention that
+// 1st position doesn't carry a visible marker.)
+// Persists immediately and re-renders overlays so the new labels
+// show up without further interaction.
+function emApplyPositionFingerings(positionKey) {
+  if (!emFingeringsTitle) return;
+  if (selectedBar == null) return;
+  const map = EM_POSITION_FINGERINGS[positionKey];
+  if (!map) return;
+  const posIdx = EM_POSITION_KEY_TO_IDX[positionKey];
+  const a = selectedBarRangeEnd != null
+    ? Math.min(selectedBar, selectedBarRangeEnd)
+    : selectedBar;
+  const b = selectedBarRangeEnd != null
+    ? Math.max(selectedBar, selectedBarRangeEnd)
+    : selectedBar;
+  for (let bi = a; bi <= b; bi++) {
+    const info = barElements[bi];
+    if (!info || !info.noteData) continue;
+    for (let ni = 0; ni < info.noteData.length; ni++) {
+      const nd = info.noteData[ni];
+      if (!nd || typeof nd.pitch !== 'number') continue;
+      const key = bi + ':' + ni;
+      const fingering = map[nd.pitch];
+      if (fingering != null) emFingerings[key] = fingering;
+      // Stamp the position regardless of whether the note's pitch
+      // is in this position's table — the line spans the whole
+      // selection, so out-of-range notes still contribute to the
+      // group geometry. The default-position case (idx 1 = 1st)
+      // gets cleared via delete so the renderer falls through to
+      // its "no annotation" path.
+      if (posIdx === EM_DEFAULT_POSITION) {
+        delete emPositions[key];
+      } else if (typeof posIdx === 'number') {
+        emPositions[key] = posIdx;
+      }
+    }
+  }
+  emRenderOverlays();
+  emSaveFingerings(emFingeringsTitle);
 }
 
 // Wipe every fingering and position annotation for the CURRENT key
@@ -10497,16 +11167,24 @@ function emPasteFingerings() {
   if (emIsMobile()) return;
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
+    // Disabled state (Edit Fingering off) — ignore clicks. Browsers
+    // already block click events on disabled native buttons, but
+    // event listeners can still fire if `pointer-events` lets the
+    // click through. Belt-and-suspenders.
+    if (btn.disabled) return;
     if (menu.hidden) emOpenKebabMenu();
     else             emCloseKebabMenu();
   });
   // Print Worksheet → fires the system print dialog. Used to save
   // a PDF or print to paper. The active @media print stylesheet
   // strips the toolbar/footer/panels and leaves just the score.
+  // Now lives as a standalone toolbar button next to the kebab,
+  // not inside the kebab menu, so it's available regardless of
+  // whether Edit Fingering is on.
   const printBtn = document.getElementById('printScoreBtn');
   if (printBtn) {
     printBtn.addEventListener('click', () => {
-      emCloseKebabMenu();
+      if (printBtn.disabled) return;
       window.print();
     });
   }
@@ -10534,6 +11212,17 @@ function emPasteFingerings() {
       emCloseKebabMenu();
     });
   }
+  // Position-fingering buttons — one per cello position. Click looks
+  // up the data-position key (e.g. "first", "upper3rd") and feeds it
+  // to emApplyPositionFingerings, which walks the selected bar /
+  // bar range and applies the corresponding MIDI→fingering table.
+  document.querySelectorAll('.em-position-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      if (b.disabled) return;
+      emApplyPositionFingerings(b.dataset.position);
+      emCloseKebabMenu();
+    });
+  });
   // Click-outside and Escape close the menu.
   document.addEventListener('click', (e) => {
     if (menu.hidden) return;

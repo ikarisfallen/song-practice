@@ -406,6 +406,19 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
   border-radius: 999px;
   padding: 1px 7px;
 }
+/* Square around the label for the button matching the iRealPro
+   chart's PERMANENT key — only applied when a variant has rebased
+   the active originalKey to its own key (so the circle has moved
+   off the iRealPro key). Acts as a memo so the user can still see
+   where iReal originally was while practicing in the variant's
+   key. The JS toggle skips the case where originalKey still
+   equals irealKey, so only one marker (circle OR square) shows
+   per song state. */
+.key-seg button.ireal-key .key-label {
+  border: 1.5px solid currentColor;
+  border-radius: 0;
+  padding: 1px 7px;
+}
 /* The row-break boundary crosses the middle of the seg row — the 7th
    button (index 6) is the first of the second row, so the default
    `button + button { border-left }` rule would leave it with an
@@ -832,8 +845,28 @@ html.is-android .fl {
 .edit-kebab {
   font-size: 22px;
   line-height: 1;
+  /* Half the standard top-btn footprint — the "⋮" glyph is narrow
+     and fits comfortably in 20px. The shorter pill keeps it visually
+     distinct from the adjacent print button. */
+  width: 20px;
+  padding: 0;
 }
 .edit-kebab[hidden] { display: none; }
+/* Standalone Print button. Same top-btn footprint as the rest of the
+   toolbar; carries the printer glyph inline so it doesn't depend on
+   an SVG asset. Hidden on touch-only devices regardless of what JS
+   thinks — `(hover: none) and (pointer: coarse)` is the canonical
+   "touch device with no fine pointer" media query, which catches
+   phones / tablets even when their user-agent string doesn't (iPad
+   on iPadOS 13+ reports as Mac, for example). The JS check in
+   emUpdateKebabState still hides it via the `hidden` attribute on
+   detected mobile devices; this is a layered safeguard so the
+   button can't slip through when both checks would have caught it. */
+.print-btn { font-size: 18px; }
+.print-btn[hidden] { display: none; }
+@media (hover: none) and (pointer: coarse) {
+  .print-btn { display: none !important; }
+}
 .edit-kebab-menu {
   position: fixed;
   z-index: 100;

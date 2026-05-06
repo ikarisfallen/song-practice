@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=92" />
+<link rel="stylesheet" href="style.css?v=96" />
 </head>
 <body>
 <div id="app">
@@ -60,6 +60,7 @@
         </svg>
       </button>
       <button id="optionsToggle" class="top-btn" aria-label="Toggle options" aria-expanded="false">⚙</button>
+      <button id="printScoreBtn" class="top-btn print-btn" type="button" aria-label="Print Worksheet" hidden>🖨</button>
       <label id="editModeLabel" class="top-edit-label" hidden>
         <input type="checkbox" id="editModeToggle" class="switch-input" />
         <span class="switch" aria-hidden="true"></span>
@@ -67,10 +68,18 @@
       </label>
       <button id="editKebabBtn" class="top-btn edit-kebab" type="button" aria-label="More options" aria-haspopup="menu" aria-expanded="false" hidden>⋮</button>
       <div id="editKebabMenu" class="edit-kebab-menu" role="menu" hidden>
-        <button id="printScoreBtn" type="button" role="menuitem">Print Worksheet</button>
-        <hr class="edit-kebab-sep" role="separator" />
         <button id="copyFingeringsBtn" type="button" role="menuitem">Copy Fingerings</button>
         <button id="pasteFingeringsBtn" type="button" role="menuitem" disabled>Paste Fingerings</button>
+        <hr class="edit-kebab-sep" role="separator" />
+        <button class="em-position-btn" data-position="half" type="button" role="menuitem">Apply 1/2 Position</button>
+        <button class="em-position-btn" data-position="first" type="button" role="menuitem">Apply 1st Position</button>
+        <button class="em-position-btn" data-position="upper1st" type="button" role="menuitem">Apply +1st Position</button>
+        <button class="em-position-btn" data-position="second" type="button" role="menuitem">Apply 2nd Position</button>
+        <button class="em-position-btn" data-position="third" type="button" role="menuitem">Apply 3rd Position</button>
+        <button class="em-position-btn" data-position="upper3rd" type="button" role="menuitem">Apply +3rd Position</button>
+        <button class="em-position-btn" data-position="fourth" type="button" role="menuitem">Apply 4th Position</button>
+        <button class="em-position-btn" data-position="upper4th" type="button" role="menuitem">Apply +4th Position</button>
+        <button class="em-position-btn" data-position="fifth" type="button" role="menuitem">Apply 5th Position</button>
         <hr class="edit-kebab-sep" role="separator" />
         <button id="deleteAllFingeringsBtn" type="button" role="menuitem" class="edit-kebab-danger">Delete All Fingerings</button>
       </div>
@@ -78,8 +87,8 @@
     <div id="optionsPanel" class="options-panel" hidden>
       <div class="drum-row">
         <div class="seg mode-seg" id="modeSeg" role="tablist">
-          <button type="button" data-mode="head" class="active">Head</button>
           <button type="button" data-mode="blank">Blank</button>
+          <button type="button" data-mode="head" class="active">Score</button>
           <button type="button" data-mode="exercise">Exercise</button>
         </div>
         <select id="exerciseSelect" class="exercise-select">
@@ -247,7 +256,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v2.83</span>
+      <span class="app-version" id="appVersion">v3.00</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -255,7 +264,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=400"></script>
+<script src="app.js?v=417"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on
