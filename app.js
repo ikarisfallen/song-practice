@@ -6581,6 +6581,12 @@ let drumMode = 'ride'; // 'hat' | 'ride' | 'click'
 let countInBars = 1;  // 0, 1, or 2 measures of click before the song starts
 let loopCountIn = false; // when true, the count-in fires at the top of every loop iteration
 let playbackPart;
+// Separate Tone.Part for "Play Head" override audio. Built only when
+// the Head checkbox is on at startPlayback time; loops in lock-step
+// with playbackPart's loopStart/loopEnd so the head melody keeps
+// firing as the chord chart cycles. Disposed alongside playbackPart
+// in stopPlayback.
+let headPart = null;
 let playState = 'stopped'; // 'stopped' | 'playing' | 'paused'
 let pauseContext = null;   // { offset, beatsPerBar } captured at startPlayback; used by resume
 let currentPlaylist = []; // sequence of { bar, idx } one entry = one bar
@@ -6794,6 +6800,7 @@ async function initAudio() {
 
 function stopPlayback() {
   if (playbackPart) { playbackPart.stop(); playbackPart.dispose(); playbackPart = null; }
+  if (headPart)     { headPart.stop();     headPart.dispose();     headPart = null; }
   if (currentRealLoop) {
     try { currentRealLoop.player.stop(); currentRealLoop.player.unsync(); } catch (e) {}
     currentRealLoop = null;
@@ -7184,6 +7191,13 @@ let embellishOn = true;
 // an acoustic contrabass sampler. Off by default so the app can be
 // used as a silent reading aid with just piano comping + drums.
 let playScoreOn = false;
+// "Head" checkbox next to the Lead Play switch. When ON, the Lead
+// instrument plays the song's HEAD melody (from currentSong.head)
+// regardless of what's being displayed — useful for hearing the
+// melody as a backing track while practicing an exercise. The
+// checkbox is disabled when no head is available for the current
+// song. Pickup notes follow the same flag (see startPlayback).
+let playHeadOverride = false;
 (function bindPlayScoreSwitch() {
   const sw = document.getElementById('playScoreToggle');
   if (!sw) return;
@@ -7192,6 +7206,36 @@ let playScoreOn = false;
     playScoreOn = e.target.checked;
   });
 })();
+(function bindPlayHeadCheckbox() {
+  const cb = document.getElementById('playHeadCheckbox');
+  if (!cb) return;
+  playHeadOverride = !!cb.checked;
+  cb.addEventListener('change', async (e) => {
+    playHeadOverride = !!e.target.checked;
+    // Restart playback if currently playing so the new lead source
+    // (head vs displayed score) takes effect immediately. Mirrors the
+    // restart pattern used for key changes / exercise picks.
+    if (playState === 'playing' && window.currentSong) {
+      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
+    }
+  });
+})();
+// Sync the Head checkbox's enabled state to the current song's head
+// availability. Disabled when there's no head; auto-unchecks if
+// the user switches to a headless song while it was on, so the
+// flag doesn't silently persist into "no audio" territory.
+function updatePlayHeadAvailability() {
+  const cb = document.getElementById('playHeadCheckbox');
+  if (!cb) return;
+  const cs = window.currentSong;
+  const hasHead = !!(cs && cs.head && Array.isArray(cs.head.notes) && cs.head.notes.length);
+  cb.disabled = !hasHead;
+  if (!hasHead && cb.checked) {
+    cb.checked = false;
+    playHeadOverride = false;
+  }
+}
 
 // ===== Current-note highlight in the score =====
 // Paint the currently-playing note's stavenote group blue so the reader
@@ -7669,12 +7713,16 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
   // so toggling Lead during playback flips the pickup audibility
   // along with everything else.
   const pickupHead = window.currentSong && window.currentSong.head;
-  // Pickup playback is HEAD-MODE-ONLY. In Blank and Exercise modes the
-  // melody isn't being rendered in the partial bar, so playing pickup
-  // notes there would be audio-only ghost notes with nothing on the
-  // staff to match them.
+  // Pickup playback fires in two cases:
+  //   1. Score mode (`exerciseMode === 'head'`) — the lead-in is
+  //      drawn on the staff, the lead audio plays it.
+  //   2. "Play Head" override is on — the user chose to hear the
+  //      head as a backing while practicing an exercise; play the
+  //      pickup so the melody enters where it should, even though
+  //      the chart shows something else (no visible lead-in).
   const _pickupHeadMode = (typeof exerciseMode !== 'undefined' && exerciseMode === 'head');
-  if (_pickupHeadMode && pickupHead && pickupHead.leadInBeats > 0
+  const _shouldPlayPickup = _pickupHeadMode || playHeadOverride;
+  if (_shouldPlayPickup && pickupHead && pickupHead.leadInBeats > 0
       && Array.isArray(pickupHead.pickupNotes) && pickupHead.pickupNotes.length
       && startBarIdx === 0 && countInBars > 0) {
     const leadInBeats = pickupHead.leadInBeats;
@@ -7705,6 +7753,49 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
           try { guitar.triggerAttackRelease(noteName, durSec, t, 0.7); } catch (e) {}
         }
       }, time);
+    }
+  }
+
+  // "Play Head" override: when the user has the Head checkbox on,
+  // build a parallel Tone.Part that fires head notes through the
+  // Lead sampler regardless of what's being displayed (exercise,
+  // blank, score variant). Built here as an EVENT ARRAY; the actual
+  // Part is constructed after playbackPart so we can mirror its
+  // loopStart / loopEnd — that's how the head keeps cycling
+  // forever (the previous one-shot Tone.Transport.scheduleOnce
+  // approach fired each note exactly once and went silent after
+  // the first pass through the form).
+  let _headEvents = null;
+  if (playHeadOverride && pickupHead
+      && Array.isArray(pickupHead.notes) && pickupHead.notes.length) {
+    _headEvents = [];
+    const rawOffsetH = (KEY_TO_PC[currentKey] - KEY_TO_PC[originalKey] + 12) % 12;
+    for (const n of pickupHead.notes) {
+      if (n.rest || typeof n.midi !== 'number') continue;
+      const beatInHead = (n.stepStart || 0) / 6;
+      const headBar = Math.floor(beatInHead / beatsPerBar);
+      const beatInBar = beatInHead - headBar * beatsPerBar;
+      // Store ALL head events, including bars before startBarIdx —
+      // mirroring playbackPart's "every bar of the song" event set.
+      // The Part's start(time, offset) call below handles skipping
+      // pre-startBarIdx events on the FIRST pass through the form;
+      // when the Part loops, internal time wraps back to 0 and
+      // those early-bar events fire normally (otherwise PageUp
+      // drill-back from mid-song would silently strip the head's
+      // first N bars from every subsequent loop iteration too).
+      //
+      // Times stored at PART-RELATIVE bar coords (= same scheme as
+      // playbackPart's events: bar 0 = song's first bar). The Part's
+      // start position maps internal bar 0 onto the right Transport
+      // bar (after count-in for bar-0 starts, or at startBarIdx for
+      // mid-song).
+      const beatInt = Math.floor(beatInBar);
+      const sub16 = Math.round((beatInBar - beatInt) * 4);
+      const time = `${headBar}:${beatInt}:${sub16}`;
+      const transposedMidi = n.midi + rawOffsetH;
+      const noteName = midiToName(transposedMidi + 12);
+      const durSec = ((n.durationSteps || 6) / 6) * (60 / currentTempo);
+      _headEvents.push({ time, noteName, durSec });
     }
   }
 
@@ -8045,7 +8136,33 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       // Track the currently-playing bar so clear-loop / change-loop can
       // restart playback at the right spot (Transport.position keeps
       // climbing during looping and can't be trusted for this).
+      const _prevBar = currentPlayingBar;
       currentPlayingBar = ev.idx;
+      // Loop wraparound (form returned to its top, or a Loop In/Out
+      // wrap fired): the new bar idx is much LOWER than where we
+      // just were. Force an immediate scrollTo here, OUTSIDE of
+      // Tone.Draw's audio-clock queue. After multiple PageUp
+      // drill-backs the queue's callbacks can fire noticeably late,
+      // and the scroll-up to the form's top would lag behind the
+      // music. The threshold of 4 keeps this from firing on any
+      // accidental forward-jump or first-bar startup (where _prevBar
+      // is typically 0 or near-zero already).
+      if (typeof _prevBar === 'number'
+          && _prevBar > ev.idx + 4
+          && !ev.scrollIntoView) {
+        const info = barElements[ev.idx];
+        const chartEl = document.getElementById('chart');
+        if (info && info.rowEl && chartEl) {
+          const rowTop = info.rowEl.offsetTop;
+          // Match highlightBar's TOP_BUFFER so the new top-of-form
+          // bar lands at the same y the regular per-row follow-scroll
+          // would put it.
+          const targetTop = Math.max(0, rowTop - 56);
+          if (Math.abs(targetTop - chartEl.scrollTop) >= 20) {
+            chartEl.scrollTo({ top: targetTop, behavior: 'smooth' });
+          }
+        }
+      }
       Tone.Draw.schedule(() => {
         highlightBar(ev.idx);
         // The count-in barStart event sets scrollIntoView so the
@@ -8078,7 +8195,13 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       // sustain duration on the tie-start, so the whole tied note
       // sounds as a single sustained pluck instead of re-attacking
       // on every slot.
-      if (playScoreOn && guitar && guitar.loaded
+      // Skip the in-Part lead audio when "Play Head" override is on
+      // — head notes are scheduled separately above (see the
+      // playHeadOverride block before the bar loop). Without this
+      // gate we'd double up: the override schedule plays head notes
+      // AND this branch plays whatever the displayed exercise has
+      // for the same beat slot.
+      if (playScoreOn && !playHeadOverride && guitar && guitar.loaded
           && ev.info.pitch != null && ev.attackDurSec > 0) {
         const name = midiToName(ev.info.pitch + 12);
         guitar.triggerAttackRelease(name, ev.attackDurSec, time, 0.7);
@@ -8157,6 +8280,30 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
     playbackPart.start(`${startBarIdx}:0:0`, `${startBarIdx}:0:0`);
   } else {
     playbackPart.start(`${offset}:0:0`);
+  }
+
+  // "Play Head" override Part. Built only when _headEvents was
+  // populated above (i.e. playHeadOverride was on at startPlayback
+  // time and the song has a head). Mirrors playbackPart's loop
+  // bounds so the head melody cycles forever in lock-step with the
+  // chord chart — without this, the head events would be one-shots
+  // that fire only on the first pass through the form.
+  if (_headEvents && _headEvents.length) {
+    headPart = new Tone.Part((time, ev) => {
+      // Re-check the toggles inside the callback so flipping Lead Play
+      // mid-playback silences the head without a rebuild.
+      if (playScoreOn && playHeadOverride && guitar && guitar.loaded) {
+        try { guitar.triggerAttackRelease(ev.noteName, ev.durSec, time, 0.7); } catch (e) {}
+      }
+    }, _headEvents.map(e => [e.time, e]));
+    headPart.loop = true;
+    headPart.loopStart = playbackPart.loopStart;
+    headPart.loopEnd   = playbackPart.loopEnd;
+    if (_prerollActive) {
+      headPart.start(`${startBarIdx}:0:0`, `${startBarIdx}:0:0`);
+    } else {
+      headPart.start(`${offset}:0:0`);
+    }
   }
 
   // If Real mode has a recorded drum loop for this tempo tier + time sig,
@@ -8839,54 +8986,58 @@ function loadFromURL(url) {
   // keeps it off, for headless songs).
   if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
   document.getElementById('status').textContent = `Loaded: ${song.title} (${bars.length} bars)`;
-  // Try to load a matching score file from the songs/ folder for the
-  // "Head" exercise. Prefers <title>.musicxml (explicit spelling +
-  // ties); falls back to <title>.mid if no XML is present. Fire-and-
-  // forget: the render that just ran used whatever data was already
-  // cached; we re-render once the load settles if Head is selected.
-  loadSongHead(song.title).then(head => {
-    if (!window.currentSong || window.currentSong.song !== song) return; // user changed songs
-    window.currentSong.head = head;
-    window.currentSong.headLoaded = true;
-    // Recompute songRepeats from the score's bar length now that
-    // head is available. In Score mode this drives form-loops to
-    // match a multi-chorus score (e.g. a 4-chorus bassline expands
-    // a 16-bar form to 64 bars of chord changes).
-    if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
-    // The default Head is in the iRealPro chart's key by convention.
-    // Snap originalKey + originalBars back to the iRealPro reference
-    // (in case a prior variant had rebased them onto a foreign key)
-    // and clear the ireal-key marker — when originalKey === irealKey
-    // the helper produces no class so the square disappears.
-    syncKeySegIrealMarker();
-    if (exerciseMode === 'head') rerenderCurrent();
-    // Now that we know whether this song has a head, refresh the
-    // Play button — disable it if we're in Head mode and the load
-    // came back empty, enable it otherwise.
-    updateLoopControls();
-    // Same gating for the Edit Mode toggle — it only becomes
-    // available now that we know there's a head to annotate.
-    if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
-  });
-  // Score-mode dropdown: refresh with this song's matching score
-  // files. Runs in parallel with the head load so the picker is
-  // ready by the time the user clicks Score. Also records the
-  // chosen "default head" filename so the picker can preselect it.
+  // Score discovery + head load, consolidated. Used to be two parallel
+  // async blocks (loadSongHead by title + listScoresForSong) but that
+  // left songs with NO default head (e.g. Oleo, which only ships
+  // with a bassline variant) stuck on "No head found" — the dropdown
+  // showed the variant visually-selected, but no change event fired
+  // to actually load it. Doing both in one flow lets us pick the
+  // right initial score: default head if it exists, else the first
+  // variant, and load it directly.
   (async () => {
     const scores = await listScoresForSong(song.title);
     if (!window.currentSong || window.currentSong.song !== song) return;
     const defaultEntry = scores.find(s => s.isDefault);
     const defaultFilename = defaultEntry ? defaultEntry.filename : null;
-    window.currentSong.scoreFilename = defaultFilename;
-    // Store the default head's filename separately so the variant-
-    // load handler can tell whether the user just picked the default
-    // (no auto-transpose / square) vs a variant (apply both).
+    // Default head's filename — used by the variant-load handler to
+    // tell "user picked the default" (no rebase, no square) from
+    // "user picked a variant" (rebase + square).
     window.currentSong.defaultScoreFilename = defaultFilename;
+    // Initial score to load. Prefer the default head; fall back to
+    // the first variant in the list (alphabetical) so songs that
+    // ship only with a bassline / etude render that score by
+    // default. No scores at all → head stays null and the
+    // "No head found" banner appears, which is correct.
+    const initialEntry = defaultEntry || (scores.length > 0 ? scores[0] : null);
+    const initialFilename = initialEntry ? initialEntry.filename : null;
+    window.currentSong.scoreFilename = initialFilename;
     if (_dropdownMode === 'score' || exerciseMode === 'head') {
-      // We're (or about to be) in Score mode — refresh the dropdown
-      // now so it shows the new song's scores.
-      populateScoreDropdown(scores, window.currentSong.scoreFilename);
+      populateScoreDropdown(scores, initialFilename);
     }
+    // Load the chosen score (or null when there are none).
+    const head = initialFilename
+      ? await loadHeadFromFilename(initialFilename)
+      : null;
+    if (!window.currentSong || window.currentSong.song !== song) return;
+    window.currentSong.head = head;
+    window.currentSong.headLoaded = true;
+    // Recompute songRepeats from the loaded score's bar length.
+    if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
+    // Key handling. Default head: stay on iRealPro key (heads are
+    // authored in iRealPro key by convention). Variant fallback:
+    // rebase to the variant's key, mirroring what would happen if
+    // the user manually picked it from the dropdown. No score: just
+    // clear any leftover ireal-key marker from a prior song.
+    const isVariantFallback = initialEntry && !defaultEntry;
+    if (isVariantFallback && head && head.keyTonic) {
+      await rebaseToScoreKey(head.keyTonic);
+    } else {
+      syncKeySegIrealMarker();
+    }
+    if (exerciseMode === 'head') rerenderCurrent();
+    updateLoopControls();
+    if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
+    if (typeof updatePlayHeadAvailability === 'function') updatePlayHeadAvailability();
   })();
   // A freshly loaded song should start at the top of the score. The
   // chart container holds the scroll position from the previously
@@ -9547,6 +9698,7 @@ async function refreshScoreDropdownForCurrentSong() {
       updateScoreTitle();
       updateLoopControls();
       if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
+      if (typeof updatePlayHeadAvailability === 'function') updatePlayHeadAvailability();
       if (playState === 'playing' && window.currentSong) {
         const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
         await startPlayback(window.currentSong.song, expanded, currentPlayingBar);

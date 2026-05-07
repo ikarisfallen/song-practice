@@ -455,12 +455,43 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
    still starts at the same x on every row, so the three sliders
    stay vertically aligned. */
 .drum-row:has(.drum-vol) > .seg,
-.drum-row:has(.drum-vol) > .wake-label {
+.drum-row:has(.drum-vol) > .wake-label,
+.drum-row:has(.drum-vol) > .lead-controls {
   justify-self: start;
+}
+/* Lead row's middle column wraps the Play switch + Head checkbox so
+   the row keeps the same 3-column grid as the other slider rows
+   (label · controls · slider). Without this wrapper, both labels
+   would land as separate grid cells and shove the volume slider
+   into a 4th column, breaking the vertical alignment of the three
+   instruments' sliders. The inline-flex inside lays the two
+   controls out horizontally with a small gap. */
+.lead-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
 }
 .wake-label {
   font-size: 13px; color: #cde; display: inline-flex; align-items: center; gap: 8px;
   user-select: none; cursor: pointer;
+}
+/* "Head" checkbox next to the Lead "Play" switch — when checked,
+   the Lead instrument plays the song's head melody regardless of
+   what the score area is showing (exercise, blank, variant). Uses
+   a plain native checkbox (smaller footprint than a switch pill,
+   matches the secondary nature of the option). Greyed out when
+   the song has no head loaded. */
+.play-head-checkbox {
+  width: 16px; height: 16px;
+  margin: 0; padding: 0;
+  accent-color: #3da9fc;
+  cursor: pointer;
+}
+.play-head-checkbox:disabled {
+  cursor: default; opacity: 0.4;
+}
+.play-head-label:has(.play-head-checkbox:disabled) {
+  opacity: 0.4; cursor: default;
 }
 /* Push the "Fingering" and "Embellish" switches to the right edge of
    their drum-rows so they sit aligned on the right side of the panel. */
@@ -862,7 +893,10 @@ html.is-android .fl {
    emUpdateKebabState still hides it via the `hidden` attribute on
    detected mobile devices; this is a layered safeguard so the
    button can't slip through when both checks would have caught it. */
-.print-btn { font-size: 18px; }
+/* Square 1024x1024 viewBox printer glyph — sized to match the rest
+   of the top-bar icons (the default `.top-btn svg` rule is 16x22
+   which would squash a square icon). */
+.print-btn svg { width: 22px; height: 22px; }
 .print-btn[hidden] { display: none; }
 @media (hover: none) and (pointer: coarse) {
   .print-btn { display: none !important; }

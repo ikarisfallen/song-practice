@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=96" />
+<link rel="stylesheet" href="style.css?v=101" />
 </head>
 <body>
 <div id="app">
@@ -60,7 +60,11 @@
         </svg>
       </button>
       <button id="optionsToggle" class="top-btn" aria-label="Toggle options" aria-expanded="false">⚙</button>
-      <button id="printScoreBtn" class="top-btn print-btn" type="button" aria-label="Print Worksheet" hidden>🖨</button>
+      <button id="printScoreBtn" class="top-btn print-btn" type="button" aria-label="Print Worksheet" hidden>
+        <svg viewBox="0 0 1024 1024" aria-hidden="true">
+          <path fill="currentColor" d="M732 120c0-4.4-3.6-8-8-8H300c-4.4 0-8 3.6-8 8v148h440V120zm120 212H172c-44.2 0-80 35.8-80 80v328c0 17.7 14.3 32 32 32h168v132c0 4.4 3.6 8 8 8h424c4.4 0 8-3.6 8-8V772h168c17.7 0 32-14.3 32-32V412c0-44.2-35.8-80-80-80zM664 844H360V568h304v276zm164-360c0 4.4-3.6 8-8 8h-40c-4.4 0-8-3.6-8-8v-40c0-4.4 3.6-8 8-8h40c4.4 0 8 3.6 8 8v40z"/>
+        </svg>
+      </button>
       <label id="editModeLabel" class="top-edit-label" hidden>
         <input type="checkbox" id="editModeToggle" class="switch-input" />
         <span class="switch" aria-hidden="true"></span>
@@ -221,11 +225,17 @@
       </div>
       <div class="drum-row">
         <span class="drum-label">Lead</span>
-        <label class="wake-label">
-          <input type="checkbox" id="playScoreToggle" class="switch-input" />
-          <span class="switch" aria-hidden="true"></span>
-          <span>Play Score</span>
-        </label>
+        <div class="lead-controls">
+          <label class="wake-label">
+            <input type="checkbox" id="playScoreToggle" class="switch-input" />
+            <span class="switch" aria-hidden="true"></span>
+            <span>Play</span>
+          </label>
+          <label class="wake-label play-head-label">
+            <input type="checkbox" id="playHeadCheckbox" class="play-head-checkbox" disabled />
+            <span>Head</span>
+          </label>
+        </div>
         <input type="range" id="leadVol" class="drum-vol" min="0" max="100" value="40" aria-label="Lead volume" />
       </div>
     </div>
@@ -256,7 +266,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v3.00</span>
+      <span class="app-version" id="appVersion">v3.10</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -264,7 +274,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=417"></script>
+<script src="app.js?v=425"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on
