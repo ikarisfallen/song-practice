@@ -933,6 +933,440 @@ function generateQuarterNotes(bars, ts) {
 //     below C is also B, a duplicate), flip to the opposite
 //     direction. That's exactly what bumps bar 2's chromatic in
 //     the example off "B" and onto "D♭".
+// Walk Triad generator. The first beat of every chord event lands on
+// one of that chord's 1, 3, or 5. Each chord's target is the 1/3/5
+// pitch CLOSEST (within an octave) to the previous chord's target,
+// excluding the same pitch class — that keeps the line moving and
+// avoids static "stay on the same note" transitions. The remaining
+// beats inside the chord's range walk smoothly toward the NEXT
+// chord's target via the chord's own scale: middle beats step
+// through scale tones, and the LAST beat of the chord's range
+// lands 1 or 2 semitones from the next chord's target so the
+// arrival note sounds like a leading tone or natural neighbor.
+//
+// Worked example (4/4, all chords own a full bar):
+//   Dm7   → G7    → CMaj7
+//   target  D       B (closest of G/B/D to D, excluding D)  C (closest of C/E/G to B)
+//   bar1:   D - - X (X = approach to G7's B, e.g. C above or A♯ below)
+//   bar2:   B - - X (approach to C)
+//   bar3:   C - - … (final chord, no approach needed)
+function generateWalkTriadQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  // Spelling preference for non-scale chromatic approach tones.
+  // Falls back to flats for flat-key songs / keys, sharps otherwise.
+  const _useFlats = (typeof FLAT_KEYS !== 'undefined'
+    && typeof currentKey === 'string' && FLAT_KEYS.has(currentKey))
+    || (typeof currentIsMinor !== 'undefined' && currentIsMinor === false
+        && (currentKey === 'C#' || currentKey === 'F#' || currentKey === 'G#'));
+  const SHARP_TPCS = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19];
+  const FLAT_TPCS  = [14,  9, 16, 11, 18, 13,  8, 15, 10, 17, 12, 19];
+  const tpcMap = _useFlats ? FLAT_TPCS : SHARP_TPCS;
+
+  // 1, 3, 5 of a chord — uses diatonicIndexInScale so HW Diminished
+  // (over 7♭9 chords) maps to the chord's REAL 3 / 5 instead of the
+  // ♭3 / ♯11 passing tones. Returns [{pc, tpc}, ...].
+  function get135Tones(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const tones = [];
+    for (const d of [0, 2, 4]) {
+      const idx = diatonicIndexInScale(d, chordScale);
+      if (idx >= chordScale.length) continue;
+      const sd = chordScale[idx];
+      tones.push({
+        pc: ((rootPc + sd.s) % 12 + 12) % 12,
+        tpc: rootTpc + sd.t
+      });
+    }
+    return tones;
+  }
+
+  function pitchesForPC(pc) {
+    const opts = [];
+    for (let p = EX_LOW; p <= EX_HIGH; p++) {
+      if ((((p % 12) + 12) % 12) === pc) opts.push(p);
+    }
+    return opts;
+  }
+
+  // Pick a target pitch (1, 3, or 5) for every chord event in order.
+  // First chord: the chord-tone pitch closest to the cello midrange
+  // (~F2 = MIDI 41) so the line starts in a comfortable register.
+  // Subsequent chords: rank the available chord-tone PCs (excluding
+  // same-pc-as-previous) by closest-pitch distance to the previous
+  // target, and most of the time pick the closest one — but with a
+  // ~35% chance pick the SECOND-closest instead. The wider interval
+  // forces the in-between fills to scale-walk through more notes
+  // rather than always sitting as a tight enclosure pair, which is
+  // the variety the user asked for.
+  //
+  // Determinism: seeded by chord index so the same song renders
+  // identically across renders, but switches it up across chords.
+  function pickWithVariety(candidates, ci) {
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+    // Knuth-multiplier hash → 0..99 from chord index.
+    const seed = ((ci + 1) * 2654435761) >>> 0;
+    const r = seed % 100;
+    if (r < 35) return candidates[1]; // 35% second-closest
+    return candidates[0];
+  }
+  // Build a pc-grouped, distance-ranked candidate list. Each entry
+  // is the BEST pitch-octave for one pc, with its distance to the
+  // reference. Sorting by distance and picking 1st vs 2nd gives the
+  // "step further away" variety.
+  function rankCandidates(tones, refPitch, excludePc) {
+    const list = [];
+    for (const t of tones) {
+      if (excludePc != null && t.pc === excludePc) continue;
+      let bestPitch = null, bestDist = Infinity;
+      for (const p of pitchesForPC(t.pc)) {
+        const d = Math.abs(p - refPitch);
+        if (d < bestDist) { bestDist = d; bestPitch = p; }
+      }
+      if (bestPitch != null) {
+        list.push({ pitch: bestPitch, tpc: t.tpc, pc: t.pc, dist: bestDist });
+      }
+    }
+    list.sort((a, b) => a.dist - b.dist);
+    return list;
+  }
+  const targets = [];
+  let prevTarget = null;
+  for (let ci = 0; ci < chordEvents.length; ci++) {
+    const ce = chordEvents[ci];
+    const tones = get135Tones(ce);
+    if (tones.length === 0) { targets.push(null); continue; }
+    let chosen = null;
+    if (prevTarget == null) {
+      // First chord — rank against the cello midrange (no prevTarget
+      // to step away from). No same-pc exclusion needed.
+      const ranked = rankCandidates(tones, 41, null);
+      chosen = pickWithVariety(ranked, ci);
+    } else {
+      const ranked = rankCandidates(tones, prevTarget.pitch, prevTarget.pc);
+      chosen = pickWithVariety(ranked, ci);
+      if (!chosen) {
+        // All chord tones share a pc with prevTarget — fall back to
+        // any chord tone (allow same-pc).
+        const fallbackRanked = rankCandidates(tones, prevTarget.pitch, null);
+        chosen = pickWithVariety(fallbackRanked, ci);
+      }
+    }
+    targets.push(chosen);
+    prevTarget = chosen;
+  }
+
+  // Helper: scale tones in cello range for a chord (sorted ascending).
+  function scaleTonesFor(ce) {
+    const scale = exGetScale(chordToCanonical(ce.chord));
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const tones = [];
+    for (let oct = 0; oct <= 7; oct++) {
+      for (const sd of scale) {
+        const pitch = rootPc + sd.s + oct * 12;
+        if (pitch < EX_LOW || pitch > EX_HIGH) continue;
+        tones.push({ pitch, tpc: rootTpc + sd.t });
+      }
+    }
+    tones.sort((a, b) => a.pitch - b.pitch);
+    return tones;
+  }
+
+  // Pick a single neighbor of `nextPitch` on a given side (+1 above,
+  // -1 below). Prefers a scale tone of the current chord at 1 or 2
+  // semitones distance, and SKIPS any candidate that equals
+  // `avoidPitch` (= the chord's target) — without this guard, a
+  // target like F over a coming F♯ would pick F itself as the
+  // 1-semitone-below enclosure, making the line uselessly return to
+  // its starting pitch. Falls back to chromatic, then "any neighbor
+  // in range" as last resorts.
+  function pickNeighborOnSide(nextPitch, side, scalePcs, avoidPitch) {
+    const candidates = [nextPitch + side * 1, nextPitch + side * 2];
+    // Pass 1: scale tone, ≠ avoidPitch.
+    for (const c of candidates) {
+      if (c < EX_LOW || c > EX_HIGH) continue;
+      if (avoidPitch != null && c === avoidPitch) continue;
+      const cpc = ((c % 12) + 12) % 12;
+      if (scalePcs.has(cpc)) return c;
+    }
+    // Pass 2: chromatic, ≠ avoidPitch.
+    for (const c of candidates) {
+      if (c < EX_LOW || c > EX_HIGH) continue;
+      if (avoidPitch != null && c === avoidPitch) continue;
+      return c;
+    }
+    // Pass 3: any in-range candidate, even if = avoidPitch.
+    for (const c of candidates) {
+      if (c >= EX_LOW && c <= EX_HIGH) return c;
+    }
+    return null;
+  }
+
+  // TPC-of-pitch helper: prefer the chord's scale-tone tpc when the
+  // pitch's PC is in the scale; otherwise fall back to the song's
+  // flat/sharp preference table.
+  function tpcOfPitch(pitch, chordScale, rootPc, rootTpc) {
+    const pc = ((pitch % 12) + 12) % 12;
+    for (const sd of chordScale) {
+      if (((rootPc + sd.s) % 12 + 12) % 12 === pc) return rootTpc + sd.t;
+    }
+    return tpcMap[pc];
+  }
+
+  // Pick scale-tone walk pitches between `fromPitch` and `toPitch`,
+  // avoiding two collision sources:
+  //   1. The previous pitch (`avoidStart` initially, then the
+  //      previous chosen note) — keeps consecutive beats different.
+  //   2. The pitch the walk is HEADING TOWARD (`avoidEnd`) — keeps
+  //      the walk slot from landing on the upcoming enclosure note,
+  //      which would either repeat at placement time or get
+  //      chromatically nudged to a non-scale tone (the bug that
+  //      produced an A♭ over FMaj7 walking up to G).
+  // Each pick lands on the closest scale tone to the linear-
+  // interpolation target. On a collision with either avoid-pitch,
+  // the index shifts ±1, ±2 looking for a clean alternative.
+  function walkScaleTonesNoRepeat(fromPitch, toPitch, n, scaleTones, avoidStart, avoidEnd) {
+    if (n <= 0) return [];
+    if (scaleTones.length === 0) return new Array(n).fill(fromPitch);
+    function closestIdx(p) {
+      let best = 0, bestDist = Infinity;
+      for (let i = 0; i < scaleTones.length; i++) {
+        const d = Math.abs(scaleTones[i].pitch - p);
+        if (d < bestDist) { bestDist = d; best = i; }
+      }
+      return best;
+    }
+    const sIdx = closestIdx(fromPitch);
+    const eIdx = closestIdx(toPitch);
+    const dir = eIdx >= sIdx ? 1 : -1;
+    const result = [];
+    let prevPitch = avoidStart;
+    for (let i = 1; i <= n; i++) {
+      const t = i / (n + 1);
+      let idx = Math.round(sIdx + (eIdx - sIdx) * t);
+      idx = Math.max(0, Math.min(scaleTones.length - 1, idx));
+      const collides = (idx) => {
+        if (idx < 0 || idx >= scaleTones.length) return true;
+        const p = scaleTones[idx].pitch;
+        if (p === prevPitch) return true;
+        if (avoidEnd != null && p === avoidEnd) return true;
+        return false;
+      };
+      // Try shifting ±1, ±2 (in walk direction first) until a
+      // collision-free index is found.
+      if (collides(idx)) {
+        const tries = [idx + dir, idx - dir, idx + 2 * dir, idx - 2 * dir];
+        for (const t2 of tries) {
+          if (!collides(t2)) { idx = t2; break; }
+        }
+      }
+      idx = Math.max(0, Math.min(scaleTones.length - 1, idx));
+      result.push(scaleTones[idx]);
+      prevPitch = scaleTones[idx].pitch;
+    }
+    return result;
+  }
+
+  // Place notes for each chord event.
+  for (let ci = 0; ci < chordEvents.length; ci++) {
+    const ce = chordEvents[ci];
+    const target = targets[ci];
+    if (!target) continue;
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const numBeats = endBeat - startBeat;
+    if (numBeats <= 0) continue;
+    const barIdx = ce.barIdx;
+
+    // Beat 1 of this chord = the target.
+    results[barIdx][startBeat] = { pitch: target.pitch, tpc: target.tpc, duration: 'q' };
+    if (numBeats === 1) continue;
+
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const scalePcs = new Set(chordScale.map(sd => ((rootPc + sd.s) % 12 + 12) % 12));
+    const sTones = scaleTonesFor(ce);
+    const nextTarget = targets[ci + 1];
+
+    // Last chord (no successor): no enclosure / approach needed.
+    // Fill remaining beats with a scale walk descending from target.
+    if (!nextTarget) {
+      const fills = walkScaleTonesNoRepeat(
+        target.pitch, target.pitch - 4, numBeats - 1, sTones, target.pitch, null
+      );
+      for (let i = 0; i < fills.length; i++) {
+        const f = fills[i];
+        if (!f) continue;
+        results[barIdx][startBeat + 1 + i] = { pitch: f.pitch, tpc: f.tpc, duration: 'q' };
+      }
+      continue;
+    }
+
+    // Build the enclosure pair around nextTarget: one note on each
+    // side at 1 or 2 semitones distance. The "above" and "below"
+    // tones together "enclose" the next-chord target — the user's
+    // requested approach style. When numBeats >= 3 we use BOTH; for
+    // numBeats === 2 we have only one beat for an approach, so we
+    // pick the side that matches the walk direction. Each side's
+    // pick excludes `target.pitch` so a target like F walking up
+    // to a coming F♯ never "approaches" via F itself.
+    const above = pickNeighborOnSide(nextTarget.pitch, +1, scalePcs, target.pitch);
+    const below = pickNeighborOnSide(nextTarget.pitch, -1, scalePcs, target.pitch);
+    const walkUp = nextTarget.pitch >= target.pitch;
+
+    // Helper: add tpc to a pitch + write into results at a given beat.
+    // Re-checks "no repeat" against `prevPitch`; if the chosen pitch
+    // collides, nudge up or down by 1 semitone (chromatic) so the
+    // line keeps moving.
+    function placeAt(beatIdx, pitch, prevPitch) {
+      if (pitch == null) return prevPitch;
+      let p = pitch;
+      if (p === prevPitch) {
+        // Try +1 then -1 (chromatic neighbors)
+        if (p + 1 <= EX_HIGH && p + 1 !== prevPitch) p = p + 1;
+        else if (p - 1 >= EX_LOW && p - 1 !== prevPitch) p = p - 1;
+      }
+      const tpc = tpcOfPitch(p, chordScale, rootPc, rootTpc);
+      results[barIdx][beatIdx] = { pitch: p, tpc, duration: 'q' };
+      return p;
+    }
+
+    if (numBeats === 2) {
+      // Single approach beat. Match walk direction: walking up →
+      // approach FROM BELOW; walking down → approach FROM ABOVE.
+      let approach = walkUp ? below : above;
+      // If that side's neighbor would repeat the target, flip sides.
+      if (approach === target.pitch) approach = walkUp ? above : below;
+      placeAt(endBeat - 1, approach, target.pitch);
+      continue;
+    }
+
+    // Choose between two fill styles per chord:
+    //   - WALKDOWN: scale-walk from target straight toward nextTarget,
+    //     ending on a single approach tone 1 or 2 semitones from
+    //     next-target. NO above/below enclosure pair — just a clean
+    //     run, classic jazz walking-bass shape.
+    //   - ENCLOSURE: target → walk → encl_above → encl_below → next.
+    //     Sits down into the next target by visiting both sides.
+    // Hashing the chord index gives a stable ~50/50 distribution
+    // across the song. Walkdown is attempted first (when wanted);
+    // if there isn't enough room for a clean run (e.g. narrow
+    // intervals like target == next-target ± 2), falls through to
+    // enclosure.
+    const styleSeed = ((ci + 13) * 2654435761) >>> 0;
+    const wantWalkdown = numBeats >= 3 && (styleSeed % 100) < 50;
+
+    let prevPitch = target.pitch;
+
+    // Try to build a clean walkdown. Approach priority:
+    //   1. DIATONIC 2-semitone (whole step in the chord's scale)
+    //      — produces the user's "A | G" style landing.
+    //   2. CHROMATIC 1-semitone leading tone — classic jazz bass.
+    //   3. Diatonic-2 chromatic (out-of-scale 2-semitone) as a
+    //      last resort.
+    // For each candidate, we run walkScaleTonesNoRepeat and check
+    // that the resulting fills don't collapse into consecutive
+    // repeats or land on the approach itself. Returns null when
+    // no candidate produces a valid walk → caller falls back to
+    // enclosure.
+    function tryBuildWalkdown() {
+      const sideDir = walkUp ? -1 : +1;
+      const fillSlots = numBeats - 2;
+      if (fillSlots < 1) return null;
+      const cand2 = nextTarget.pitch + sideDir * 2;
+      const cand1 = nextTarget.pitch + sideDir * 1;
+      const cand2Pc = ((cand2 % 12) + 12) % 12;
+      const candList = [];
+      if (cand2 !== target.pitch && cand2 >= EX_LOW && cand2 <= EX_HIGH && scalePcs.has(cand2Pc)) {
+        candList.push(cand2);
+      }
+      if (cand1 !== target.pitch && cand1 >= EX_LOW && cand1 <= EX_HIGH) {
+        candList.push(cand1);
+      }
+      if (cand2 !== target.pitch && cand2 >= EX_LOW && cand2 <= EX_HIGH && !scalePcs.has(cand2Pc)) {
+        candList.push(cand2);
+      }
+      for (const approachTry of candList) {
+        const walks = walkScaleTonesNoRepeat(
+          target.pitch, approachTry, fillSlots, sTones,
+          target.pitch, approachTry
+        );
+        if (!walks || walks.length !== fillSlots) continue;
+        // Validate: no consecutive repeats, last walk note ≠ approach.
+        let p = target.pitch;
+        let valid = true;
+        for (const w of walks) {
+          if (!w || w.pitch === p) { valid = false; break; }
+          p = w.pitch;
+        }
+        if (!valid) continue;
+        if (p === approachTry) continue;
+        return { walks, approach: approachTry };
+      }
+      return null;
+    }
+
+    if (wantWalkdown) {
+      const wd = tryBuildWalkdown();
+      if (wd) {
+        for (let i = 0; i < wd.walks.length; i++) {
+          const w = wd.walks[i];
+          if (!w) continue;
+          prevPitch = placeAt(startBeat + 1 + i, w.pitch, prevPitch);
+        }
+        prevPitch = placeAt(endBeat - 1, wd.approach, prevPitch);
+        continue;
+      }
+      // Walkdown didn't fit cleanly — fall through to enclosure.
+    }
+
+    // ENCLOSURE STYLE — target on beat 1, walking middle beats,
+    // then encl_above + encl_below on the last two beats. Order by
+    // walk direction so the final beat ends opposite the walk side
+    // (walking up → above first, below last → rises into next).
+    const enclFirst  = walkUp ? above : below;
+    const enclSecond = walkUp ? below : above;
+
+    // Walking middle beats from target toward enclFirst. The walk
+    // also avoids enclFirst itself as an end-pitch — without that
+    // guard, a 1-walkSlot interval like F→G (only 2 semitones, no
+    // in-scale tone strictly between) would land on G, then beat 3
+    // would also be G, and the no-repeat fallback would chromatically
+    // nudge to A♭ — outside the chord's scale. With the avoidEnd in
+    // place, the walk picks a wider scale tone like A instead.
+    const walkSlots = numBeats - 3;
+    if (walkSlots > 0) {
+      const walks = walkScaleTonesNoRepeat(
+        target.pitch, enclFirst != null ? enclFirst : nextTarget.pitch,
+        walkSlots, sTones, target.pitch, enclFirst
+      );
+      for (let i = 0; i < walkSlots; i++) {
+        const w = walks[i];
+        if (!w) continue;
+        prevPitch = placeAt(startBeat + 1 + i, w.pitch, prevPitch);
+      }
+    }
+    // First enclosure note.
+    prevPitch = placeAt(startBeat + numBeats - 2, enclFirst, prevPitch);
+    // Second enclosure note (the actual approach to nextTarget).
+    prevPitch = placeAt(startBeat + numBeats - 1, enclSecond, prevPitch);
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
 function generateScaleChromaticQuarterNotes(bars, ts) {
   const beatsPerBar = ts.num;
   // Number of scale notes per bar before the chromatic seat. 4/4 → 3,
@@ -1530,6 +1964,116 @@ function generateCantusFirmusQuarterNotes(bars, ts) {
     // span (`'w'` → 4 steps, `'h'` → 2, etc.), so we don't need a
     // chainSteps walk — `tieFromPrev` alone is enough to silence the
     // re-attacks on beats 2-N.
+    results[ce.barIdx][startBeat] = { pitch: notePitch, tpc: noteTpc, duration };
+    for (let b = startBeat + 1; b < endBeat; b++) {
+      results[ce.barIdx][b] = { pitch: notePitch, tpc: noteTpc, tieFromPrev: true };
+    }
+    lastPitch = notePitch;
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Target Triad generator. One sustained note per chord, always
+// either the 1, 3, or 5 of that chord — uses `diatonicIndexInScale`
+// so HW Diminished over 7♭9 chords still picks the chord's REAL
+// 3 / 5 (e.g. F♯ / A on D7♭9), not the ♭3 / ♯11 passing tones.
+//
+// Direction: oscillating sawtooth. The line starts at the highest
+// 1/3/5 in cello range and DESCENDS — each chord picks the
+// CLOSEST 1/3/5 strictly below the previous note. When no chord
+// tone fits below (the line has bottomed out), direction flips to
+// ASCEND — each subsequent chord picks the closest 1/3/5 strictly
+// above. When the ascent runs out, direction flips back, and so on.
+// Result: a continuous up-down-up sweep through the chord-tones,
+// hitting the floor and ceiling of available range each pass.
+function generateTargetTriadQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  let lastPitch = -1;
+  let direction = -1; // -1 = descending, +1 = ascending
+
+  // 1, 3, 5 tones across the cello range for a given chord. Pulls
+  // from the CHORD'S OWN scale (not the parent-key effective scale)
+  // so a Cm7 inside B♭ major still arpeggiates C-E♭-G, never B♭-D-F.
+  function build135Tones(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || !chordScale.length) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const tones = [];
+    for (const d of [0, 2, 4]) {
+      const idx = diatonicIndexInScale(d, chordScale);
+      if (idx >= chordScale.length) continue;
+      const sd = chordScale[idx];
+      const pc = ((rootPc + sd.s) % 12 + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) tones.push({ pitch: p, tpc });
+      }
+    }
+    tones.sort((a, b) => a.pitch - b.pitch);
+    return tones;
+  }
+
+  // Closest tone strictly in `dir` direction (-1 below / +1 above)
+  // from `fromPitch`. Returns null when no tone qualifies — caller
+  // uses that as the cue to flip direction.
+  function pickClosestInDirection(tones, fromPitch, dir) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const t of tones) {
+      if (dir < 0 && t.pitch >= fromPitch) continue;
+      if (dir > 0 && t.pitch <= fromPitch) continue;
+      const dist = Math.abs(t.pitch - fromPitch);
+      if (dist < bestDist) { bestDist = dist; best = t; }
+    }
+    return best;
+  }
+
+  chordEvents.forEach((ce, i) => {
+    const tones = build135Tones(ce);
+    if (tones.length === 0) return;
+
+    let notePitch, noteTpc;
+    if (lastPitch < 0) {
+      // First chord: start at the HIGHEST 1/3/5 in range so the
+      // first sweep is a descent.
+      const top = tones[tones.length - 1];
+      notePitch = top.pitch;
+      noteTpc = top.tpc;
+      direction = -1;
+    } else {
+      // Try the current direction; flip if we've hit a wall (no
+      // chord tone left in that direction). Edge case where flipping
+      // also yields nothing (rare — chord tones all on lastPitch's
+      // pc): fall back to absolute closest.
+      let best = pickClosestInDirection(tones, lastPitch, direction);
+      if (!best) {
+        direction = -direction;
+        best = pickClosestInDirection(tones, lastPitch, direction);
+      }
+      if (!best) {
+        const idx = findClosestIndex(tones, lastPitch);
+        best = tones[idx];
+      }
+      notePitch = best.pitch;
+      noteTpc = best.tpc;
+    }
+
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const beatCount = endBeat - startBeat;
+    const duration = beatCount >= 4 ? 'w'
+                   : beatCount === 3 ? 'h.'
+                   : beatCount === 2 ? 'h'
+                   : 'q';
     results[ce.barIdx][startBeat] = { pitch: notePitch, tpc: noteTpc, duration };
     for (let b = startBeat + 1; b < endBeat; b++) {
       results[ce.barIdx][b] = { pitch: notePitch, tpc: noteTpc, tieFromPrev: true };
@@ -2676,14 +3220,33 @@ function midiTpcToVexKey(soundingMidi, tpc) {
 let _songDirIndexPromise = null;
 function loadSongDirectoryIndex() {
   if (_songDirIndexPromise) return _songDirIndexPromise;
-  _songDirIndexPromise = (async () => {
+  _songDirIndexPromise = loadDirectoryIndex('songs');
+  return _songDirIndexPromise;
+}
+// Lick directory index — same shape and merge strategy as the song
+// index but rooted at `licks/`. Cached separately so a manual cache
+// invalidation in one folder doesn't cost a re-fetch for the other.
+let _licksDirIndexPromise = null;
+function loadLicksDirectoryIndex() {
+  if (_licksDirIndexPromise) return _licksDirIndexPromise;
+  _licksDirIndexPromise = loadDirectoryIndex('licks');
+  return _licksDirIndexPromise;
+}
+// Build a `{lowercaseFilename: actualCasingFilename}` map for the
+// given top-level folder (e.g. "songs", "licks") by combining a
+// JSON manifest at `<folder>/manifest.json` with an HTML directory
+// listing at `<folder>/`. The manifest is the canonical source on
+// GitHub Pages (which never serves directory listings); the HTML
+// listing wins on local dev so a just-dropped file appears
+// immediately without the manifest workflow needing to run. Either
+// source missing is fine — the function still returns whatever the
+// other one provided.
+function loadDirectoryIndex(folder) {
+  return (async () => {
     const map = Object.create(null);
-    // 1. Manifest. Works on GitHub Pages (no directory listing) and
-    //    is the canonical source on production. May be stale during
-    //    local dev because the GitHub Action regenerates it on push,
-    //    not on every file drop.
+    // 1. Manifest.
     try {
-      const res = await fetch('songs/manifest.json', { cache: 'no-store' });
+      const res = await fetch(`${folder}/manifest.json`, { cache: 'no-store' });
       if (res.ok) {
         const json = await res.json();
         if (Array.isArray(json)) {
@@ -2693,15 +3256,10 @@ function loadSongDirectoryIndex() {
           }
         }
       }
-    } catch (e) { /* skip — we'll still try the listing */ }
-    // 2. HTML directory listing (Python's http.server, most dev
-    //    servers). Merged on TOP of the manifest so a file dropped
-    //    into songs/ during local dev shows up immediately without
-    //    needing the manifest workflow to run. On GitHub Pages this
-    //    typically 404s and the loop is a no-op, so production
-    //    behavior is unchanged.
+    } catch (e) { /* skip */ }
+    // 2. HTML directory listing.
     try {
-      const res = await fetch('songs/', { cache: 'no-store' });
+      const res = await fetch(`${folder}/`, { cache: 'no-store' });
       if (res.ok) {
         const text = await res.text();
         const re = /<a\s+[^>]*href="([^"]+)"/gi;
@@ -2709,9 +3267,7 @@ function loadSongDirectoryIndex() {
         while ((m = re.exec(text)) !== null) {
           let href;
           try { href = decodeURIComponent(m[1]); } catch (e) { continue; }
-          // Skip parent / self / directory entries.
           if (!href || href === '../' || href === './' || href.endsWith('/')) continue;
-          // Same-folder files only.
           if (href.includes('/')) continue;
           map[href.toLowerCase()] = href;
         }
@@ -2719,7 +3275,6 @@ function loadSongDirectoryIndex() {
     } catch (e) { /* skip */ }
     return map;
   })();
-  return _songDirIndexPromise;
 }
 
 // Resolve `${title}.${ext}` to the actual filename on disk, matching
@@ -3166,7 +3721,8 @@ function parseMusicXML(doc) {
   // square outline (and auto-transpose the chart) whenever the
   // score's key differs from the iRealPro chart's key.
   const keyTonic = detectKeyTonicFromMusicXML(doc);
-  return { notes: mainNotes, leadInBeats, pickupNotes, keyTonic };
+  const firstHarmony = parseFirstHarmonyFromMusicXML(doc);
+  return { notes: mainNotes, leadInBeats, pickupNotes, keyTonic, firstHarmony };
 }
 
 // Read the MusicXML's <key><fifths> + <mode> from the first measure
@@ -3174,6 +3730,150 @@ function parseMusicXML(doc) {
 // Pitch class is derived from circle-of-fifths arithmetic; minor
 // keys offset by +9 (relative-minor tonic). Returns null when the
 // document has no key signature declaration.
+// Convert a single <harmony> element into a minimal
+// `{ root, rest }` chord object compatible with `chordToCanonical`.
+// Returns null if the harmony lacks a recognizable root step.
+function parseHarmonyElement(harmony) {
+  if (!harmony) return null;
+  const rootStep = harmony.querySelector('root > root-step');
+  if (!rootStep) return null;
+  const letter = rootStep.textContent.trim().toUpperCase();
+  if (!/^[A-G]$/.test(letter)) return null;
+  const rootAlter = harmony.querySelector('root > root-alter');
+  let acc = '';
+  if (rootAlter) {
+    const a = parseInt(rootAlter.textContent, 10);
+    if (a === 1) acc = '#';
+    else if (a === -1) acc = 'b';
+  }
+  const kindEl = harmony.querySelector('kind');
+  const kindText = kindEl ? (kindEl.getAttribute('text') || '').trim() : '';
+  const kindValue = kindEl ? kindEl.textContent.trim().toLowerCase() : '';
+  // Convert MusicXML kind value → iRealPro-style chord-rest token
+  // suitable for `chordToCanonical`. Covers the common qualities
+  // ports of MuseScore emit; falls back to bare root for anything
+  // unrecognized.
+  let rest = '';
+  if (kindText) {
+    rest = kindText;
+  } else {
+    switch (kindValue) {
+      case 'major':                 rest = ''; break;
+      case 'minor':                 rest = 'm'; break;
+      case 'augmented':             rest = '+'; break;
+      case 'diminished':            rest = 'dim'; break;
+      case 'dominant':              rest = '7'; break;
+      case 'major-seventh':         rest = 'Maj7'; break;
+      case 'minor-seventh':         rest = 'm7'; break;
+      case 'diminished-seventh':    rest = 'dim7'; break;
+      case 'half-diminished':       rest = 'm7b5'; break;
+      case 'augmented-seventh':     rest = '7#5'; break;
+      case 'major-minor':           rest = 'mMaj7'; break;
+      case 'major-sixth':           rest = '6'; break;
+      case 'minor-sixth':           rest = 'm6'; break;
+      case 'dominant-ninth':        rest = '9'; break;
+      case 'major-ninth':           rest = 'Maj9'; break;
+      case 'minor-ninth':           rest = 'm9'; break;
+      case 'suspended-fourth':      rest = 'sus4'; break;
+      case 'suspended-second':      rest = 'sus2'; break;
+      case 'power':                 rest = '5'; break;
+      default:                      rest = '';
+    }
+  }
+  return { root: letter, rest: acc + rest };
+}
+// Read the FIRST <harmony> block in the document. Used for
+// single-bar exercise licks (Lick 1, Lick 2 …) to determine the
+// chord the lick was authored over.
+function parseFirstHarmonyFromMusicXML(doc) {
+  if (!doc) return null;
+  const score = doc.querySelector('score-partwise') || doc.querySelector('score-timewise');
+  if (!score) return null;
+  return parseHarmonyElement(score.querySelector('harmony'));
+}
+// Read EVERY <harmony> element across the part with its position in
+// 24th-note steps from the start of its containing measure. Returns
+//   [{ measureIdx, stepInMeasure, chord: { root, rest } }, …]
+// in document order. A measure with multiple chords (e.g. a
+// compressed 251 like "Dm7 G7 | CMaj7" that puts the ii and V on
+// beats 1 and 3 of bar 1) yields multiple entries with the same
+// measureIdx but different stepInMeasure.
+function parseHarmonyEvents(doc) {
+  if (!doc) return [];
+  const score = doc.querySelector('score-partwise') || doc.querySelector('score-timewise');
+  if (!score) return [];
+  const part = score.querySelector('part');
+  if (!part) return [];
+  const measures = part.querySelectorAll('measure');
+  const out = [];
+  let divisions = 1;
+  for (let mi = 0; mi < measures.length; mi++) {
+    const measure = measures[mi];
+    // Track divisions changes (the same per-file logic parseMusicXML
+    // uses). Note durations are converted to 24th-note steps via
+    // (ticks * 6 / divisions), matching the rest of the pipeline.
+    const divEl = measure.querySelector('attributes > divisions');
+    if (divEl) divisions = parseInt(divEl.textContent, 10) || divisions;
+    let stepInMeasure = 0;
+    for (const el of Array.from(measure.children)) {
+      const tag = el.tagName;
+      if (tag === 'harmony') {
+        const chord = parseHarmonyElement(el);
+        if (chord) out.push({ measureIdx: mi, stepInMeasure, chord });
+      } else if (tag === 'note') {
+        const isChord = el.querySelector('chord') !== null;
+        // Chord-linked notes don't advance the cursor (they sound
+        // simultaneously with the previous note). Only advance for
+        // the lead voice's primary line.
+        if (isChord) continue;
+        const voiceEl = el.querySelector('voice');
+        const voice = voiceEl ? parseInt(voiceEl.textContent, 10) : 1;
+        if (voice !== 1) continue;
+        const dEl = el.querySelector('duration');
+        const ticks = dEl ? (parseInt(dEl.textContent, 10) || 0) : 0;
+        if (divisions > 0) stepInMeasure += ticks * 6 / divisions;
+      } else if (tag === 'backup') {
+        const dEl = el.querySelector('duration');
+        const ticks = dEl ? (parseInt(dEl.textContent, 10) || 0) : 0;
+        if (divisions > 0) stepInMeasure -= ticks * 6 / divisions;
+      } else if (tag === 'forward') {
+        const dEl = el.querySelector('duration');
+        const ticks = dEl ? (parseInt(dEl.textContent, 10) || 0) : 0;
+        if (divisions > 0) stepInMeasure += ticks * 6 / divisions;
+      }
+    }
+  }
+  return out;
+}
+// Backward-compat shim: returns the FIRST harmony per measure (used
+// by the multi-bar 3-bar 251 path that authored its detection
+// against a one-chord-per-measure assumption).
+function parseHarmoniesByMeasure(doc) {
+  const events = parseHarmonyEvents(doc);
+  const seen = new Set();
+  const out = [];
+  for (const ev of events) {
+    if (seen.has(ev.measureIdx)) continue;
+    seen.add(ev.measureIdx);
+    out.push({ measureIdx: ev.measureIdx, chord: ev.chord });
+  }
+  return out;
+}
+// Read the FIRST <time> block in the document → {num, den}.
+// Defaults to 4/4 when the file omits a time signature. Used by
+// multi-bar lick parsing to compute stepsPerBar at the 24th-note
+// grid resolution.
+function parseTimeSignatureFromMusicXML(doc) {
+  if (!doc) return { num: 4, den: 4 };
+  const time = doc.querySelector('time');
+  if (!time) return { num: 4, den: 4 };
+  const beatsEl = time.querySelector('beats');
+  const beatTypeEl = time.querySelector('beat-type');
+  const num = beatsEl ? (parseInt(beatsEl.textContent, 10) || 4) : 4;
+  const den = beatTypeEl ? (parseInt(beatTypeEl.textContent, 10) || 4) : 4;
+  return { num, den };
+}
+
 function detectKeyTonicFromMusicXML(doc) {
   if (!doc) return null;
   const score = doc.querySelector('score-partwise') || doc.querySelector('score-timewise');
@@ -3510,6 +4210,447 @@ function generateHeadFromScore(bars, ts) {
   return { results, chordEvents, patterns, effective, subdivisions: 6 };
 }
 
+// Exercise-lick generator. Each bar of the song plays the cached
+// lick (parsed from a "Exercise - …" .musicxml / .mid file)
+// transposed so the lick's source root maps to the bar's first
+// chord root. The lick's source root comes from the file's key
+// signature (parsed `keyTonic`); the per-bar target root comes
+// from `bars[i].chords[0]` — multi-chord bars use just the FIRST
+// chord, per the user's spec.
+//
+// Pitch math: `semiDelta = target_pc - source_pc`, `tpcDelta =
+// target_tpc - source_tpc`. So a lick written as `E F B A D C`
+// over CMaj (sourceRoot=C) becomes `F♯ G C♯ B E D` over a Dmaj7
+// bar (target root D), with TPCs preserved as the chord's spelling.
+//
+// Octave-fit: applied per-bar — find the lowest transposed pitch
+// and shift the whole bar's lick by ±12n so the lowest note lands
+// in [EX_LOW, EX_LOW+11]. Each bar is independent so a song with
+// chords across the cello range has each bar's lick well-placed.
+function generateExerciseLickQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const stepsPerBar = beatsPerBar * 6; // 24th-note grid, like Head mode
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(stepsPerBar).fill(null));
+
+  // Pull the chosen lick out of the cache. The dropdown change
+  // handler pre-loads via loadExerciseLick before triggering the
+  // rerender, so a hit is the common case; a miss returns empty
+  // results (the chart will render bars of rests until the load
+  // finishes and a follow-up rerender catches up).
+  const lickFilename = (typeof exerciseMode === 'string' && exerciseMode.startsWith('lick:'))
+    ? exerciseMode.slice(5) : '';
+  const lick = lickFilename ? _exerciseLickCache.get(lickFilename) : null;
+  if (!lick) {
+    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+  }
+
+  const DUR_FITS = [
+    { dur: 'w',  steps: 24 },
+    { dur: 'h.', steps: 18 },
+    { dur: 'h',  steps: 12 },
+    { dur: 'q.', steps: 9 },
+    { dur: 'q',  steps: 6 },
+    { dur: '8',  steps: 3 }
+  ];
+  // MusicXML <type> → VexFlow duration token. Used for tuplet members
+  // whose raw <duration> ticks don't equal a standard note value.
+  const TYPE_TO_VF = {
+    'whole': 'w', 'half': 'h', 'quarter': 'q', 'eighth': '8', '16th': '16', '32nd': '32'
+  };
+
+  // Helper: emit a single transposed note into a target bar's slot
+  // grid. Handles tuplet members (single-slot with `tuplet` descriptor
+  // + `stepsConsumed`) AND non-tuplet notes (DUR_FITS chunking with
+  // ties between chunks). Shared by single-bar and multi-bar paths.
+  function emitNoteIntoBar(targetBarIdx, n) {
+    const stepInBar = n.stepStart;
+    if (stepInBar < 0 || stepInBar >= stepsPerBar) return;
+    if (n.tupletActual && n.tupletNormal && n.displayType) {
+      if (results[targetBarIdx][stepInBar]) return;
+      const stepsConsumed = Math.max(1, Math.round(n.durationSteps));
+      const vfDur = TYPE_TO_VF[n.displayType] || 'q';
+      results[targetBarIdx][stepInBar] = {
+        pitch: n.rest ? null : n.midi,
+        tpc:   n.rest ? null : n.tpc,
+        duration: vfDur,
+        stepsConsumed,
+        rest: !!n.rest,
+        tieFromPrev: !n.rest && !!n.tieStop,
+        tieToNext:   !n.rest && !!n.tieStart,
+        tuplet: {
+          start: !!n.tupletStart,
+          stop:  !!n.tupletStop,
+          actual: n.tupletActual,
+          normal: n.tupletNormal
+        }
+      };
+      return;
+    }
+    const totalSteps = Math.max(1, Math.round(n.durationSteps || 6));
+    let remaining = Math.min(totalSteps, stepsPerBar - stepInBar);
+    let cur = stepInBar;
+    let first = true;
+    while (remaining > 0) {
+      const opt = DUR_FITS.find(f => f.steps <= remaining);
+      if (!opt) break;
+      if (results[targetBarIdx][cur]) break;
+      const isLastInChunk = (remaining === opt.steps);
+      results[targetBarIdx][cur] = {
+        pitch: n.rest ? null : n.midi,
+        tpc:   n.rest ? null : n.tpc,
+        duration: opt.dur,
+        rest: !!n.rest,
+        tieFromPrev: !first,
+        tieToNext: !isLastInChunk
+      };
+      cur += opt.steps;
+      remaining -= opt.steps;
+      first = false;
+    }
+  }
+
+  // Octave-fit a transposed bar of notes into the cello range. Shifts
+  // every note by the same ±12n so the lowest pitched note lands in
+  // [EX_LOW, EX_LOW+11].
+  function octaveFit(transposed) {
+    let minPitch = Infinity;
+    for (const n of transposed) {
+      if (n.midi != null && n.midi < minPitch) minPitch = n.midi;
+    }
+    let octShift = 0;
+    if (minPitch < Infinity) {
+      while (minPitch + octShift < EX_LOW) octShift += 12;
+      while (minPitch + octShift > EX_LOW + 11) octShift -= 12;
+      if (minPitch + octShift < EX_LOW) octShift += 12;
+    }
+    if (octShift !== 0) {
+      for (const n of transposed) {
+        if (n.midi != null) n.midi += octShift;
+      }
+    }
+  }
+
+  // ---- Multi-bar 251 lick path ----
+  // The lick file declared a CMaj7-style ii-V-I (or ii°-V-i)
+  // progression in its <harmony> tags. Scan the song for matching
+  // 251/25/51 segments and apply the lick's bars to them. The
+  // single-bar transposition logic below is bypassed entirely in
+  // this mode — bars not part of any matched segment are left as
+  // rests (the lick is keyed to the progression, not to individual
+  // chords).
+  if (lick.multiBar && lick.pattern251) {
+    const isP4Up = (a, b) => b === (a + 5) % 12;
+    // Single-chord-per-bar event lookup (for expanded matching).
+    function singleChordEventForBar(bi) {
+      if (bi < 0 || bi >= bars.length) return null;
+      const cs = (bars[bi].chords || []).filter(c => c && !c.slash && !c.nc);
+      if (cs.length !== 1) return null;
+      const ch = cs[0];
+      const root = exParseRoot(chordToCanonical(ch));
+      if (!root) return null;
+      return { chord: ch, root, type: getChordType(chordToCanonical(ch)) };
+    }
+    // First-two-chords-of-bar lookup (for compressed matching). The
+    // bar must contain at least 2 live chords; we use the first two.
+    function firstTwoChordEventsOfBar(bi) {
+      if (bi < 0 || bi >= bars.length) return null;
+      const cs = (bars[bi].chords || []).filter(c => c && !c.slash && !c.nc);
+      if (cs.length < 2) return null;
+      const ev = (ch) => {
+        const root = exParseRoot(chordToCanonical(ch));
+        if (!root) return null;
+        return { chord: ch, root, type: getChordType(chordToCanonical(ch)) };
+      };
+      const a = ev(cs[0]), b = ev(cs[1]);
+      if (!a || !b) return null;
+      return [a, b];
+    }
+    // Greedy non-overlapping segment scan; behaviour depends on the
+    // lick's structural shape.
+    const used = bars.map(() => false);
+    const segments = [];
+    if (lick.pattern251.shape === 'compressed') {
+      // Lick layout: | ii  V |  I  |. Only match song bars with the
+      // same shape — a 2-chord ii-V bar followed by a 1-chord I bar.
+      // Looser shapes (e.g. expanded ii | V | I) are NOT matched
+      // here because the lick's per-bar note positions assume the
+      // ii and V share one bar; squeezing or stretching them would
+      // misalign the line.
+      for (let i = 0; i <= bars.length - 2; i++) {
+        if (used[i] || used[i+1]) continue;
+        const pair = firstTwoChordEventsOfBar(i);
+        const ev3 = singleChordEventForBar(i+1);
+        if (!pair || !ev3) continue;
+        const [ev1, ev2] = pair;
+        if (!isP4Up(ev1.root.pitchClass, ev2.root.pitchClass)) continue;
+        if (!isP4Up(ev2.root.pitchClass, ev3.root.pitchClass)) continue;
+        let mode = null;
+        if (ev1.type === 'minor' && ev2.type === 'dominant' && ev3.type === 'major') mode = 'major';
+        else if (ev1.type === 'halfdim' && ev2.type === 'dominant' && ev3.type === 'minor') mode = 'minor';
+        if (!mode) continue;
+        segments.push({
+          lickBars: [0, 1], songBars: [i, i+1],
+          mode, targetTonic: ev3.root
+        });
+        used[i] = used[i+1] = true;
+      }
+      // Compressed-25: a 2-chord ii-V bar with no resolution on the
+      // next bar. Use just lick bar 0 (the ii+V notes).
+      for (let i = 0; i < bars.length; i++) {
+        if (used[i]) continue;
+        const pair = firstTwoChordEventsOfBar(i);
+        if (!pair) continue;
+        const [ev1, ev2] = pair;
+        if (!isP4Up(ev1.root.pitchClass, ev2.root.pitchClass)) continue;
+        let mode = null;
+        if (ev1.type === 'minor' && ev2.type === 'dominant') mode = 'major';
+        else if (ev1.type === 'halfdim' && ev2.type === 'dominant') mode = 'minor';
+        if (!mode) continue;
+        const tonic = {
+          pitchClass: (ev2.root.pitchClass + 5) % 12,
+          tpc: ev2.root.tpc - 1
+        };
+        segments.push({
+          lickBars: [0], songBars: [i],
+          mode, targetTonic: tonic
+        });
+        used[i] = true;
+      }
+    } else {
+      // Expanded 251: scan longest first → 251 (3 bars) → 25 → 51.
+      for (let i = 0; i <= bars.length - 3; i++) {
+        if (used[i] || used[i+1] || used[i+2]) continue;
+        const ev1 = singleChordEventForBar(i);
+        const ev2 = singleChordEventForBar(i+1);
+        const ev3 = singleChordEventForBar(i+2);
+        if (!ev1 || !ev2 || !ev3) continue;
+        if (!isP4Up(ev1.root.pitchClass, ev2.root.pitchClass)) continue;
+        if (!isP4Up(ev2.root.pitchClass, ev3.root.pitchClass)) continue;
+        let mode = null;
+        if (ev1.type === 'minor' && ev2.type === 'dominant' && ev3.type === 'major') mode = 'major';
+        else if (ev1.type === 'halfdim' && ev2.type === 'dominant' && ev3.type === 'minor') mode = 'minor';
+        if (!mode) continue;
+        segments.push({
+          lickBars: [0, 1, 2], songBars: [i, i+1, i+2],
+          mode, targetTonic: ev3.root
+        });
+        used[i] = used[i+1] = used[i+2] = true;
+      }
+      for (let i = 0; i <= bars.length - 2; i++) {
+        if (used[i] || used[i+1]) continue;
+        const ev1 = singleChordEventForBar(i);
+        const ev2 = singleChordEventForBar(i+1);
+        if (!ev1 || !ev2) continue;
+        if (!isP4Up(ev1.root.pitchClass, ev2.root.pitchClass)) continue;
+        let mode = null;
+        if (ev1.type === 'minor' && ev2.type === 'dominant') mode = 'major';
+        else if (ev1.type === 'halfdim' && ev2.type === 'dominant') mode = 'minor';
+        if (!mode) continue;
+        const tonic = {
+          pitchClass: (ev2.root.pitchClass + 5) % 12,
+          tpc: ev2.root.tpc - 1
+        };
+        segments.push({
+          lickBars: [0, 1], songBars: [i, i+1],
+          mode, targetTonic: tonic
+        });
+        used[i] = used[i+1] = true;
+      }
+      for (let i = 0; i <= bars.length - 2; i++) {
+        if (used[i] || used[i+1]) continue;
+        const ev1 = singleChordEventForBar(i);
+        const ev2 = singleChordEventForBar(i+1);
+        if (!ev1 || !ev2) continue;
+        if (!isP4Up(ev1.root.pitchClass, ev2.root.pitchClass)) continue;
+        let mode = null;
+        if (ev1.type === 'dominant' && ev2.type === 'major') mode = 'major';
+        else if (ev1.type === 'dominant' && ev2.type === 'minor') mode = 'minor';
+        if (!mode) continue;
+        segments.push({
+          lickBars: [1, 2], songBars: [i, i+1],
+          mode, targetTonic: ev2.root
+        });
+        used[i] = used[i+1] = true;
+      }
+    }
+
+    // Apply each segment: chromatic shift from source tonic to target
+    // tonic, with optional "minor flavor" (flatten the source major
+    // key's 3rd, 6th, 7th) when the target segment is a minor 251.
+    // The minor flatten is computed AFTER the chromatic shift, by
+    // checking each note's pitch class relative to the TARGET tonic
+    // — so a CMaj 251 lick over a Cm 251 ends up using E♭ major
+    // notes (E→E♭, A→A♭, B→B♭) regardless of the per-bar chord.
+    const sourceTonic = lick.pattern251.sourceTonic;
+    for (const seg of segments) {
+      const isMinorTarget = (seg.mode === 'minor');
+      const semiDelta = ((seg.targetTonic.pitchClass - sourceTonic.pitchClass) % 12 + 12) % 12;
+      const tpcDelta = seg.targetTonic.tpc - sourceTonic.tpc;
+      // Transpose every bar in the segment first, THEN octave-fit
+      // the whole segment with a single shared shift. Per-bar fits
+      // would dump a sparse last bar (e.g. just D5+F4 over the I)
+      // onto its own low octave because its own min pitch is so
+      // much higher than the busy ii/V bars — breaking the line's
+      // continuity. One shared shift keeps the 3-bar phrase in
+      // register with the original lick's contour.
+      const perBarTransposed = [];
+      let segMinPitch = Infinity;
+      seg.lickBars.forEach((lickBarIdx) => {
+        const sourceBarNotes = (lick.barNotes && lick.barNotes[lickBarIdx]) || [];
+        const transposed = [];
+        for (const n of sourceBarNotes) {
+          if (n.rest || typeof n.midi !== 'number') {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          let newMidi = n.midi + semiDelta;
+          let newTpc = n.tpc + tpcDelta;
+          if (isMinorTarget) {
+            // Flatten the source-major-key's 3rd, 6th, and 7th
+            // relative to the target tonic. e.g. CMaj source over
+            // Cm 251: E→E♭ (4→3), A→A♭ (9→8), B→B♭ (11→10). Other
+            // pitch classes (root, 2, 4, 5 of major + chromatic
+            // alterations like ♭5) pass through unchanged.
+            const pcFromTonic = ((newMidi - seg.targetTonic.pitchClass) % 12 + 12) % 12;
+            if (pcFromTonic === 4 || pcFromTonic === 9 || pcFromTonic === 11) {
+              newMidi -= 1;
+              newTpc -= 7;
+            }
+          }
+          transposed.push(Object.assign({}, n, { midi: newMidi, tpc: newTpc }));
+          if (newMidi < segMinPitch) segMinPitch = newMidi;
+        }
+        perBarTransposed.push(transposed);
+      });
+      // Compute one shared octave shift from the segment's min pitch.
+      let segOctShift = 0;
+      if (segMinPitch < Infinity) {
+        while (segMinPitch + segOctShift < EX_LOW) segOctShift += 12;
+        while (segMinPitch + segOctShift > EX_LOW + 11) segOctShift -= 12;
+        if (segMinPitch + segOctShift < EX_LOW) segOctShift += 12;
+      }
+      if (segOctShift !== 0) {
+        for (const arr of perBarTransposed) {
+          for (const n of arr) {
+            if (n.midi != null) n.midi += segOctShift;
+          }
+        }
+      }
+      perBarTransposed.forEach((arr, k) => {
+        const targetBarIdx = seg.songBars[k];
+        for (const tn of arr) emitNoteIntoBar(targetBarIdx, tn);
+      });
+    }
+    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+  }
+
+  // ---- Single-bar lick path ----
+  // (Lick 1, Lick 2 …) — every song bar's first chord re-pitches the
+  // one-bar phrase via per-chord scale-degree mapping (modal) with
+  // a chromatic-fallback collision check.
+  if (!lick.notes || !lick.notes.length || !lick.sourceScale) {
+    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+  }
+
+  for (let barIdx = 0; barIdx < bars.length; barIdx++) {
+    const bar = bars[barIdx];
+    const firstChord = (bar.chords || []).find(c => c && !c.slash && !c.nc);
+    if (!firstChord) continue;
+    const canonical = chordToCanonical(firstChord);
+    const targetRoot = exParseRoot(canonical);
+    const targetScale = exGetScale(canonical);
+    if (!targetRoot || !targetScale || !targetScale.length) continue;
+
+    // Scale-degree transposition. Each source note carries
+    //   { stepIdx, alteration, octaveOffset }
+    // computed against the lick's source chord/scale at load time.
+    // We re-emit it against the TARGET chord's scale: the same
+    // step index becomes the chord's own diatonic tone (so a lick
+    // degree-3 plays as the chord's 3rd over every bar — b3 over
+    // m7, ♮3 over Maj7, etc.). The alteration carries chromatic
+    // approach tones (#1, b9, etc.) cleanly across the change.
+    function buildScaleDegreeTransposed() {
+      const out = [];
+      for (const n of lick.notes) {
+        if (n.rest || typeof n.midi !== 'number' || n.stepIdx == null) {
+          out.push({ ...n, midi: null, tpc: null });
+          continue;
+        }
+        const len = targetScale.length;
+        const sd = targetScale[((n.stepIdx % len) + len) % len];
+        const newSemi = sd.s + n.alteration;
+        const newTpc = sd.t + n.alteration * 7;
+        // octaveOffset is the absolute octave count (computed at
+        // load time as floor((sourceMidi − sourceRootPc) / 12)), so
+        // this yields a real MIDI value. Per-bar octave-fit below
+        // moves the whole line into the cello range.
+        const newMidi = (n.octaveOffset || 0) * 12 + targetRoot.pitchClass + newSemi;
+        const finalTpc = targetRoot.tpc + newTpc;
+        out.push({ ...n, midi: newMidi, tpc: finalTpc });
+      }
+      return out;
+    }
+
+    // Chromatic (interval-from-root) transposition. Used as a
+    // fallback when scale-degree mapping creates a collision —
+    // i.e. two source notes that were AUDIBLY different end up on
+    // the same target pitch. The collision typically happens with
+    // chromatic-enclosure licks like 5–b5–4–b3–3–1 over a chord
+    // whose mode already owns the chromatic tone (e.g. CMaj's b5
+    // = Gb mapped to Locrian where the b5 = Ab is a scale tone:
+    // step 4 alt -1 collapses onto step 3 alt 0). Chromatic
+    // mapping preserves every interval-from-root intact, so the
+    // lick's exact contour is kept on the new chord.
+    function buildChromaticTransposed() {
+      const semiDelta = ((targetRoot.pitchClass - lick.sourceRoot.pitchClass) % 12 + 12) % 12;
+      const tpcDelta = targetRoot.tpc - lick.sourceRoot.tpc;
+      const out = [];
+      for (const n of lick.notes) {
+        if (n.rest || typeof n.midi !== 'number') {
+          out.push({ ...n, midi: null, tpc: null });
+          continue;
+        }
+        out.push({ ...n, midi: n.midi + semiDelta, tpc: n.tpc + tpcDelta });
+      }
+      return out;
+    }
+
+    // Run scale-degree first; check for consecutive non-rest notes
+    // that DIFFER in source but COLLIDE in target. If any, redo
+    // chromatically.
+    let transposed = buildScaleDegreeTransposed();
+    let collision = false;
+    for (let i = 1; i < lick.notes.length; i++) {
+      const a = lick.notes[i - 1];
+      const b = lick.notes[i];
+      if (!a || !b) continue;
+      if (a.rest || b.rest) continue;
+      if (typeof a.midi !== 'number' || typeof b.midi !== 'number') continue;
+      if (a.midi === b.midi) continue; // already a repeated note in source
+      const ta = transposed[i - 1];
+      const tb = transposed[i];
+      if (ta && tb && ta.midi != null && tb.midi != null && ta.midi === tb.midi) {
+        collision = true;
+        break;
+      }
+    }
+    if (collision) {
+      transposed = buildChromaticTransposed();
+    }
+    octaveFit(transposed);
+    for (const n of transposed) emitNoteIntoBar(barIdx, n);
+  }
+
+  return { results, chordEvents, patterns, effective, subdivisions: 6 };
+}
+
 // ===== Chord-tone eighth-note arpeggio factory =====
 // Builds a generator that emits a fixed ascending set of chord-tone
 // degrees as eighth notes — e.g. 1-2-3-5 or 3-5-7-9. Shorter chord
@@ -3818,6 +4959,83 @@ function buildFingerboardSVG() {
   }
   svg += `</svg>`;
   return svg;
+}
+
+// Mini fingerboard renderer for the "Diagram" overlay. Black-and-
+// white static glyph for the scale's fingerboard positions on the
+// 5-string cello (F C G D A, 7 frets). Layout matches the big Note
+// Info diagram:
+//   - Open strings (fret 0) sit ABOVE the nut as HOLLOW circles
+//     (chord-chart convention — they're played without pressing).
+//   - Stopped notes (frets 1-6) are FILLED dots between fret lines.
+//   - The NUT (between fret 0 and fret 1) is the only thick line.
+//     Other fret lines are thin. There's no line above the open-
+//     string row.
+const FB_MINI_COL_W = 8;
+const FB_MINI_GAP = 2;
+const FB_MINI_ROW_H = 9;
+const FB_MINI_FRETS = 7;
+const FB_MINI_W = FB_STRING_BASES.length * FB_MINI_COL_W
+  + (FB_STRING_BASES.length - 1) * FB_MINI_GAP;
+const FB_MINI_H = FB_MINI_FRETS * FB_MINI_ROW_H + 2;
+function appendMiniFingerboard(parent, x, y, scalePcs) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('transform', `translate(${x}, ${y})`);
+  // Six horizontal fret lines, positioned the same way the big
+  // diagram does: at i*rowH+1 for i = 1..6. That means there's NO
+  // line at y=0 (above the open-string row), and the first line
+  // drawn (the nut, between fret 0 and fret 1) is the thick one.
+  const fretLineYs = [1, 2, 3, 4, 5, 6].map(i => i * FB_MINI_ROW_H + 1);
+  fretLineYs.forEach((ly, i) => {
+    const thickness = i === 0 ? 1.4 : 0.6; // nut thicker than other frets
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    line.setAttribute('x', -1);
+    line.setAttribute('y', ly);
+    line.setAttribute('width', FB_MINI_W + 2);
+    line.setAttribute('height', thickness);
+    line.setAttribute('fill', '#000');
+    g.appendChild(line);
+  });
+  // Per-string vertical line + scale-tone dots.
+  for (let c = 0; c < FB_STRING_BASES.length; c++) {
+    const cx = c * (FB_MINI_COL_W + FB_MINI_GAP) + FB_MINI_COL_W / 2;
+    // String line spans from the top circle center down to the
+    // bottom circle center (matches the big diagram's behavior so
+    // the line doesn't poke past the outermost dots).
+    const firstCy = FB_MINI_ROW_H - 3;
+    const lastCy = (FB_MINI_FRETS - 1) * FB_MINI_ROW_H + (FB_MINI_ROW_H - 3);
+    const sline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    sline.setAttribute('x1', cx);
+    sline.setAttribute('y1', firstCy);
+    sline.setAttribute('x2', cx);
+    sline.setAttribute('y2', lastCy);
+    sline.setAttribute('stroke', '#000');
+    sline.setAttribute('stroke-width', 0.6);
+    g.appendChild(sline);
+    for (let r = 0; r < FB_MINI_FRETS; r++) {
+      const midi = FB_STRING_BASES[c] + r;
+      const pc = ((midi % 12) + 12) % 12;
+      if (!scalePcs.has(pc)) continue;
+      // Same vertical-offset formula as the big diagram so circles
+      // sit just above each fret line they belong to.
+      const cy = r * FB_MINI_ROW_H + (FB_MINI_ROW_H - 3);
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      dot.setAttribute('cx', cx);
+      dot.setAttribute('cy', cy);
+      dot.setAttribute('r', 2.5);
+      if (r === 0) {
+        // Open-string: hollow circle.
+        dot.setAttribute('fill', 'none');
+        dot.setAttribute('stroke', '#000');
+        dot.setAttribute('stroke-width', 0.8);
+      } else {
+        // Stopped note: filled dot.
+        dot.setAttribute('fill', '#000');
+      }
+      g.appendChild(dot);
+    }
+  }
+  parent.appendChild(g);
 }
 
 const PC_NAMES_SHARP = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
@@ -4530,9 +5748,85 @@ const barElements = []; // [ { rowEl, x, y, w, h } ] per bar index, for highligh
 // explicit song arg for the render-time case (renderChart fires before
 // `window.currentSong` is assigned in loadSong); callers from elsewhere
 // can fall back on the global.
+// Real Book index. Lazy-loaded from songs/realbook-index.json on the
+// first updateScoreTitle call and cached forever. The lookup is
+// fuzzy: titles are normalized (lowercased, accents stripped, "the"
+// / "a" prefixes removed, leading articles in parentheses stripped,
+// non-alphanumeric collapsed) so that iRealPro variants like
+// "All The Things You Are" match the index's "ALL THE THINGS YOU
+// ARE", and "(I Love You) For Sentimental Reasons" matches
+// "(I LOVE YOU) FOR SENTIMENTAL REASONS". Multiple matches (same
+// song in multiple volumes) are joined with "/" — e.g. "(RB3 p.392
+// / RB5 p.417)" so the user sees every available source.
+let _realbookIndexPromise = null;
+let _realbookByKey = null;
+function _normalizeTitleForRBLookup(t) {
+  if (!t) return '';
+  let s = String(t).toLowerCase();
+  // Strip accents (NFKD then drop combining marks).
+  try { s = s.normalize('NFKD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
+  // Drop ALL parenthetical phrases — not just leading. The Real Book
+  // index entries often carry an alternative title in parens, e.g.
+  // "CHEROKEE (INDIAN LOVE SONG)", "A FOGGY DAY (IN LONDON TOWN)",
+  // "BILLIE'S BOUNCE (BILL'S BOUNCE)", and iRealPro typically uses
+  // just the short form. Stripping every (...) on both sides lets
+  // them line up. (Songs with a leading parenthetical alt-title
+  // like "(I LOVE YOU) FOR SENTIMENTAL REASONS" also collapse to
+  // their short form here, matching how iRealPro lists them.)
+  s = s.replace(/\([^)]*\)/g, ' ');
+  // Library-style trailing article: "Girl From Ipanema, The" /
+  // "Way You Look Tonight, The" — iRealPro often uses this sort-
+  // friendly form whereas the Real Book index has the article up
+  // front ("THE GIRL FROM IPANEMA"). Strip the trailing ", The/A/An"
+  // so both sides reduce to the same article-less core below.
+  s = s.replace(/,\s*(the|an|a)\s*$/, '');
+  // Drop leading "the " / "a " / "an " articles.
+  s = s.replace(/^\s*(the|an|a)\s+/, '');
+  // Collapse to alphanumerics — kills punctuation, spacing variants,
+  // and apostrophes ("Tain't" vs "taint", "Don't" vs "dont").
+  s = s.replace(/[^a-z0-9]/g, '');
+  return s;
+}
+function loadRealbookIndex() {
+  if (_realbookIndexPromise) return _realbookIndexPromise;
+  _realbookIndexPromise = (async () => {
+    try {
+      const res = await fetch('songs/realbook-index.json', { cache: 'no-store' });
+      if (!res.ok) return null;
+      const arr = await res.json();
+      if (!Array.isArray(arr)) return null;
+      const map = new Map();
+      for (const e of arr) {
+        if (!e || !e.title) continue;
+        const key = _normalizeTitleForRBLookup(e.title);
+        if (!key) continue;
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push({ book: e.book, page: e.page });
+      }
+      _realbookByKey = map;
+      // Refresh the title now that the index is in.
+      try { if (typeof updateScoreTitle === 'function') updateScoreTitle(); } catch (e) {}
+      return map;
+    } catch (e) { return null; }
+  })();
+  return _realbookIndexPromise;
+}
+function _rbSuffixForTitle(songTitle) {
+  if (!_realbookByKey) return '';
+  const key = _normalizeTitleForRBLookup(songTitle);
+  if (!key) return '';
+  const hits = _realbookByKey.get(key);
+  if (!hits || !hits.length) return '';
+  // Sort by book then page so the suffix is deterministic.
+  const sorted = hits.slice().sort((a, b) => a.book - b.book || a.page - b.page);
+  return ' (' + sorted.map(h => 'RB' + h.book + ' p.' + h.page).join(' / ') + ')';
+}
 function updateScoreTitle(songArg) {
   const el = document.getElementById('scoreTitle');
   if (!el) return;
+  // Fire the index load on first call. Cached after that, and the
+  // load itself triggers a re-call once the data lands.
+  if (_realbookIndexPromise === null) loadRealbookIndex();
   const song = songArg ||
     (window.currentSong && window.currentSong.song) || null;
   const title = (song && song.title) || '';
@@ -4563,7 +5857,20 @@ function updateScoreTitle(songArg) {
       if (opt) exLabel = opt.text || '';
     }
   }
-  el.textContent = title && exLabel ? `${title} (${exLabel})` : title || '';
+  // Compose the title:
+  //   "<song> [RBx p.yy] (<mode>)"
+  // Real Book reference (e.g. "RB1 p.32" or
+  // "RB3 p.392 / RB5 p.417" for multi-volume songs) is wrapped in
+  // square brackets and sits between the song name and the
+  // parenthesized mode label. Falls back gracefully when any piece
+  // is missing (e.g. index not yet loaded, or song not in the
+  // Real Book).
+  const rbRef = title ? _rbSuffixForTitle(title).trim() : '';
+  const parts = [];
+  if (title)   parts.push(title);
+  if (rbRef)   parts.push('[' + rbRef.replace(/^\(|\)$/g, '') + ']');
+  if (exLabel) parts.push('(' + exLabel + ')');
+  el.textContent = parts.join(' ');
 }
 
 // Split the input bars at the first coda (Q) marker and, when the
@@ -4620,6 +5927,61 @@ function chordScaleNotesText(ch, nextCh) {
     out.push(letter + (ACC_GLYPHS[acc] || ''));
   }
   return out.join(' ');
+}
+// "Chord notes — simplified" overlay variant. Same scale-tone walk
+// as `chordScaleNotesText`, but skips every NATURAL note and only
+// emits notes that carry a sharp or flat. So a chord whose scale is
+// entirely natural (e.g. CMaj7 over C major: C D E F G A B) returns
+// an empty string and renders nothing under the chord label.
+// Useful for quickly spotting which non-diatonic accidentals a
+// chord introduces against its surroundings.
+//
+// Output ordering follows the standard key-signature progressions:
+//   - Flats are listed in BEADGCF order (the order flats are
+//     added to a key signature: 1st flat is B♭, 2nd is E♭, etc.)
+//   - Sharps are listed in FCGDAEB order (1st sharp is F♯, 2nd
+//     is C♯, etc.)
+//   - Mixed sets put all flats first (in BEADGCF order) then all
+//     sharps (in FCGDAEB order). E.g. a D7♭9-style scale with E♭,
+//     F♯, A♭ comes out as "E♭ A♭ F♯".
+const _FLAT_ORDER  = ['B', 'E', 'A', 'D', 'G', 'C', 'F'];
+const _SHARP_ORDER = ['F', 'C', 'G', 'D', 'A', 'E', 'B'];
+// Returns the chord's accidental notes (sharps / flats) as an array
+// of pretty tokens like "B♭" / "F♯", in BEADGCF-then-FCGDAEB order.
+// Empty array for a chord whose effective scale is entirely natural.
+function chordAccidentalTokens(ch, nextCh) {
+  if (!ch || ch.slash || ch.nc) return [];
+  const canonical = chordToCanonical(ch);
+  const root = exParseRoot(canonical);
+  if (!root) return [];
+  const nextCanonical = (nextCh && !nextCh.slash && !nextCh.nc)
+    ? chordToCanonical(nextCh) : null;
+  const scale = exGetScaleContextual(canonical, nextCanonical);
+  if (!scale || !scale.length) return [];
+  const ACC_GLYPHS = { '': '', '#': '♯', 'b': '♭', '##': '𝄪', 'bb': '𝄫' };
+  const flats = new Map();
+  const sharps = new Map();
+  for (let i = 0; i < scale.length; i++) {
+    const tpc = root.tpc + scale[i].t;
+    const { letter, acc } = tpcToLetterAcc(tpc);
+    if (!acc) continue;
+    const token = letter + (ACC_GLYPHS[acc] || '');
+    if (acc === 'b' || acc === 'bb') {
+      if (!flats.has(letter)) flats.set(letter, token);
+    } else if (acc === '#' || acc === '##') {
+      if (!sharps.has(letter)) sharps.set(letter, token);
+    }
+  }
+  const orderedFlats = _FLAT_ORDER
+    .filter(L => flats.has(L))
+    .map(L => flats.get(L));
+  const orderedSharps = _SHARP_ORDER
+    .filter(L => sharps.has(L))
+    .map(L => sharps.get(L));
+  return orderedFlats.concat(orderedSharps);
+}
+function chordScaleNotesTextSimplified(ch, nextCh) {
+  return chordAccidentalTokens(ch, nextCh).join(' ');
 }
 
 function chordText(ch) {
@@ -4750,6 +6112,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === 'triads' ? generateTriadsQuarterNotes
             : exerciseMode === 'broken3' ? generateBroken3rdsQuarterNotes
             : exerciseMode === 'cantus' ? generateCantusFirmusQuarterNotes
+            : exerciseMode === 'targetTriad' ? generateTargetTriadQuarterNotes
             : exerciseMode === 'range3579' ? generateRange3579QuarterNotes
             : exerciseMode === 'range3579Half' ? generateRange3579HalfNotes
             : exerciseMode === 'enclosures' ? generateEnclosuresQuarterNotes
@@ -4761,6 +6124,9 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === '1235Eighth' ? generate1235EighthNotes
             : exerciseMode === '3579' ? generate3579QuarterNotes
             : exerciseMode === '3579Eighth' ? generate3579EighthNotes
+            : exerciseMode === 'walkTriad' ? generateWalkTriadQuarterNotes
+            : (typeof exerciseMode === 'string' && exerciseMode.startsWith('lick:'))
+              ? generateExerciseLickQuarterNotes
             : generateQuarterNotes;
   const { results: quarterNotes, chordEvents, patterns, effective } = gen(bars, ts);
   // Per-bar/per-beat info for the fingerboard panel, keyed by expanded-bar idx.
@@ -4834,21 +6200,109 @@ function renderChart(song, barsIn, timesigStr) {
   // request — the line-height is therefore 17 (font + 1 px gap)
   // and the y offsets give the larger glyph body room to breathe.
   const CHORD_NOTES_LINE_HEIGHT = 17;
-  const chordNotesY1 = overlayChordNotesOn
+  // Either chord-notes overlay (full or simplified) reserves space
+  // below the chord-symbol row. Simplified text is often empty for
+  // a given chord, but we still need the row height so non-empty
+  // entries have somewhere to land.
+  const chordNotesAnyOn = overlayChordNotesOn || overlayChordNotesSimplifiedOn;
+  const chordNotesY1 = chordNotesAnyOn
     ? (overlayChordScalesOn ? patternLineY + 18 : 148)
     : 0;
   const chordNotesY2 = chordNotesY1 + CHORD_NOTES_LINE_HEIGHT;
-  // SVG height per row. Four cases driven by the two overlays:
-  //   neither       → 148 (compact: staff + room for triplet brackets)
-  //   only scales   → 166 (current chord-scale band)
-  //   only notes    → reach the bottom of chord-notes line 2 + 5
-  //   both          → reach the bottom of chord-notes line 2 + 5
-  // Beat markers (when Beats overlay is on) reach y≈133, and triplet
-  // brackets drawn at LOCATION_BOTTOM extend to ~y=144, so the
-  // chord-scales-off floor is 148 — anything tighter clipped the
-  // bottom of the "3" bracket on bars with quarter triplets.
+
+  // Pre-compute "Chord Notes - Simplified" runs once for the whole
+  // chart. A run is a stretch of consecutive chord events that share
+  // the SAME SET of accidental notes. Adjacent chords with E♭ +
+  // F♯ + A♭ all collapse into a single grouped line; the next
+  // chord whose accidentals differ (or is purely natural) starts
+  // a fresh run. Chords with no accidentals (purely diatonic) render
+  // nothing AND break any current run.
+  let _simpRuns = null;
+  if (overlayChordNotesSimplifiedOn) {
+    const tokensPerCE = chordEvents.map((ce, i) => {
+      const nextCh = (i + 1 < chordEvents.length) ? chordEvents[i + 1].chord : null;
+      return chordAccidentalTokens(ce.chord, nextCh);
+    });
+    _simpRuns = [];
+    let runStart = -1;
+    let runLabel = null;
+    for (let i = 0; i < tokensPerCE.length; i++) {
+      const label = tokensPerCE[i].join(' ');
+      if (!label) {
+        if (runStart >= 0) {
+          _simpRuns.push({ firstIdx: runStart, lastIdx: i - 1, label: runLabel });
+          runStart = -1; runLabel = null;
+        }
+        continue;
+      }
+      if (runStart < 0) {
+        runStart = i; runLabel = label;
+      } else if (label !== runLabel) {
+        _simpRuns.push({ firstIdx: runStart, lastIdx: i - 1, label: runLabel });
+        runStart = i; runLabel = label;
+      }
+    }
+    if (runStart >= 0) {
+      _simpRuns.push({ firstIdx: runStart, lastIdx: tokensPerCE.length - 1, label: runLabel });
+    }
+  }
+
+  // Diagram overlay runs: groups of consecutive chord events that
+  // share the same EFFECTIVE scale (root + scale signature). Each
+  // run gets one mini fingerboard diagram drawn at the start of
+  // its first bar in this row. Standalone chords (not in any
+  // pattern) use their own scale; chords inside a key pattern
+  // share the parent key's scale, so a ii-V-i collapses into one
+  // diagram. Empty / null effective scales (NC, slash) break the
+  // run.
+  let _diagramRuns = null;
+  if (overlayDiagramOn) {
+    function _effSig(eff) {
+      if (!eff || !eff.root || !eff.scale) return '';
+      return eff.root.pitchClass + ':' + eff.scale.map(x => x.s).join(',');
+    }
+    _diagramRuns = [];
+    let dStart = -1;
+    let dSig = null;
+    let dRoot = null, dScale = null;
+    for (let i = 0; i < chordEvents.length; i++) {
+      const sig = _effSig(effective[i]);
+      if (!sig) {
+        if (dStart >= 0) {
+          _diagramRuns.push({ firstIdx: dStart, lastIdx: i - 1, root: dRoot, scale: dScale });
+          dStart = -1;
+        }
+        continue;
+      }
+      if (dStart < 0) {
+        dStart = i; dSig = sig; dRoot = effective[i].root; dScale = effective[i].scale;
+      } else if (sig !== dSig) {
+        _diagramRuns.push({ firstIdx: dStart, lastIdx: i - 1, root: dRoot, scale: dScale });
+        dStart = i; dSig = sig; dRoot = effective[i].root; dScale = effective[i].scale;
+      }
+    }
+    if (dStart >= 0) {
+      _diagramRuns.push({ firstIdx: dStart, lastIdx: chordEvents.length - 1, root: dRoot, scale: dScale });
+    }
+  }
+
+  // Diagram band sits at the BOTTOM, below any other overlay band
+  // that's also enabled. So a chart with all four overlays on
+  // stacks (top→bottom under staff): staff → chord-scales →
+  // chord-notes → diagram. Y1 picks whichever lower edge is in
+  // play; if the diagram is the only overlay, it sits just below
+  // the staff.
+  let diagramBandY1 = 0;
+  if (overlayDiagramOn) {
+    if (chordNotesAnyOn) diagramBandY1 = chordNotesY2 + 5;
+    else if (overlayChordScalesOn) diagramBandY1 = patternLineY + 10;
+    else diagramBandY1 = 148;
+  }
+
   let staffHeight;
-  if (overlayChordNotesOn) {
+  if (overlayDiagramOn) {
+    staffHeight = diagramBandY1 + FB_MINI_H + 5;
+  } else if (chordNotesAnyOn) {
     staffHeight = chordNotesY2 + 5;
   } else if (overlayChordScalesOn) {
     staffHeight = patternLineY + 10; // 166
@@ -4856,12 +6310,14 @@ function renderChart(song, barsIn, timesigStr) {
     staffHeight = 148;
   }
   // Bottom of the per-bar selection-highlight rect. Tracks the
-  // bottom of whichever band is active (chord notes if on, chord
-  // scales if on, staff otherwise) so the highlight wash always
-  // covers everything we render.
-  const barHighlightBottom = overlayChordNotesOn
-    ? chordNotesY2 + 3
-    : (overlayChordScalesOn ? patternLineY + 3 : staffHeight - 4);
+  // bottom of whichever band is active (diagram → chord notes →
+  // chord scales → staff) so the highlight wash always covers
+  // everything we render.
+  const barHighlightBottom = overlayDiagramOn
+    ? diagramBandY1 + FB_MINI_H + 3
+    : (chordNotesAnyOn
+      ? chordNotesY2 + 3
+      : (overlayChordScalesOn ? patternLineY + 3 : staffHeight - 4));
 
   // Print sizing: widen `measureWidth` so the row's natural aspect
   // ratio (rowWidth/staffHeight) matches whatever the user's S/M/L
@@ -5461,7 +6917,10 @@ function renderChart(song, barsIn, timesigStr) {
           // hollow noteheads (whole / half) so it can swap to a
           // white-circle-on-black-text scheme that reads against a
           // transparent notehead.
-          barNoteData.push({ pitch: bp.pitch, tpc: bp.tpc, staveNote: n, duration: noteDur });
+          // `stepStart` records this note's first step in the bar so
+          // overlays (e.g. Scale Degrees) can map it back to a beat
+          // and from there to the chord active at that beat.
+          barNoteData.push({ pitch: bp.pitch, tpc: bp.tpc, staveNote: n, duration: noteDur, stepStart: b });
           for (let bb = b; bb < b + consume && bb < stepsPerBar; bb++) {
             beatToNoteSlot[bb] = slotIdx;
           }
@@ -5824,6 +7283,10 @@ function renderChart(song, barsIn, timesigStr) {
           // overflows the slot, the notes are split across two lines
           // via a second <tspan>.
           if (overlayChordNotesOn) {
+            // Per-chord text rendering is the FULL Chord Notes path
+            // only — the Simplified variant uses a separate per-row
+            // line+ticks+text pass below (modeled on Chord Scales)
+            // that groups adjacent chords sharing the same note.
             // Find the chord that follows this one in song order —
             // either the next chord in the same bar, or the first
             // non-empty chord of a later bar. The contextual scale
@@ -6267,6 +7730,121 @@ function renderChart(song, barsIn, timesigStr) {
       }
     });
 
+    // Chord Notes - Simplified runs. Each run is a stretch of
+    // consecutive chord events that share the SAME SET of accidental
+    // notes — a single grouped line, not one line per individual
+    // note. Visual style mirrors the Chord Scales overlay above
+    // (single-row band, line + ticks + label).
+    if (overlayChordNotesSimplifiedOn && _simpRuns && _simpRuns.length) {
+      const lineY = chordNotesY1 + 11;
+      const textY = chordNotesY1 + 5;
+      for (const run of _simpRuns) {
+        const firstCE = chordEvents[run.firstIdx];
+        const lastCE = chordEvents[run.lastIdx];
+        const runFirstBar = firstCE.barIdx;
+        const runLastBar = lastCE.barIdx;
+        const iFirst = Math.max(rowFirstBar, runFirstBar);
+        const iLast = Math.min(rowLastBar, runLastBar);
+        if (iFirst > iLast) continue;
+        const leftBar = barPosInRow.find(b => b.barIdx === iFirst);
+        const rightBar = barPosInRow.find(b => b.barIdx === iLast);
+        if (!leftBar || !rightBar) continue;
+        const isRunStart = iFirst === runFirstBar;
+        const isRunEnd = iLast === runLastBar;
+        // X-coords mirror the Chord Scales math: when the run's
+        // true start / end is inside this row AND that bar holds
+        // multiple chords, position by the chord's beat slot rather
+        // than the bar's edge.
+        let startX = leftBar.noteStartX;
+        if (isRunStart && firstCE.chordsInBar > 1) {
+          const barW = leftBar.noteEndX - leftBar.noteStartX;
+          const { startBeat } = chordBeatRange(firstCE.chordsInBar, firstCE.chordIdxInBar, ts.num);
+          startX = leftBar.noteStartX + (startBeat / ts.num) * barW;
+        }
+        let endX = rightBar.noteEndX;
+        if (isRunEnd && lastCE.chordsInBar > 1) {
+          const barW = rightBar.noteEndX - rightBar.noteStartX;
+          const { endBeat } = chordBeatRange(lastCE.chordsInBar, lastCE.chordIdxInBar, ts.num);
+          endX = rightBar.noteStartX + (endBeat / ts.num) * barW;
+        }
+        const GAP_S = 2;
+        const TICK_HEIGHT_S = 6;
+        const lineStartX = startX + GAP_S;
+        const lineEndX   = endX   - GAP_S;
+        // One color per UNIQUE accidental set — keyed by the run's
+        // label so two runs with the same set get the same color.
+        const color = colorFor('acc:' + run.label);
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', lineStartX);
+        line.setAttribute('y1', lineY);
+        line.setAttribute('x2', lineEndX);
+        line.setAttribute('y2', lineY);
+        line.setAttribute('stroke', color);
+        line.setAttribute('stroke-width', 2);
+        line.setAttribute('stroke-linecap', 'round');
+        rowSvg.appendChild(line);
+        const ticks = [];
+        if (isRunStart) ticks.push(lineStartX);
+        if (isRunEnd) ticks.push(lineEndX);
+        ticks.forEach(tx => {
+          const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          tick.setAttribute('x1', tx);
+          tick.setAttribute('y1', lineY - TICK_HEIGHT_S);
+          tick.setAttribute('x2', tx);
+          tick.setAttribute('y2', lineY);
+          tick.setAttribute('stroke', color);
+          tick.setAttribute('stroke-width', 2);
+          tick.setAttribute('stroke-linecap', 'round');
+          rowSvg.appendChild(tick);
+        });
+        // Group label only on the row where the run actually starts.
+        if (isRunStart) {
+          const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          t.setAttribute('x', lineStartX + 4);
+          t.setAttribute('y', textY);
+          t.setAttribute('text-anchor', 'start');
+          t.setAttribute('font-family', 'serif');
+          t.setAttribute('font-weight', 'bold');
+          t.setAttribute('font-size', 14);
+          t.setAttribute('fill', color);
+          t.setAttribute('stroke', 'none');
+          setSvgTextWithFlatFix(t, run.label);
+          rowSvg.appendChild(t);
+        }
+      }
+    }
+
+    // Diagram overlay: one mini fingerboard per scale-run, drawn
+    // under the FIRST bar of the run within its own row. Continuation
+    // rows (when a long run spans a row break) skip the diagram —
+    // it's already shown earlier. Position: just inside the run's
+    // start bar, anchored to `diagramBandY1` (top of diagram band).
+    if (overlayDiagramOn && _diagramRuns && _diagramRuns.length) {
+      for (const run of _diagramRuns) {
+        const firstCE = chordEvents[run.firstIdx];
+        const runFirstBar = firstCE.barIdx;
+        // Skip if the run's first bar isn't in this row.
+        if (runFirstBar < rowFirstBar || runFirstBar > rowLastBar) continue;
+        const leftBar = barPosInRow.find(b => b.barIdx === runFirstBar);
+        if (!leftBar) continue;
+        // X-position: left edge of the run's first chord (beat-aware
+        // when the bar holds multiple chords, matching Chord Scales).
+        let startX = leftBar.noteStartX;
+        if (firstCE.chordsInBar > 1) {
+          const barW = leftBar.noteEndX - leftBar.noteStartX;
+          const { startBeat } = chordBeatRange(firstCE.chordsInBar, firstCE.chordIdxInBar, ts.num);
+          startX = leftBar.noteStartX + (startBeat / ts.num) * barW;
+        }
+        const scalePcs = new Set();
+        if (run.root && run.scale) {
+          for (const sd of run.scale) {
+            scalePcs.add(((run.root.pitchClass + sd.s) % 12 + 12) % 12);
+          }
+        }
+        appendMiniFingerboard(rowSvg, startX + 2, diagramBandY1, scalePcs);
+      }
+    }
+
     // Insert measure number text
     const svgEl = rowEl.querySelector('svg');
     if (svgEl) {
@@ -6414,6 +7992,10 @@ function renderChart(song, barsIn, timesigStr) {
   // and renderChart just destroyed every bar's SVG, so any prior
   // overlay groups are gone with them. No-op when the toggle is off.
   if (typeof renderAllNotesOverlays === 'function') renderAllNotesOverlays();
+  // Same deal for the Scale Degrees overlay — re-paint after the
+  // bars are re-drawn so the per-note labels reattach to the new
+  // SVGs. No-op when the toggle is off.
+  if (typeof renderAllScaleDegreesOverlays === 'function') renderAllScaleDegreesOverlays();
 }
 
 // ===== Chord-to-notes =====
@@ -6909,6 +8491,11 @@ function clearHighlight() {
 
 let overlayNotesOn = false;
 let overlayBeatsOn = false;
+// Scale Degrees overlay: paint a number under each note showing its
+// position relative to the active chord — 1/3/5/7 for chord tones,
+// jazz extension numbering (b9, 9, #9, 11, #11, b13, 13, b7, 7) for
+// non-chord-tones. Off by default; toggling re-renders the chart.
+let overlayScaleDegreesOn = false;
 // Chord-scale lines (the bold key-name + colored underline showing
 // which span of bars belongs to which key). On by default — they're
 // the most useful sight-reading aid the chart offers. When off, the
@@ -6922,6 +8509,18 @@ let overlayChordScalesOn = true;
 // flipping it triggers a chart re-render so the per-chord text gets
 // painted into the same SVG region as the chord labels themselves.
 let overlayChordNotesOn = false;
+// Simplified chord-notes overlay — only the sharp/flat notes from
+// the chord's scale (skips naturals). Mutually exclusive with the
+// regular Chord Notes overlay; the toggles below uncheck each
+// other so only one is active at a time.
+let overlayChordNotesSimplifiedOn = false;
+// "Diagram" overlay: draw a miniature monochrome cello-fingerboard
+// diagram below the staff at the start of each new chord-scale
+// group, with dots at every scale-tone fret position. Mirrors the
+// Chord Scales grouping (one diagram per consecutive same-scale
+// run), so a long ii-V-i shows a single diagram covering all
+// three chords.
+let overlayDiagramOn = false;
 
 // Remove every per-bar note-letter overlay group from the chart.
 // We use a class selector so we don't have to track each painted
@@ -6942,6 +8541,152 @@ function renderAllNotesOverlays() {
   if (!overlayNotesOn) return;
   for (let bi = 0; bi < barElements.length; bi++) {
     if (barElements[bi]) paintNotesOverlayForBar(bi);
+  }
+}
+
+// Map a semitone offset from the chord root + the chord's quality
+// to a jazz scale-degree label. Chord tones (1, 3 / b3, 5, 7 / b7)
+// keep their basic number; non-chord tones use extension numbering
+// (b9, 9, #9, 11, #11, b13, 13). Half-diminished's b5 stays "b5"
+// rather than "#11". The chordType comes from getChordType().
+function noteToScaleDegreeLabel(semiOffset, chordType) {
+  const s = ((semiOffset % 12) + 12) % 12;
+  switch (s) {
+    case 0:  return '1';
+    case 1:  return 'b9';
+    case 2:  return '9';
+    case 3:  return (chordType === 'minor' || chordType === 'halfdim' || chordType === 'other') ? 'b3' : '#9';
+    case 4:  return '3';
+    case 5:  return '11';
+    case 6:  return (chordType === 'halfdim' || chordType === 'other') ? 'b5' : '#11';
+    case 7:  return '5';
+    case 8:  return 'b13';
+    case 9:  return (chordType === 'other') ? '6' : '13';
+    case 10: return 'b7';
+    case 11: return (chordType === 'major') ? '7' : 'Maj7';
+  }
+  return '';
+}
+
+// Remove every per-bar scale-degree overlay group from the chart.
+function clearScaleDegreesOverlay() {
+  document.querySelectorAll('.scale-degree-overlay').forEach(n => {
+    if (n.parentNode) n.parentNode.removeChild(n);
+  });
+}
+
+// Paint scale-degree numbers under every note in every bar.
+function renderAllScaleDegreesOverlays() {
+  clearScaleDegreesOverlay();
+  if (!overlayScaleDegreesOn) return;
+  for (let bi = 0; bi < barElements.length; bi++) {
+    if (barElements[bi]) paintScaleDegreesOverlayForBar(bi);
+  }
+}
+
+function paintScaleDegreesOverlayForBar(barIdx) {
+  if (barIdx == null || barIdx < 0) return;
+  const info = barElements[barIdx];
+  if (!info || !info.noteEls || !info.noteData) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
+  // Figure out which chords are in this bar (live chord events,
+  // skipping slash continuations and N.C.). For multi-chord bars,
+  // a note's beat position determines which chord is "active" for
+  // its label. Single-chord bars take the only chord regardless.
+  const cs = window.currentSong;
+  if (!cs || !cs.bars) return;
+  const bar = cs.bars[barIdx % cs.bars.length];
+  if (!bar) return;
+  const liveChords = (bar.chords || []).filter(c => c && !c.slash && !c.nc);
+  if (!liveChords.length) return;
+  const beatsPerBar = (cs.timesig && cs.timesig.num) || 4;
+  const stepsPerBar = beatsPerBar * 6; // 24th-note grid
+  // Pre-compute each chord's [startStep, endStep) range in the bar.
+  const chordRanges = liveChords.map((ch, ci) => {
+    const r = chordBeatRange(liveChords.length, ci, beatsPerBar);
+    return {
+      startStep: r.startBeat * 6,
+      endStep:   r.endBeat   * 6,
+      chord: ch,
+      canonical: chordToCanonical(ch),
+      type: getChordType(chordToCanonical(ch)),
+      root: exParseRoot(chordToCanonical(ch))
+    };
+  });
+  // Lookup helper: chord active at the given step. Falls back to
+  // the last chord when step lands past the bar's end (defensive).
+  function chordAtStep(stepInBar) {
+    for (const cr of chordRanges) {
+      if (stepInBar >= cr.startStep && stepInBar < cr.endStep) return cr;
+    }
+    return chordRanges[chordRanges.length - 1];
+  }
+
+  const svgRect = svg.getBoundingClientRect();
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const vbOK = vb && vb.width > 0 && vb.height > 0;
+  const vbSY = vbOK ? vb.height / svgRect.height : 1;
+  const vbOY = vbOK ? vb.y : 0;
+
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('class', 'scale-degree-overlay');
+  g.setAttribute('pointer-events', 'none');
+  svg.appendChild(g);
+
+  // Y position: just below the staff (5-line staff bottom line is
+  // at info.y + 80; the chart leaves room beneath for fingerings).
+  // We want the label clear of the staff but not crashing into the
+  // chord-scale band. Use a fixed offset below the staff bottom.
+  const STAFF_BOTTOM_Y = info.y + 80;
+  const LABEL_Y = STAFF_BOTTOM_Y + 12;
+
+  for (let i = 0; i < info.noteData.length; i++) {
+    const nd = info.noteData[i];
+    if (!nd) continue; // rest
+    if (nd.tpc == null || nd.pitch == null) continue;
+    const cr = chordAtStep(nd.stepStart != null ? nd.stepStart : 0);
+    if (!cr || !cr.root) continue;
+    const noteEl = info.noteEls[i];
+    if (!noteEl) continue;
+    // Centre the label under the notehead. Ask VexFlow for the head's
+    // x position when possible; otherwise fall back to DOM geometry.
+    let labelX = null;
+    const sn = nd.staveNote;
+    if (sn) {
+      try {
+        const absX = sn.getAbsoluteX();
+        const noteheadW = (sn.getGlyphWidth && sn.getGlyphWidth()) || 10;
+        if (isFinite(absX)) labelX = absX + noteheadW / 2;
+      } catch (e) {}
+    }
+    if (labelX == null) {
+      const rect = noteEl.getBoundingClientRect();
+      if (rect.width <= 0) continue;
+      const vbSX = vbOK ? vb.width / svgRect.width : 1;
+      const vbOX = vbOK ? vb.x : 0;
+      labelX = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
+    }
+    // Use TPC-derived semitone offset so enharmonic equivalents
+    // (D♯ vs E♭) get the spelling-aware semitone via the note's
+    // pitch class. The label itself is semitone-keyed so the
+    // distinction doesn't actually surface — same sound, same name.
+    const noteSemi = ((nd.pitch % 12) + 12) % 12;
+    const semiOffset = ((noteSemi - cr.root.pitchClass) % 12 + 12) % 12;
+    const label = noteToScaleDegreeLabel(semiOffset, cr.type);
+    if (!label) continue;
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', labelX);
+    t.setAttribute('y', LABEL_Y);
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('dominant-baseline', 'central');
+    t.setAttribute('font-family', 'sans-serif');
+    t.setAttribute('font-size', 9);
+    t.setAttribute('font-weight', 'bold');
+    t.setAttribute('fill', '#444');
+    t.setAttribute('stroke', 'none');
+    t.textContent = label;
+    g.appendChild(t);
   }
 }
 
@@ -7143,6 +8888,13 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
       renderAllNotesOverlays();
     });
   }
+  const scaleDegrees = document.getElementById('overlayScaleDegreesToggle');
+  if (scaleDegrees) {
+    scaleDegrees.addEventListener('change', (e) => {
+      overlayScaleDegreesOn = !!e.target.checked;
+      renderAllScaleDegreesOverlays();
+    });
+  }
   if (beats) {
     beats.addEventListener('change', (e) => {
       overlayBeatsOn = !!e.target.checked;
@@ -7166,9 +8918,37 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
   // only runs inside renderChart — so toggling without re-rendering
   // would leave the previous state on screen.
   const chordNotes = document.getElementById('overlayChordNotesToggle');
+  const chordNotesSimplified = document.getElementById('overlayChordNotesSimplifiedToggle');
   if (chordNotes) {
     chordNotes.addEventListener('change', (e) => {
       overlayChordNotesOn = !!e.target.checked;
+      // Mutually exclusive with the simplified variant.
+      if (overlayChordNotesOn && chordNotesSimplified) {
+        chordNotesSimplified.checked = false;
+        overlayChordNotesSimplifiedOn = false;
+      }
+      if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    });
+  }
+  if (chordNotesSimplified) {
+    chordNotesSimplified.addEventListener('change', (e) => {
+      overlayChordNotesSimplifiedOn = !!e.target.checked;
+      // Mutually exclusive with the full Chord Notes overlay.
+      if (overlayChordNotesSimplifiedOn && chordNotes) {
+        chordNotes.checked = false;
+        overlayChordNotesOn = false;
+      }
+      if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    });
+  }
+  // Diagram: mini fingerboards under each new chord-scale group.
+  // Independent of the other overlays — can be combined with Chord
+  // Scales / Chord Notes / Chord Notes Simplified; the diagrams
+  // just stack as the bottom band beneath whichever others are on.
+  const diagram = document.getElementById('overlayDiagramToggle');
+  if (diagram) {
+    diagram.addEventListener('change', (e) => {
+      overlayDiagramOn = !!e.target.checked;
       if (typeof rerenderCurrent === 'function') rerenderCurrent();
     });
   }
@@ -7215,10 +8995,7 @@ let playHeadOverride = false;
     // Restart playback if currently playing so the new lead source
     // (head vs displayed score) takes effect immediately. Mirrors the
     // restart pattern used for key changes / exercise picks.
-    if (playState === 'playing' && window.currentSong) {
-      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-    }
+    await restartPlaybackInPlaceWithCountIn();
   });
 })();
 // Sync the Head checkbox's enabled state to the current song's head
@@ -7235,6 +9012,30 @@ function updatePlayHeadAvailability() {
     cb.checked = false;
     playHeadOverride = false;
   }
+}
+
+// Restart playback in place at the current bar with a count-in
+// pre-roll, so the user has a beat or two to absorb the change
+// before the new audio kicks in. Used for any change that swaps
+// the queued audio mid-playback (key, score, lick, exercise, drum
+// pattern, etc.). Without the pre-roll the new pattern jumps in on
+// whatever beat we happen to land on, which makes drums and lead
+// audibly drift relative to the user's tapping foot.
+//
+// Falls through to a regular bar-0 restart when:
+//   - we're not currently playing (nothing to restart),
+//   - or there's no song / no Transport,
+//   - or the user has count-in disabled (countInBars === 0) — in
+//     that case it's just a plain in-place restart with no pre-roll.
+async function restartPlaybackInPlaceWithCountIn() {
+  if (playState !== 'playing' || !window.currentSong) return;
+  const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+  await startPlayback(
+    window.currentSong.song,
+    expanded,
+    currentPlayingBar,
+    { prerollCountIn: countInBars > 0 }
+  );
 }
 
 // ===== Current-note highlight in the score =====
@@ -7871,6 +9672,9 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
         }
         return total;
       }
+      // Bar position in seconds — used as the base for tuplet events
+      // that need to bypass the Transport's swing engine.
+      const barStartSec = absBar * beatsPerBar * (60 / currentTempo);
       for (let s = 0; s < stepsThisBar; s++) {
         const info = lastBeatInfo[entry.idx][s];
         if (!info) continue;
@@ -7889,8 +9693,22 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
           const totalSteps = info.tieToNext ? chainSteps(barNum, s) : stepsForChunk(info);
           attackDurSec = totalSteps * secondsPerStep;
         }
+        // Time format selection. Tuplet members (`stepsConsumed` set —
+        // we mark them this way in the head/lick generators) are
+        // scheduled using NUMERIC SECONDS so the Transport's swing
+        // engine doesn't pull them. With swing on, BBS positions like
+        // `0:0:1.333` (an 8th-triplet inside a swung beat) sit inside
+        // the swing band and get shifted, which makes triplets sound
+        // oddly lopsided over a swing groove. Seconds-based times
+        // bypass the BBS-to-ticks swing math, so a written triplet
+        // plays as exact 1:1:1. Non-tuplet eighths still go through
+        // BBS so the song's swing setting applies normally.
+        const isTuplet = !!info.stepsConsumed;
+        const time = isTuplet
+          ? barStartSec + s * secondsPerStep
+          : `${absBar}:${beat}:${sixteenth}`;
         events.push({
-          time: `${absBar}:${beat}:${sixteenth}`,
+          time,
           type: 'beat', idx: entry.idx, beat, info, measurePitches,
           attackDurSec
         });
@@ -8131,6 +9949,13 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
     }
   }
 
+  // Cross-event state for the lick playback path. Tracks the most
+  // recent tuplet note's pitch so the next tuplet attack can release
+  // it first — see the `type === 'beat'` handler. Without this, the
+  // guitar sampler's 0.6s release tail piles three triplet notes on
+  // top of each other and the first one perceptually dominates.
+  let _lastTupletGuitarName = null;
+  let _lastTupletEndTime = 0;
   playbackPart = new Tone.Part((time, ev) => {
     if (ev.type === 'barStart') {
       // Track the currently-playing bar so clear-loop / change-loop can
@@ -8204,7 +10029,32 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       if (playScoreOn && !playHeadOverride && guitar && guitar.loaded
           && ev.info.pitch != null && ev.attackDurSec > 0) {
         const name = midiToName(ev.info.pitch + 12);
+        // Tuplet voice-stealing. The guitar sampler has a 0.6s
+        // release tail; at fast tempos a written triplet's three
+        // attacks (≈166ms apart at ♩=120) all overlap inside note 1's
+        // tail, and the first note perceptually dominates while
+        // notes 2–3 attack into the mud. Cut the previous tuplet
+        // note's sustain at the moment of the next tuplet attack so
+        // each triplet member rings cleanly into its own slot. The
+        // ringing tail still happens (via the sampler's release
+        // envelope from this trigger point) but only one tail at a
+        // time, and they're each the same length — so the three
+        // notes sound equal. Non-tuplet notes are left alone (their
+        // tails overlapping is the desired legato feel).
+        const isTuplet = !!ev.info.stepsConsumed;
+        if (isTuplet && _lastTupletGuitarName) {
+          try { guitar.triggerRelease(_lastTupletGuitarName, time); } catch (e) {}
+        }
         guitar.triggerAttackRelease(name, ev.attackDurSec, time, 0.7);
+        if (isTuplet) {
+          _lastTupletGuitarName = name;
+          _lastTupletEndTime = time + ev.attackDurSec;
+        } else {
+          // Non-tuplet attack ends the tuplet chain — clear the
+          // tracker so a future tuplet doesn't accidentally release
+          // an unrelated previous note.
+          _lastTupletGuitarName = null;
+        }
       }
       Tone.Draw.schedule(() => {
         updateFingerboard({
@@ -8871,10 +10721,7 @@ async function rebaseToScoreKey(scoreKey) {
   syncKeySegActive(currentKey);
   syncKeySegIrealMarker();
   renderChart(window.currentSong.song, newBars, window.currentSong.timesig);
-  if (playState === 'playing' && window.currentSong) {
-    const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-    await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-  }
+  await restartPlaybackInPlaceWithCountIn();
 }
 // Default-Head restore: undo any prior variant rebase by snapping
 // originalKey + originalBars back to the iRealPro chart's
@@ -8898,10 +10745,7 @@ async function restoreIrealKeyForDefaultHead() {
   syncKeySegActive(currentKey);
   syncKeySegIrealMarker();
   renderChart(cs.song, cs.irealBars, cs.timesig);
-  if (playState === 'playing' && window.currentSong) {
-    const expanded = expandBarsByRepeats(cs.bars, songRepeats);
-    await startPlayback(cs.song, expanded, currentPlayingBar);
-  }
+  await restartPlaybackInPlaceWithCountIn();
 }
 // Rebuild the labels on the key segmented control.
 //  - Minor songs: append 'm' (Cm, Dm, etc.) and display sharp
@@ -9006,16 +10850,34 @@ function loadFromURL(url) {
     // Initial score to load. Prefer the default head; fall back to
     // the first variant in the list (alphabetical) so songs that
     // ship only with a bassline / etude render that score by
-    // default. No scores at all → head stays null and the
-    // "No head found" banner appears, which is correct.
+    // default. No scores at all → fall back to the synthetic
+    // "(Blank)" sentinel; the modeSeg stays on Score and the chart
+    // renders empty staves with chord changes above (the exact
+    // behaviour the old "Blank" segmented button used to provide).
     const initialEntry = defaultEntry || (scores.length > 0 ? scores[0] : null);
-    const initialFilename = initialEntry ? initialEntry.filename : null;
+    const initialFilename = initialEntry ? initialEntry.filename : SCORE_BLANK_VALUE;
     window.currentSong.scoreFilename = initialFilename;
-    if (_dropdownMode === 'score' || exerciseMode === 'head') {
+    // Sync exerciseMode to the new song's reality, but ONLY when
+    // we're already in the Score branch (head or blank). If the
+    // user is currently in an Exercise mode, leave them there —
+    // loading a new song shouldn't yank them out of their picked
+    // exercise. When in Score: a song with a head flips us to
+    // 'head', a song without flips us to 'blank'. This handles two
+    // cases at once:
+    //   - Previous song was headless (exerciseMode='blank') and
+    //     the new song HAS a head → flip back to 'head' so the
+    //     chart actually renders the loaded melody.
+    //   - Previous song had a head and the new song has none →
+    //     flip to 'blank' so we don't try to render a missing head.
+    if (exerciseMode === 'head' || exerciseMode === 'blank') {
+      exerciseMode = (initialFilename === SCORE_BLANK_VALUE) ? 'blank' : 'head';
+    }
+    if (_dropdownMode === 'score' || exerciseMode === 'head' || exerciseMode === 'blank') {
       populateScoreDropdown(scores, initialFilename);
     }
-    // Load the chosen score (or null when there are none).
-    const head = initialFilename
+    // Load the chosen score (or skip when (Blank) is selected — there's
+    // nothing to load and the blank-staff generator runs at render time).
+    const head = (initialFilename && initialFilename !== SCORE_BLANK_VALUE)
       ? await loadHeadFromFilename(initialFilename)
       : null;
     if (!window.currentSong || window.currentSong.song !== song) return;
@@ -9034,7 +10896,7 @@ function loadFromURL(url) {
     } else {
       syncKeySegIrealMarker();
     }
-    if (exerciseMode === 'head') rerenderCurrent();
+    if (exerciseMode === 'head' || exerciseMode === 'blank') rerenderCurrent();
     updateLoopControls();
     if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
     if (typeof updatePlayHeadAvailability === 'function') updatePlayHeadAvailability();
@@ -9066,11 +10928,9 @@ async function applyKeyChange(targetKey) {
   // were on so the audio follows the new key. Mirrors the exercise-
   // picker behavior — the Transport's already-queued events carry
   // OLD pitches, so we have to tear them down and re-queue from
-  // the transposed bars.
-  if (playState === 'playing' && window.currentSong) {
-    const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-    await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-  }
+  // the transposed bars. Pre-roll a count-in so the user has a beat
+  // to absorb the change instead of the new key crashing in mid-bar.
+  await restartPlaybackInPlaceWithCountIn();
 }
 
 document.querySelectorAll('#keySeg button').forEach(btn => {
@@ -9558,10 +11418,7 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
     // Mid-playback change: rebuild so the new count-in length is
     // baked into the looping Part's tail (only matters with the
     // "Loop" checkbox on, but rebuilding either way is harmless).
-    if (playState === 'playing' && window.currentSong) {
-      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-    }
+    await restartPlaybackInPlaceWithCountIn();
   });
 });
 
@@ -9576,23 +11433,230 @@ document.querySelectorAll('#countInSeg button').forEach(b => {
     // Rebuild on the fly so the change takes effect immediately
     // for the currently-running loop. If we're not playing, the
     // next Play press picks up the new value.
-    if (playState === 'playing' && window.currentSong) {
-      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-    }
+    await restartPlaybackInPlaceWithCountIn();
   });
 })();
 
-// Dropdown duality: the same `#exerciseSelect` element holds either
-// the exercise list (in Exercise mode) or the per-song scores list
-// (in Score mode). The original exercise <option>s are stashed at
-// startup so we can swap them back when the user returns to Exercise
-// mode without rebuilding the list from scratch — and without losing
-// any options the user-facing HTML may add later (we treat the HTML
-// snippet as the source of truth for the exercise menu).
+// Lick discovery + caching. Every .musicxml / .mid file in the
+// `licks/` folder is treated as a transposable lick: a one-bar
+// phrase (or 3-bar 251) that the app re-pitches per-chord (or
+// per-segment) through the song's chord changes. The user-facing
+// label is the filename without its extension — e.g. `Lick 1.musicxml`
+// shows up as "Lick 1".
+async function listLickFiles() {
+  // Invalidate the licks dir-index cache so newly-dropped files
+  // appear without a hard page reload.
+  _licksDirIndexPromise = null;
+  const index = await loadLicksDirectoryIndex();
+  const out = [];
+  const seen = new Set();
+  for (const fn of Object.values(index)) {
+    const lcFn = fn.toLowerCase();
+    let ext = null;
+    if (lcFn.endsWith('.musicxml')) ext = 'musicxml';
+    else if (lcFn.endsWith('.mid')) ext = 'mid';
+    else continue;
+    const label = fn.slice(0, fn.length - ext.length - 1);
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue; // dedupe .musicxml + .mid for the same lick
+    seen.add(key);
+    out.push({ filename: fn, label });
+  }
+  out.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+  return out;
+}
+
+// Lick parse cache. Keyed by filename. Each entry holds the parsed
+// notes plus the source-key root info (pc + tpc) needed to compute
+// the per-chord transposition delta at generate time.
+const _exerciseLickCache = new Map();
+const _KEY_TO_TPC_ROOT = {
+  'C': 14, 'G': 15, 'D': 16, 'A': 17, 'E': 18, 'B': 19,
+  'F#': 20, 'C#': 21, 'G#': 22,
+  'F': 13, 'Bb': 12, 'Eb': 11, 'Ab': 10
+};
+async function loadExerciseLick(filename) {
+  if (_exerciseLickCache.has(filename)) return _exerciseLickCache.get(filename);
+  const url = 'licks/' + encodeURIComponent(filename);
+  let parsed = null;
+  let dom = null;
+  try {
+    if (filename.toLowerCase().endsWith('.mid')) {
+      if (typeof Midi === 'undefined') return null;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const buf = await res.arrayBuffer();
+      parsed = midiToHeadNotes(new Midi(buf));
+    } else {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const text = await res.text();
+      dom = new DOMParser().parseFromString(text, 'application/xml');
+      parsed = parseMusicXML(dom);
+    }
+  } catch (e) {
+    return null;
+  }
+  if (!parsed || !Array.isArray(parsed.notes) || !parsed.notes.length) return null;
+
+  // Multi-bar 251 detection. Two layouts are recognized — both
+  // resolve to a ii-V-I (m7 → 7 → Maj7/6) or ii°-V-i
+  // (m7♭5 → 7 → m/m7) progression in falling-fifths order:
+  //   • EXPANDED  — three measures, one chord each (Lick 3-style):
+  //                 |  ii  |  V  |  I  |
+  //   • COMPRESSED — two measures, ii AND V split bar 1 and the
+  //                 resolution lands on bar 2 (Lick 4-style):
+  //                 | ii  V |  I  |
+  // The generator scans the SONG for matching shapes and applies
+  // the lick's bars to them. Major-251 licks over a minor 251
+  // automatically flatten the source key's 3rd, 6th, and 7th
+  // (= relative-major substitution: a CMaj lick over Cm uses E♭
+  // major notes).
+  if (dom) {
+    const events = parseHarmonyEvents(dom);
+    const ts = parseTimeSignatureFromMusicXML(dom);
+    const stepsPerBar = ts.num * 6; // 24th-note grid
+    const isP4Up = (a, b) => b === (a + 5) % 12;
+    let pattern251 = null;
+    let numBars = 0;
+    if (events.length >= 3) {
+      const e1 = events[0], e2 = events[1], e3 = events[2];
+      const r1 = exParseRoot(chordToCanonical(e1.chord));
+      const r2 = exParseRoot(chordToCanonical(e2.chord));
+      const r3 = exParseRoot(chordToCanonical(e3.chord));
+      const t1 = getChordType(chordToCanonical(e1.chord));
+      const t2 = getChordType(chordToCanonical(e2.chord));
+      const t3 = getChordType(chordToCanonical(e3.chord));
+      if (r1 && r2 && r3
+          && isP4Up(r1.pitchClass, r2.pitchClass)
+          && isP4Up(r2.pitchClass, r3.pitchClass)) {
+        let mode = null;
+        if (t1 === 'minor' && t2 === 'dominant' && t3 === 'major') mode = 'major';
+        else if (t1 === 'halfdim' && t2 === 'dominant' && t3 === 'minor') mode = 'minor';
+        if (mode) {
+          // Determine the structural shape from chord positions.
+          //   expanded:   bars [0, 1, 2], all at stepInMeasure 0
+          //   compressed: bars [0, 0, 1], V at stepInMeasure > 0
+          if (e1.measureIdx === 0 && e2.measureIdx === 1 && e3.measureIdx === 2
+              && e1.stepInMeasure === 0 && e2.stepInMeasure === 0 && e3.stepInMeasure === 0) {
+            pattern251 = { mode, sourceTonic: r3, shape: 'expanded' };
+            numBars = 3;
+          } else if (e1.measureIdx === 0 && e2.measureIdx === 0 && e3.measureIdx === 1
+              && e1.stepInMeasure === 0 && e2.stepInMeasure > 0 && e3.stepInMeasure === 0) {
+            pattern251 = { mode, sourceTonic: r3, shape: 'compressed' };
+            numBars = 2;
+          }
+        }
+      }
+    }
+    if (pattern251) {
+      // Bucket notes by measure index. Each bar's stepStart is
+      // re-anchored to 0 so the generator can drop the bar into
+      // any matching song bar without manual offset math. For the
+      // compressed shape, bar 0 carries notes for BOTH the ii and
+      // V chords (interleaved at their original step positions).
+      const barNotes = [];
+      for (let b = 0; b < numBars; b++) barNotes.push([]);
+      for (const n of parsed.notes) {
+        const b = Math.floor((n.stepStart || 0) / stepsPerBar);
+        if (b >= 0 && b < numBars) {
+          barNotes[b].push(Object.assign({}, n, {
+            stepStart: (n.stepStart || 0) - b * stepsPerBar
+          }));
+        }
+      }
+      const data = {
+        multiBar: true,
+        pattern251,
+        barNotes,
+        stepsPerBar,
+        ts
+      };
+      _exerciseLickCache.set(filename, data);
+      return data;
+    }
+  }
+
+  // Source chord — read from the file's first <harmony> when present
+  // (MuseScore writes one if you put a chord symbol on the lick),
+  // otherwise default to a major chord on the key signature's tonic.
+  const sourceChord = parsed.firstHarmony
+    || { root: parsed.keyTonic || 'C', rest: '' };
+  const canonical = chordToCanonical(sourceChord);
+  const sourceRoot = exParseRoot(canonical);
+  const sourceScale = exGetScale(canonical);
+  if (!sourceRoot || !sourceScale || !sourceScale.length) {
+    // Can't derive a scale — store unannotated; the generator will
+    // skip the lick entirely.
+    const data = { notes: parsed.notes, sourceChord, sourceRoot: null, sourceScale: null };
+    _exerciseLickCache.set(filename, data);
+    return data;
+  }
+
+  // Annotate each note with its scale-step + chromatic alteration
+  // (relative to the source chord's scale). The generator uses
+  // these per-bar to look up the SAME step in each target chord's
+  // scale — so a "degree 3" in the source plays as the chord's
+  // own 3rd over every bar (b3 over a m7, ♮3 over a Maj7, etc.).
+  function findStepAndAlteration(semiOffset, tpcOffset) {
+    // Try exact (semi, tpc) match first across alterations 0, ±1, ±2.
+    // Order: prefer 0 > +1 > −1 > +2 > −2 so a note that fits a
+    // scale tone exactly never gets re-spelled as a chromatic.
+    for (const alt of [0, 1, -1, 2, -2]) {
+      for (let i = 0; i < sourceScale.length; i++) {
+        const expSemi = (((sourceScale[i].s + alt) % 12) + 12) % 12;
+        const expTpc = sourceScale[i].t + alt * 7;
+        if (expSemi === semiOffset && expTpc === tpcOffset) {
+          return { stepIdx: i, alteration: alt };
+        }
+      }
+    }
+    // Loose semi-only match (TPC didn't line up — happens when the
+    // source file's accidental spelling differs from the canonical
+    // scale spelling). Pick the smallest |alt| that matches semi.
+    for (const alt of [0, 1, -1, 2, -2]) {
+      for (let i = 0; i < sourceScale.length; i++) {
+        const expSemi = (((sourceScale[i].s + alt) % 12) + 12) % 12;
+        if (expSemi === semiOffset) {
+          return { stepIdx: i, alteration: alt };
+        }
+      }
+    }
+    return { stepIdx: 0, alteration: 0 };
+  }
+  const annotated = parsed.notes.map(n => {
+    if (n.rest || typeof n.midi !== 'number') return { ...n, stepIdx: null, alteration: null };
+    const semiOffset = (((n.midi - sourceRoot.pitchClass) % 12) + 12) % 12;
+    const tpcOffset = n.tpc - sourceRoot.tpc;
+    const { stepIdx, alteration } = findStepAndAlteration(semiOffset, tpcOffset);
+    // Source-octave anchor: how many octaves above the source root
+    // does this note sit? Used to keep the same registral shape on
+    // every transposed bar instead of collapsing into a single octave.
+    const octaveOffset = Math.floor((n.midi - sourceRoot.pitchClass) / 12);
+    return { ...n, stepIdx, alteration, octaveOffset };
+  });
+
+  const data = {
+    notes: annotated,
+    sourceChord,
+    sourceRoot,
+    sourceScale
+  };
+  _exerciseLickCache.set(filename, data);
+  return data;
+}
+
+// Dropdown shared between Score, Exercise, and Lick modes. The
+// original exercise <option>s are stashed at startup so we can swap
+// them back when the user returns to Exercise mode without
+// rebuilding the list from scratch — and without losing any options
+// the user-facing HTML may add later (we treat the HTML snippet as
+// the source of truth for the exercise menu).
 let _exerciseDropdownHTML = null;
-let _dropdownMode = 'exercise'; // 'exercise' | 'score' | 'empty'
+let _dropdownMode = 'exercise'; // 'exercise' | 'score' | 'lick'
 let _lastExerciseValue = 'scale';
+let _lastLickValue = null; // remembered across mode toggles
 function _stashExerciseDropdownIfNeeded() {
   if (_exerciseDropdownHTML !== null) return;
   const sel = document.getElementById('exerciseSelect');
@@ -9608,30 +11672,92 @@ function populateExerciseDropdown(selectedValue) {
   if (sel.querySelector(`option[value="${target}"]`)) sel.value = target;
   _dropdownMode = 'exercise';
 }
+// Stash the dropdown's initial HTML on boot. The page starts in
+// Exercise mode (Score is the default modeSeg active button, but
+// the dropdown's hardcoded options ARE the exercise list — Score
+// mode replaces them when first entered). Without this early stash,
+// the first Lick/Score swap captures whatever's already there, but
+// the very first populateExerciseDropdown call then restores from
+// a possibly-already-mutated source.
+_stashExerciseDropdownIfNeeded();
+// Populate the dropdown with the lick library — every file in the
+// `licks/` folder shows up by its filename-without-extension. Each
+// option's value is `lick:<filename>` so the dispatcher and the
+// change handler can identify it. Async because the directory index
+// is fetched on demand; the dropdown shows "(loading…)" briefly
+// when the index isn't already cached.
+async function populateLickDropdown(selectedValue) {
+  _stashExerciseDropdownIfNeeded();
+  const sel = document.getElementById('exerciseSelect');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">(loading…)</option>';
+  sel.disabled = true;
+  _dropdownMode = 'lick';
+  let licks = [];
+  try { licks = await listLickFiles(); } catch (e) {}
+  // The user may have switched back to Score / Exercise during the
+  // fetch. Bail without clobbering whatever they're now on.
+  if (_dropdownMode !== 'lick') return;
+  if (!licks.length) {
+    sel.innerHTML = '<option value="">(no licks)</option>';
+    sel.disabled = true;
+    return;
+  }
+  let html = '';
+  for (const lick of licks) {
+    const safeLabel = String(lick.label)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeFn = String(lick.filename)
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    html += `<option value="lick:${safeFn}">${safeLabel}</option>`;
+  }
+  sel.innerHTML = html;
+  sel.disabled = false;
+  // Selection priority: explicit selectedValue > last-picked lick >
+  // first item in the list.
+  const target = selectedValue
+    || _lastLickValue
+    || ('lick:' + licks[0].filename);
+  const opt = sel.querySelector(`option[value="${CSS.escape(target)}"]`);
+  if (opt) sel.value = target;
+  else sel.value = 'lick:' + licks[0].filename;
+}
+// Sentinel value for the synthetic "(Blank)" option that always sits
+// at the top of the Score dropdown. The bindExerciseSelect score-mode
+// branch detects this string and switches into exerciseMode='blank'
+// (empty staves with chord changes above) instead of loading a head
+// file. Chosen to be distinct from any real .mid/.musicxml filename.
+const SCORE_BLANK_VALUE = '__blank__';
 function populateScoreDropdown(scores, selectedFilename) {
   _stashExerciseDropdownIfNeeded();
   const sel = document.getElementById('exerciseSelect');
   if (!sel) return;
-  if (!scores || !scores.length) {
-    sel.innerHTML = '<option value="">(empty)</option>';
-    sel.disabled = true;
-    _dropdownMode = 'empty';
-    return;
-  }
-  let html = '';
-  for (const s of scores) {
-    const safeLabel = String(s.label)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const safeFn = String(s.filename)
-      .replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-    html += `<option value="${safeFn}">${safeLabel}</option>`;
+  // Always include "(Blank)" as the first option — it's how the user
+  // gets to blank-staff mode now that the modeSeg has only Score and
+  // Exercise. When the song ships no score files, the dropdown holds
+  // ONLY this option and the chart renders as blank staves.
+  let html = `<option value="${SCORE_BLANK_VALUE}">(Blank)</option>`;
+  if (scores && scores.length) {
+    for (const s of scores) {
+      const safeLabel = String(s.label)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const safeFn = String(s.filename)
+        .replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      html += `<option value="${safeFn}">${safeLabel}</option>`;
+    }
   }
   sel.innerHTML = html;
   sel.disabled = false;
-  if (selectedFilename) {
-    const opt = sel.querySelector(`option[value="${CSS.escape(selectedFilename)}"]`);
-    if (opt) sel.value = selectedFilename;
+  // Selection: an explicit selectedFilename wins (real score or
+  // SCORE_BLANK_VALUE). When omitted, fall back to the first real
+  // score, or to (Blank) if the song has none.
+  let target = selectedFilename;
+  if (!target) {
+    target = (scores && scores.length) ? scores[0].filename : SCORE_BLANK_VALUE;
   }
+  const opt = sel.querySelector(`option[value="${CSS.escape(target)}"]`);
+  if (opt) sel.value = target;
+  else sel.value = SCORE_BLANK_VALUE;
   _dropdownMode = 'score';
 }
 // Refresh the Score-mode dropdown for the currently loaded song.
@@ -9667,6 +11793,26 @@ async function refreshScoreDropdownForCurrentSong() {
     // we stay in Score mode.
     if (_dropdownMode === 'score') {
       if (!value || !window.currentSong) return;
+      // "(Blank)" sentinel: stay in Score mode, but render blank
+      // staves instead of loading a head file. Mirrors what the
+      // removed "Blank" segmented button used to do — just surfaced
+      // as the first item in the Score dropdown so the modeSeg can
+      // collapse to two buttons (Score / Exercise).
+      if (value === SCORE_BLANK_VALUE) {
+        window.currentSong.scoreFilename = SCORE_BLANK_VALUE;
+        exerciseMode = 'blank';
+        if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
+        rerenderCurrent();
+        updateScoreTitle();
+        updateLoopControls();
+        if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
+        if (typeof updatePlayHeadAvailability === 'function') updatePlayHeadAvailability();
+        await restartPlaybackInPlaceWithCountIn();
+        return;
+      }
+      // Real score file: leave blank mode if we were in it, load the
+      // chosen head, and re-render in head mode.
+      exerciseMode = 'head';
       window.currentSong.scoreFilename = value;
       window.currentSong.headLoaded = false;
       const head = await loadHeadFromFilename(value);
@@ -9699,16 +11845,32 @@ async function refreshScoreDropdownForCurrentSong() {
       updateLoopControls();
       if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
       if (typeof updatePlayHeadAvailability === 'function') updatePlayHeadAvailability();
-      if (playState === 'playing' && window.currentSong) {
-        const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-        await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-      }
+      await restartPlaybackInPlaceWithCountIn();
       return;
     }
-    if (_dropdownMode === 'empty') return;
+    // Lick-mode dropdown: the value is `lick:<filename>`. Pre-load
+    // the file before rerendering so the generator finds the parsed
+    // data in cache on its first call. Auto-flip the modeSeg to
+    // "Lick" so the UI matches the dropdown.
+    if (_dropdownMode === 'lick') {
+      if (!value || !value.startsWith('lick:')) return;
+      exerciseMode = value;
+      _lastLickValue = value;
+      document.querySelectorAll('#modeSeg button').forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === 'lick');
+      });
+      if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
+      updateScoreTitle();
+      await loadExerciseLick(value.slice(5));
+      rerenderCurrent();
+      updateLoopControls();
+      if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
+      await restartPlaybackInPlaceWithCountIn();
+      return;
+    }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -9725,20 +11887,18 @@ async function refreshScoreDropdownForCurrentSong() {
     // Re-evaluate Edit Mode availability — picking an exercise from
     // the dropdown moves us out of Head, which disables editing.
     if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
-    if (playState === 'playing' && window.currentSong) {
-      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-      await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-    }
+    await restartPlaybackInPlaceWithCountIn();
   });
 })();
 
-// Mode segmented button: switches between Head (play the song's
-// melody as parsed from MusicXML / MIDI), Blank (empty staves with
-// chord changes above, for hand-writing or printing as practice
-// paper), and Exercise (one of the generators picked in the
-// dropdown to the right). On "Exercise" we restore exerciseMode
-// from the dropdown's current value so toggling Head off returns
-// to the user's last-picked exercise.
+// Mode segmented button: Score (play the song's melody as parsed
+// from MusicXML / MIDI, OR render blank staves when the dropdown's
+// "(Blank)" sentinel is selected), Lick (a transposable phrase from
+// the licks/ folder), and Exercise (one of the generators picked
+// in the dropdown to the right). Each branch swaps the dropdown's
+// option set to its own list and restores exerciseMode from the
+// dropdown's current value so toggling between modes returns to the
+// user's last-picked item in each.
 (function bindModeSeg() {
   const seg = document.getElementById('modeSeg');
   if (!seg) return;
@@ -9748,22 +11908,37 @@ async function refreshScoreDropdownForCurrentSong() {
       btn.classList.add('active');
       const mode = btn.dataset.mode;
       if (mode === 'head') {
-        exerciseMode = 'head';
-        // Score mode: dropdown becomes the per-song scores list.
-        // Defer to a Promise so the directory index can resolve;
-        // populates with "(empty)" if the song has no matches.
+        // Score mode. Dropdown becomes the per-song scores list with
+        // "(Blank)" prepended. If the user's persisted score for this
+        // song is the blank sentinel (or the song has no real scores),
+        // exerciseMode flips to 'blank'; otherwise 'head'.
         await refreshScoreDropdownForCurrentSong();
-      } else if (mode === 'blank') {
-        exerciseMode = 'blank';
-        // Blank mode: leave the dropdown showing the exercise list
-        // (the Exercise tab's contents) so the user can pre-pick
-        // their next exercise without first switching tabs.
-        if (_dropdownMode !== 'exercise') populateExerciseDropdown();
+        const sel = document.getElementById('exerciseSelect');
+        const v = sel ? sel.value : '';
+        exerciseMode = (v === SCORE_BLANK_VALUE) ? 'blank' : 'head';
+      } else if (mode === 'lick') {
+        // Lick mode. Dropdown lists every file in licks/. The picker
+        // value carries the `lick:` prefix used by the generator
+        // dispatcher. Pre-load the lick on initial selection so the
+        // first rerender finds parsed data in cache.
+        await populateLickDropdown(_lastLickValue);
+        const sel = document.getElementById('exerciseSelect');
+        const v = sel ? sel.value : '';
+        if (v && v.startsWith('lick:')) {
+          exerciseMode = v;
+          _lastLickValue = v;
+          await loadExerciseLick(v.slice(5));
+        } else {
+          // No licks available — fall back to a no-op render
+          // (blank-staff equivalent). Keeps the chart usable until
+          // the user drops a file in licks/.
+          exerciseMode = 'blank';
+        }
       } else {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
@@ -9780,10 +11955,7 @@ async function refreshScoreDropdownForCurrentSong() {
       // Edit Mode follows the same logic — only enabled when in Head
       // AND a head was loaded. Toggle off automatically when leaving.
       if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
-      if (playState === 'playing' && window.currentSong) {
-        const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-        await startPlayback(window.currentSong.song, expanded, currentPlayingBar);
-      }
+      await restartPlaybackInPlaceWithCountIn();
     });
   });
 })();
@@ -9793,11 +11965,10 @@ document.querySelectorAll('#drumSeg button').forEach(b => {
     document.querySelectorAll('#drumSeg button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     drumMode = b.dataset.mode;
-    if (playState === 'playing' && window.currentSong) {
-      // restart with the new pattern so the change is immediate
-      const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
-      await startPlayback(window.currentSong.song, expanded);
-    }
+    // Restart in-place with a count-in pre-roll so the new drum
+    // pattern slots in cleanly on the next downbeat instead of
+    // crashing in mid-bar.
+    await restartPlaybackInPlaceWithCountIn();
   });
 });
 
@@ -9859,17 +12030,31 @@ async function initSongLibrary() {
         closeSongPicker();
       });
       songListEl.appendChild(li);
-      // Fire a HEAD request per song (in parallel) to detect a
-      // companion .musicxml / .mid file in the songs/ folder. When
-      // one exists, tag the list item with a small "HEAD" badge on
-      // the right. We don't block list rendering on this — badges
-      // appear as probes resolve.
-      probeSongHasHead(entry.title).then(hasHead => {
-        if (!hasHead) return;
-        const badge = document.createElement('span');
-        badge.className = 'head-badge';
-        badge.textContent = 'HEAD';
-        li.appendChild(badge);
+      // Probe the songs/ folder per song (in parallel) to detect
+      // companion score files. Tags the row with up to three small
+      // pill badges on the right side: HEAD (default melody),
+      // BASSLINE (any "{title} - *Bassline*" variant), SOLO (any
+      // "{title} - *Solo*" variant). Badges appear as probes
+      // resolve; we don't block list rendering on the network.
+      probeSongVariants(entry.title).then(v => {
+        if (v.hasHead) {
+          const b = document.createElement('span');
+          b.className = 'song-tag tag-head';
+          b.textContent = 'HEAD';
+          li.appendChild(b);
+        }
+        if (v.hasBassline) {
+          const b = document.createElement('span');
+          b.className = 'song-tag tag-bassline';
+          b.textContent = 'BASSLINE';
+          li.appendChild(b);
+        }
+        if (v.hasSolo) {
+          const b = document.createElement('span');
+          b.className = 'song-tag tag-solo';
+          b.textContent = 'SOLO';
+          li.appendChild(b);
+        }
       });
     }
   });
@@ -9910,27 +12095,52 @@ function selectSongByIndex(idx) {
 // that responds 2xx. Used to decorate the song-picker list with a
 // "HEAD" badge without having to actually load the head data.
 async function probeSongHasHead(title) {
-  if (!title) return false;
-  // Cheap path: if the manifest/listing has a matching entry,
-  // we're done — no HTTP request needed.
+  const v = await probeSongVariants(title);
+  return v.hasHead;
+}
+// Probe the songs/ folder for files matching a song title and return
+// flags for which variant categories exist. Used to decorate the
+// song list with badges (HEAD / BASSLINE / SOLO):
+//   - hasHead     ← `{title}.musicxml` or `{title}.mid`
+//   - hasBassline ← any `{title} - *Bassline*.{musicxml,mid}` match
+//   - hasSolo     ← any `{title} - *Solo*.{musicxml,mid}` match
+// Bassline / Solo detection is purely substring-on-the-suffix, so a
+// file like "Autumn Leaves - Sam Jones Bassline.musicxml" or
+// "Cherokee - Clifford Brown Solo.musicxml" both pick up correctly.
+// Falls through to a HEAD HTTP probe when the manifest/listing
+// returned nothing for the head case (newly-dropped file before the
+// manifest regenerates).
+async function probeSongVariants(title) {
+  const result = { hasHead: false, hasBassline: false, hasSolo: false };
+  if (!title) return result;
   const index = await loadSongDirectoryIndex();
+  const lc = title.toLowerCase();
   if (Object.keys(index).length > 0) {
-    if (index[`${title}.musicxml`.toLowerCase()]
-        || index[`${title}.mid`.toLowerCase()]) return true;
+    if (index[`${lc}.musicxml`] || index[`${lc}.mid`]) result.hasHead = true;
+    for (const fn of Object.values(index)) {
+      const lcFn = fn.toLowerCase();
+      if (!lcFn.startsWith(lc + ' - ')) continue;
+      // Must have a known extension to count as a score variant.
+      if (!(lcFn.endsWith('.musicxml') || lcFn.endsWith('.mid'))) continue;
+      // Strip extension before scanning the suffix label so a song
+      // titled e.g. "Solo Flight" doesn't false-positive its OWN
+      // base name; we only check the part AFTER the " - " separator.
+      const ext = lcFn.endsWith('.musicxml') ? 9 : 4; // ".musicxml" / ".mid"
+      const suffix = lcFn.slice(lc.length + 3, lcFn.length - ext);
+      if (suffix.includes('bassline')) result.hasBassline = true;
+      if (suffix.includes('solo')) result.hasSolo = true;
+    }
   }
-  // No match in the index (stale manifest, or file just dropped on
-  // disk) — fall through to a real HEAD probe so newly-added files
-  // get their HEAD badge immediately, before the next manifest
-  // regeneration. If the on-disk casing matches the iRealPro
-  // title verbatim, the probe succeeds; otherwise it 404s.
-  for (const ext of ['musicxml', 'mid']) {
-    const url = `songs/${encodeURIComponent(title)}.${ext}`;
-    try {
-      const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
-      if (res.ok) return true;
-    } catch (e) { /* network error → try next ext */ }
+  if (!result.hasHead) {
+    for (const ext of ['musicxml', 'mid']) {
+      const url = `songs/${encodeURIComponent(title)}.${ext}`;
+      try {
+        const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+        if (res.ok) { result.hasHead = true; break; }
+      } catch (e) { /* skip */ }
+    }
   }
-  return false;
+  return result;
 }
 
 // ----- Song picker popup (portrait) + filter (both layouts) -----

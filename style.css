@@ -136,20 +136,39 @@ body.layout-landscape #songListPanel { display: flex; }
 /* Song name takes only its intrinsic width so the HEAD badge sits
    directly after the title instead of floating to the right edge. */
 .song-list li .song-name { flex: 0 0 auto; min-width: 0; }
-/* Small pill tagging songs that ship a head file (.musicxml / .mid).
-   Pinned to the right of the row via the flex row on .song-list li. */
-.song-list li .head-badge {
+/* Small pill tags on the right side of each song row. One tag per
+   detected score category — HEAD (the default melody), BASSLINE
+   (any "{title} - *Bassline*" variant), SOLO (any "*Solo*" variant).
+   Each category has its own muted color: blue / green / orange.
+   When the row is active (currently selected), all tags share the
+   same neutral inverted treatment so they don't clash with the
+   active highlight color. */
+.song-list li .song-tag {
   flex: 0 0 auto;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.5px;
   padding: 2px 6px;
   border-radius: 4px;
+  border: 1px solid;
+  margin-left: 4px;
+}
+.song-list li .song-tag.tag-head {
   background: #2a4a5e;
   color: #9ec7e0;
-  border: 1px solid #3a5b70;
+  border-color: #3a5b70;
 }
-.song-list li.active .head-badge {
+.song-list li .song-tag.tag-bassline {
+  background: #2a5e3a;
+  color: #9ee0a0;
+  border-color: #3a703f;
+}
+.song-list li .song-tag.tag-solo {
+  background: #5e4a2a;
+  color: #e0c79e;
+  border-color: #70583a;
+}
+.song-list li.active .song-tag {
   background: rgba(255,255,255,0.2);
   color: #052033;
   border-color: rgba(5,32,51,0.35);

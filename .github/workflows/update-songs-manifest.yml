@@ -16,6 +16,7 @@ on:
     branches: [main]
     paths:
       - 'songs/**'
+      - 'licks/**'
 
 permissions:
   contents: write
@@ -27,29 +28,32 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Regenerate manifest
+      - name: Regenerate manifests
         run: |
-          cd songs
-          # List every .musicxml and .mid file (any case), sort, and
-          # emit a JSON array. Using shopt nocaseglob so the glob
-          # also picks up extensions like .MID or .MusicXML if they
-          # ever appear.
+          # Same logic for songs/ and licks/: list every .musicxml /
+          # .mid file (any case), sort, and emit a JSON array.
           shopt -s nullglob nocaseglob
-          files=( *.musicxml *.mid )
-          printf '%s\n' "${files[@]}" \
-            | sort \
-            | python3 -c "import sys, json; print(json.dumps(sorted([l.strip() for l in sys.stdin if l.strip()]), indent=2))" \
-            > manifest.json
-          echo "Manifest entries: $(python3 -c 'import json; print(len(json.load(open(\"manifest.json\"))))')"
+          for dir in songs licks; do
+            if [ -d "$dir" ]; then
+              ( cd "$dir"
+                files=( *.musicxml *.mid )
+                printf '%s\n' "${files[@]}" \
+                  | sort \
+                  | python3 -c "import sys, json; print(json.dumps(sorted([l.strip() for l in sys.stdin if l.strip()]), indent=2))" \
+                  > manifest.json
+                echo "$dir/manifest.json: $(python3 -c 'import json; print(len(json.load(open(\"manifest.json\"))))')"
+              )
+            fi
+          done
 
       - name: Commit if changed
         run: |
-          if git diff --quiet songs/manifest.json; then
-            echo "manifest.json unchanged — nothing to commit."
+          if git diff --quiet songs/manifest.json licks/manifest.json; then
+            echo "manifests unchanged — nothing to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add songs/manifest.json
-          git commit -m "Auto-update songs/manifest.json [skip ci]"
+          git add songs/manifest.json licks/manifest.json
+          git commit -m "Auto-update song/lick manifests [skip ci]"
           git push
