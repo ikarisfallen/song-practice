@@ -5804,8 +5804,11 @@ function loadRealbookIndex() {
         map.get(key).push({ book: e.book, page: e.page });
       }
       _realbookByKey = map;
-      // Refresh the title now that the index is in.
+      // Refresh anything that depends on the index now that it's in:
+      //   - the score title (adds its RB suffix)
+      //   - the song list (each row gets its RB reference filled)
       try { if (typeof updateScoreTitle === 'function') updateScoreTitle(); } catch (e) {}
+      try { if (typeof applyRealbookSuffixesToSongList === 'function') applyRealbookSuffixesToSongList(); } catch (e) {}
       return map;
     } catch (e) { return null; }
   })();
@@ -5820,6 +5823,37 @@ function _rbSuffixForTitle(songTitle) {
   // Sort by book then page so the suffix is deterministic.
   const sorted = hits.slice().sort((a, b) => a.book - b.book || a.page - b.page);
   return ' (' + sorted.map(h => 'RB' + h.book + ' p.' + h.page).join(' / ') + ')';
+}
+// Song-list variant of the Real Book suffix. Same data as the score
+// title's suffix, different format: comma-separated `(RB1, p.45)`
+// (and `(RB1, p.45 / RB3, p.392)` for songs in multiple volumes),
+// matching the picker's looser visual style next to the song name.
+// Returns '' when the song isn't in the index or the index hasn't
+// loaded yet.
+function _rbListSuffixForTitle(songTitle) {
+  if (!_realbookByKey) return '';
+  const key = _normalizeTitleForRBLookup(songTitle);
+  if (!key) return '';
+  const hits = _realbookByKey.get(key);
+  if (!hits || !hits.length) return '';
+  const sorted = hits.slice().sort((a, b) => a.book - b.book || a.page - b.page);
+  return '(' + sorted.map(h => 'RB' + h.book + ', p.' + h.page).join(' / ') + ')';
+}
+// After the song list is populated and the Real Book index resolves,
+// walk every list row and fill in its `.song-rb` span. Idempotent —
+// rows that already have text are left alone, so re-rendering on
+// filter/sort doesn't double-write.
+function applyRealbookSuffixesToSongList() {
+  if (!_realbookByKey) return;
+  const rows = document.querySelectorAll('#songList li');
+  rows.forEach(li => {
+    const nameSpan = li.querySelector('.song-name');
+    const rbSpan = li.querySelector('.song-rb');
+    if (!nameSpan || !rbSpan) return;
+    if (rbSpan.textContent) return; // already filled
+    const suffix = _rbListSuffixForTitle(nameSpan.textContent || '');
+    if (suffix) rbSpan.textContent = suffix;
+  });
 }
 function updateScoreTitle(songArg) {
   const el = document.getElementById('scoreTitle');
@@ -12016,11 +12050,17 @@ async function initSongLibrary() {
     if (songListEl) {
       const li = document.createElement('li');
       // Wrap the title in its own span so the filter can target just
-      // the song name and ignore any HEAD badge we append below.
+      // the song name and ignore the RB reference / HEAD badge we
+      // append next to it.
       const nameSpan = document.createElement('span');
       nameSpan.className = 'song-name';
       nameSpan.textContent = entry.title;
       li.appendChild(nameSpan);
+      // Real Book reference — populated by applyRealbookSuffixesToSongList
+      // once the realbook-index.json fetch resolves. Empty until then.
+      const rbSpan = document.createElement('span');
+      rbSpan.className = 'song-rb';
+      li.appendChild(rbSpan);
       li.dataset.idx = String(i);
       li.setAttribute('role', 'option');
       li.addEventListener('click', () => {
@@ -12063,6 +12103,15 @@ async function initSongLibrary() {
   // already ran once at script load, but if anything ever re-inserts
   // the input element these calls re-establish the handlers.
   ensureSongFilterBindings();
+
+  // Kick off the Real Book index fetch (if not already in flight) and
+  // fill in the per-row RB references when it resolves. If the index
+  // is already cached the fill happens synchronously inside the .then.
+  // Either way `applyRealbookSuffixesToSongList` is idempotent so a
+  // duplicate call from updateScoreTitle's load is harmless.
+  loadRealbookIndex().then(() => {
+    try { applyRealbookSuffixesToSongList(); } catch (e) {}
+  });
 
   try {
     loadFromURL(librarySongs[0].url);

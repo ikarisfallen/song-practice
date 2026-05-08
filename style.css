@@ -136,6 +136,18 @@ body.layout-landscape #songListPanel { display: flex; }
 /* Song name takes only its intrinsic width so the HEAD badge sits
    directly after the title instead of floating to the right edge. */
 .song-list li .song-name { flex: 0 0 auto; min-width: 0; }
+/* Real Book reference — small parenthesized "(RB1, p.45)" set in
+   a muted color so it sits visually behind the song name without
+   competing with it. Empty when the song isn't in the index, so the
+   `:not(:empty)` margin doesn't push gap when the span is bare. */
+.song-list li .song-rb {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #889aa8;
+  font-weight: 400;
+}
+.song-list li .song-rb:not(:empty) { margin-left: 6px; }
+.song-list li.active .song-rb { color: #052033; opacity: 0.7; }
 /* Small pill tags on the right side of each song row. One tag per
    detected score category — HEAD (the default melody), BASSLINE
    (any "{title} - *Bassline*" variant), SOLO (any "*Solo*" variant).
