@@ -113,6 +113,8 @@
           <option value="3579">3579</option>
           <option value="3579Eighth">3579 Eighth</option>
           <option value="walkTriad">Walk Triad</option>
+          <option value="walkBass">Walking Bassline</option>
+          <option value="walkBassPC">Walking Bassline (Chambers)</option>
         </select>
       </div>
       <div class="drum-row">
@@ -176,11 +178,15 @@
         <div id="overlaysMenu" class="overlays-menu" role="menu" hidden>
           <label class="overlays-item" role="menuitemcheckbox">
             <input type="checkbox" id="overlayNotesToggle" />
-            <span>Notes</span>
+            <span>Note Name</span>
           </label>
           <label class="overlays-item" role="menuitemcheckbox">
             <input type="checkbox" id="overlayScaleDegreesToggle" />
             <span>Scale Degrees</span>
+          </label>
+          <label class="overlays-item" role="menuitemcheckbox">
+            <input type="checkbox" id="overlayCurrentNoteToggle" />
+            <span>Current Note</span>
           </label>
           <label class="overlays-item" role="menuitemcheckbox">
             <input type="checkbox" id="overlayBeatsToggle" />
@@ -280,7 +286,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v3.45</span>
+      <span class="app-version" id="appVersion">v3.63</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -288,7 +294,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=460"></script>
+<script src="app.js?v=478"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

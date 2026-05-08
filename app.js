@@ -2084,6 +2084,1246 @@ function generateTargetTriadQuarterNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// Walking Bassline generator: like Target Triad — each chord opens
+// on a 1/3/5 chord-tone "target" placed on its first beat, with the
+// next chord's target chosen to be the closest 1/3/5 to the previous
+// in a continuing direction. Differs in that EVERY beat is a quarter
+// note: the slots between two targets are filled with diatonic
+// walking notes that lead the line from the current target to the
+// next.
+//
+// Walking-line rules (per chord transition):
+//   - direction = sign(next.pitch − current.pitch); ascending or
+//     descending. Equal targets default to descending.
+//   - walkBeats = how many beats sit between targets (e.g. 3 in a
+//     4/4 bar with one chord). The last walking note is always a
+//     half-step "leading tone" placed one semitone before the next
+//     target in the direction of motion (F♯ before G ascending,
+//     F before E descending).
+//   - The OTHER walking notes are scale tones strictly between
+//     current and next, walked stepwise toward the target.
+//   - When the diatonic gap is too small to fill `walkBeats` notes
+//     (e.g. F → G with 3 walking slots — no scale tone in between),
+//     the line uses a diatonic-enclosure pattern: scale-step OPPOSITE
+//     to the walk direction, then current target, then the chromatic
+//     leading tone. So F → G fills as "F | E F F♯ | G" — descend a
+//     scale step (E), back to F, half-step lead (F♯), G.
+function generateWalkingBasslineQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // Same 1/3/5 picker the Target Triad exercise uses, kept verbatim
+  // so the two exercises agree on which "target" each chord lands on.
+  function build135Tones(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || !chordScale.length) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const tones = [];
+    for (const d of [0, 2, 4]) {
+      const idx = diatonicIndexInScale(d, chordScale);
+      if (idx >= chordScale.length) continue;
+      const sd = chordScale[idx];
+      const pc = ((rootPc + sd.s) % 12 + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) tones.push({ pitch: p, tpc });
+      }
+    }
+    tones.sort((a, b) => a.pitch - b.pitch);
+    return tones;
+  }
+  function pickClosestInDirection(tones, fromPitch, dir) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const t of tones) {
+      if (dir < 0 && t.pitch >= fromPitch) continue;
+      if (dir > 0 && t.pitch <= fromPitch) continue;
+      const dist = Math.abs(t.pitch - fromPitch);
+      if (dist < bestDist) { bestDist = dist; best = t; }
+    }
+    return best;
+  }
+
+  // Phase 1: pick a target 1/3/5 for every chord event in order.
+  // Identical to the Target Triad pass.
+  const targets = [];
+  let lastPitch = -1;
+  let direction = -1;
+  chordEvents.forEach(ce => {
+    const tones = build135Tones(ce);
+    if (!tones.length) { targets.push(null); return; }
+    let notePitch, noteTpc;
+    if (lastPitch < 0) {
+      const top = tones[tones.length - 1];
+      notePitch = top.pitch; noteTpc = top.tpc;
+      direction = -1;
+    } else {
+      let best = pickClosestInDirection(tones, lastPitch, direction);
+      if (!best) { direction = -direction; best = pickClosestInDirection(tones, lastPitch, direction); }
+      if (!best) {
+        const idx = findClosestIndex(tones, lastPitch);
+        best = tones[idx];
+      }
+      notePitch = best.pitch; noteTpc = best.tpc;
+    }
+    targets.push({ pitch: notePitch, tpc: noteTpc });
+    lastPitch = notePitch;
+  });
+
+  // Phase 2: for each chord, place the target on beat 1 and fill the
+  // remaining beats with a walking line to the NEXT chord's target.
+  chordEvents.forEach((ce, i) => {
+    const target = targets[i];
+    if (!target) return;
+    const nextTarget = targets[i + 1] || null;
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const beatCount = endBeat - startBeat;
+
+    // Beat 1: the target — a quarter note (no sustain, every beat is
+    // its own quarter note in this exercise).
+    results[ce.barIdx][startBeat] = { pitch: target.pitch, tpc: target.tpc, duration: 'q' };
+
+    if (beatCount <= 1) return;
+
+    const walkBeats = beatCount - 1;
+    // Last chord (or any chord with no next target) — fill remaining
+    // beats by repeating the target so the bar still has quarter
+    // notes everywhere instead of trailing rests.
+    if (!nextTarget) {
+      for (let k = 0; k < walkBeats; k++) {
+        results[ce.barIdx][startBeat + 1 + k] = { pitch: target.pitch, tpc: target.tpc, duration: 'q' };
+      }
+      return;
+    }
+
+    // Build the walking line. We pick scale tones from the EFFECTIVE
+    // scale (parent-key Ionian when inside a major-key pattern, the
+    // chord's own scale otherwise) so the diatonic walk follows
+    // whatever scale governs that bar.
+    const eff = effective[i];
+    const scaleRootPc = eff.root.pitchClass;
+    const scaleRootTpc = eff.root.tpc;
+    const allScaleTones = buildScaleTones(scaleRootPc, scaleRootTpc, eff.scale);
+    if (!allScaleTones.length) {
+      // Defensive fallback — repeat target.
+      for (let k = 0; k < walkBeats; k++) {
+        results[ce.barIdx][startBeat + 1 + k] = { pitch: target.pitch, tpc: target.tpc, duration: 'q' };
+      }
+      return;
+    }
+
+    // Approach-tone selection: alternate between a chromatic and a
+    // diatonic lead so the line gets melodic variety instead of a
+    // chromatic on every chord change. Both approaches sit on the
+    // SAME side of the next target (above for ascending walks,
+    // below for descending walks); they just differ in interval.
+    //   - chromatic: a half-step from next target (e.g. G♯ → G
+    //     ascending, D♭ → D descending). Same-letter + accidental
+    //     spelling, normalized to a single-letter form.
+    //   - diatonic: the next scale tone past the next target in
+    //     the approach direction (e.g. A → G ascending in F Ionian,
+    //     C → D descending in F Ionian). Falls back to chromatic
+    //     when no in-range scale tone exists on that side.
+    // Alternation is index-based so the choice is stable across
+    // re-renders rather than drifting on every redraw.
+    const overallDir = nextTarget.pitch > target.pitch ? +1
+                    : nextTarget.pitch < target.pitch ? -1 : -1;
+    const useDiatonicLead = (i % 2 === 1);
+    let lead = null;
+    if (useDiatonicLead) {
+      // First in-range scale tone strictly past nextTarget in the
+      // approach direction. Searched on the parent-key effective
+      // scale so the note belongs to the bar's harmonic context.
+      if (overallDir > 0) {
+        for (const t of allScaleTones) {
+          if (t.pitch > nextTarget.pitch) { lead = t; break; }
+        }
+      } else {
+        for (let k = allScaleTones.length - 1; k >= 0; k--) {
+          if (allScaleTones[k].pitch < nextTarget.pitch) { lead = allScaleTones[k]; break; }
+        }
+      }
+    }
+    if (!lead) {
+      // Either we asked for chromatic or no diatonic approach tone
+      // was reachable (range edge). Use the chromatic half-step.
+      const leadTpc = (overallDir > 0)
+        ? normalizeEnharmonic(nextTarget.tpc + 7)
+        : normalizeEnharmonic(nextTarget.tpc - 7);
+      lead = { pitch: nextTarget.pitch + overallDir, tpc: leadTpc };
+    }
+    const chromaticLead = lead; // name kept for the rest of the routine
+
+    // Walk direction is from target → chromaticLead (= one semi
+    // below next). For ascending overall walks where next is only
+    // one semi above target, dir2 may even flip sign relative to
+    // overallDir — that's fine, the line just descends a step then
+    // climbs back via the chromatic lead (matches the user's
+    // "F | E F F♯ | G" enclosure example).
+    const dir2 = chromaticLead.pitch > target.pitch ? +1
+              : chromaticLead.pitch < target.pitch ? -1 : -1;
+
+    // Scale tones strictly between target and chromaticLead, sorted
+    // in dir2 (closest to target first). On a long descent like
+    // D → B♭ this captures the C/B passing tones; on a short walk
+    // like F → G it's empty (no scale tones between F and F♯).
+    const between = allScaleTones.filter(t =>
+      dir2 > 0 ? (t.pitch > target.pitch && t.pitch < chromaticLead.pitch) :
+                 (t.pitch < target.pitch && t.pitch > chromaticLead.pitch));
+    between.sort((a, b) => dir2 * (a.pitch - b.pitch));
+
+    const need = walkBeats - 1; // walking notes BEFORE the chromaticLead
+    const walking = [];
+
+    if (between.length >= need) {
+      // Wide enough gap — linear scale walk + chromaticLead at end.
+      // Take the first `need` tones (closest to target) so the walk
+      // progresses stepwise from current pitch toward next.
+      for (let k = 0; k < need; k++) walking.push(between[k]);
+      walking.push(chromaticLead);
+    } else {
+      // Short gap — pad with enclosure. Use a scale-step neighbor of
+      // target in the OPPOSITE direction from dir2 as the filler.
+      // When that neighbor lies outside the cello range (target sits
+      // at the top/bottom edge), substitute a chromatic neighbor in
+      // the same opposite direction so we don't fall back to target
+      // itself and emit consecutive duplicate pitches.
+      const oppDir2 = -dir2;
+      let neighborOpp = null;
+      if (oppDir2 > 0) {
+        for (const t of allScaleTones) if (t.pitch > target.pitch) { neighborOpp = t; break; }
+      } else {
+        for (let k = allScaleTones.length - 1; k >= 0; k--) if (allScaleTones[k].pitch < target.pitch) { neighborOpp = allScaleTones[k]; break; }
+      }
+      if (!neighborOpp) {
+        // Range edge — use a chromatic neighbor instead. Falls back
+        // to a tone in dir2 (further from edge) if even the chromatic
+        // step lies outside the range.
+        const chromPitch = target.pitch + oppDir2;
+        if (chromPitch >= EX_LOW && chromPitch <= EX_HIGH) {
+          neighborOpp = {
+            pitch: chromPitch,
+            tpc: target.tpc + (oppDir2 > 0 ? 7 : -7)
+          };
+        } else {
+          // Last resort: scale-step in dir2 (away from edge).
+          if (dir2 > 0) {
+            for (const t of allScaleTones) if (t.pitch > target.pitch) { neighborOpp = t; break; }
+          } else {
+            for (let k = allScaleTones.length - 1; k >= 0; k--) if (allScaleTones[k].pitch < target.pitch) { neighborOpp = allScaleTones[k]; break; }
+          }
+          if (!neighborOpp) neighborOpp = target; // truly stuck
+        }
+      }
+      const fillerCount = need - between.length;
+      for (let k = 0; k < fillerCount; k++) {
+        walking.push(k % 2 === 0 ? neighborOpp : target);
+      }
+      for (const b of between) walking.push(b);
+      walking.push(chromaticLead);
+    }
+
+    // Final safety pass: if any consecutive walking notes (or the
+    // target → first walking note hand-off) end up on the same
+    // pitch, nudge the offender by ±1 semitone to break the
+    // duplicate. Direction of nudge follows dir2 so the line keeps
+    // moving toward chromaticLead. This catches edge cases where
+    // the enclosure fillers and the scale-tone walk happened to
+    // line up identically.
+    const fullLine = [target, ...walking];
+    for (let k = 1; k < fullLine.length; k++) {
+      if (fullLine[k].pitch === fullLine[k - 1].pitch) {
+        const nudged = fullLine[k].pitch + dir2;
+        if (nudged >= EX_LOW && nudged <= EX_HIGH) {
+          fullLine[k] = {
+            pitch: nudged,
+            tpc: fullLine[k].tpc + (dir2 > 0 ? 7 : -7)
+          };
+        }
+      }
+    }
+    // fullLine[0] is `target` (already placed on beat 1); the rest
+    // are the walking notes for beats 2..endBeat.
+    const adjustedWalking = fullLine.slice(1);
+
+    for (let k = 0; k < adjustedWalking.length && k < walkBeats; k++) {
+      results[ce.barIdx][startBeat + 1 + k] = {
+        pitch: adjustedWalking[k].pitch,
+        tpc:   adjustedWalking[k].tpc,
+        duration: 'q'
+      };
+    }
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
+// Paul Chambers walking-bassline generator. Models the patterns
+// observed in 5 Chambers basslines (A Foggy Day, Bye Bye Blackbird,
+// Just Friends, Oleo, On Green Dolphin Street — ~420 bars total).
+//
+// Layered on top of the simpler Walking Bassline:
+//   - Beat 1 of every chord and Beat 3 of every full-bar chord are
+//     "anchor" beats that land on a weighted chord-tone (~60% R,
+//     ~16% 5th, ~8% 3rd, ~3% 7th, ~13% voice-led scale tone). The
+//     beat-3 anchor uses a different distribution (50/30/15/5) and
+//     never picks the same pitch as beat 1 of the same bar.
+//   - Beat-4 / approach beats (the beat immediately before any
+//     chord change) draw from a weighted set: ½-step below next
+//     root (25%), ½ above (12%), whole-step below (9%), whole-step
+//     above (8%), current-chord 3rd (16%), current-chord 5th (12%),
+//     scale-step continuation (18%). Captures Chambers's mix of
+//     chromatic leading-tones and "5-relationship" approaches.
+//   - Connector beats (between two anchors of the same chord) walk
+//     stepwise through the chord's own scale, so altered passing
+//     tones (b9, #9, #11) appear over dominants but not over Maj7 /
+//     m7 — matching the data.
+//
+// Determinism: the generator uses a seeded PRNG keyed on the chord
+// progression so the same song re-renders identically every time
+// (otherwise filter / loop / repeat changes would shuffle the line
+// every redraw).
+function generatePaulChambersBasslineQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  if (!chordEvents.length) return { results, chordEvents, patterns, effective };
+
+  // mulberry32 PRNG with a seed derived from the chord progression so
+  // the same song always renders the same line. Different songs (or
+  // different transpositions) yield different lines.
+  function makeRng(seed) {
+    let s = seed | 0;
+    return function () {
+      s = (s + 0x9E3779B9) | 0;
+      let t = Math.imul(s ^ (s >>> 16), 0x85EBCA6B);
+      t = Math.imul(t ^ (t >>> 13), 0xC2B2AE35);
+      return ((t ^ (t >>> 16)) >>> 0) / 4294967296;
+    };
+  }
+  let seed = chordEvents.length;
+  for (const ce of chordEvents) {
+    seed = (Math.imul(seed * 31 + ce.root.pitchClass + ce.root.tpc * 7 + 1, 0x1000193)) | 0;
+  }
+  const rng = makeRng(seed);
+
+  // ---- Form detection ----
+  // Build a list of phrase boundaries: bar indices where a new
+  // section begins. Uses iRealPro's section markers (`bar.section`)
+  // when present (e.g. AABA → bars 0, 8, 16, 24 carry an "A"/"B"
+  // letter on the first bar of each section). When the chart has
+  // no section markers at all, falls back to fixed 8-bar phrasing.
+  // The returned array always starts with 0 and ends with the
+  // total bar count as a sentinel, so phrase lookups can be done
+  // by binary search of consecutive pairs.
+  function buildPhraseBoundaries() {
+    const boundaries = [0];
+    let lastSection = null;
+    if (bars[0] && bars[0].section) lastSection = bars[0].section;
+    for (let i = 1; i < bars.length; i++) {
+      const sect = bars[i] && bars[i].section;
+      if (sect && sect !== lastSection) {
+        boundaries.push(i);
+        lastSection = sect;
+      }
+    }
+    if (boundaries.length <= 1) {
+      // No section markers — fall back to 8-bar phrases.
+      for (let i = 8; i < bars.length; i += 8) boundaries.push(i);
+    }
+    boundaries.push(bars.length);
+    return boundaries;
+  }
+  const phraseBounds = buildPhraseBoundaries();
+
+  // For a given bar, return its phrase's start, length, position
+  // within the phrase, and whether it's the LAST bar of its phrase.
+  function phraseInfo(barIdx) {
+    for (let i = 0; i < phraseBounds.length - 1; i++) {
+      if (barIdx >= phraseBounds[i] && barIdx < phraseBounds[i + 1]) {
+        const phraseStart = phraseBounds[i];
+        const phraseLen = phraseBounds[i + 1] - phraseStart;
+        const posInPhrase = barIdx - phraseStart;
+        return {
+          phraseStart, phraseLen, posInPhrase,
+          isFirst: posInPhrase === 0,
+          isLast: posInPhrase === phraseLen - 1
+        };
+      }
+    }
+    return { phraseStart: 0, phraseLen: bars.length, posInPhrase: barIdx, isFirst: false, isLast: false };
+  }
+
+  // Phrase register arc: target anchor MIDI for each bar position.
+  // Climbs from a low starting register through the phrase, peaks
+  // around 70% of the way through, then resolves slightly down at
+  // the end — mirroring Chambers's typical 8-bar shape.
+  // Falls back to a wider arc for shorter phrases (12-bar blues etc.).
+  function arcAnchorPitch(barIdx) {
+    const { posInPhrase, phraseLen } = phraseInfo(barIdx);
+    if (phraseLen <= 1) return 41;
+    const t = posInPhrase / (phraseLen - 1);
+    const low = 36;   // C2 — typical bottom of a Chambers phrase
+    const peak = 50;  // D3 — typical phrase apex
+    const peakAt = 0.65; // bias the peak past the middle
+    let arc;
+    if (t < peakAt) arc = low + (peak - low) * (t / peakAt);
+    else            arc = peak - (peak - low) * 0.4 * ((t - peakAt) / (1 - peakAt));
+    return Math.round(arc);
+  }
+
+  // Diatonic chord-tone (R/3/5/7) of the chord, in cello range,
+  // closest to anchorPitch. degIdx 0=R, 2=3, 4=5, 6=7.
+  function chordTonePitch(ce, degIdx, anchorPitch) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || !chordScale.length) return null;
+    const realIdx = diatonicIndexInScale(degIdx, chordScale);
+    if (realIdx >= chordScale.length) return null;
+    const sd = chordScale[realIdx];
+    const pc = ((ce.root.pitchClass + sd.s) % 12 + 12) % 12;
+    const tpc = ce.root.tpc + sd.t;
+    let best = null, bestDist = Infinity;
+    for (let p = EX_LOW; p <= EX_HIGH; p++) {
+      if ((((p % 12) + 12) % 12) === pc) {
+        const d = Math.abs(p - anchorPitch);
+        if (d < bestDist) { bestDist = d; best = p; }
+      }
+    }
+    return best == null ? null : { pitch: best, tpc };
+  }
+
+  // Pick a scale tone in the given direction past `fromPitch`.
+  function nextScaleToneFrom(fromPitch, dir, scaleTones) {
+    if (dir > 0) {
+      for (const t of scaleTones) if (t.pitch > fromPitch) return t;
+    } else {
+      for (let k = scaleTones.length - 1; k >= 0; k--) if (scaleTones[k].pitch < fromPitch) return scaleTones[k];
+    }
+    return null;
+  }
+
+  // Beat-1 anchor. Weighted by Chambers's corpus distribution
+  // (60/16/8/3 R/5/3/7), with a ~14% voice-led branch for non-
+  // chord-tone landings AND a fallback that converts any picked
+  // chord-tone more than 5 semis away from the previous note into
+  // the nearest scale-tone instead. The fallback is what catches
+  // the BBB-style "PC plays a non-chord-tone scale step rather
+  // than leap to the chord-tone" cases — without it, when the
+  // dice say "pick R" and the chord's nearest R is 7 semis away,
+  // we'd take the leap and the bar boundary would feel disjointed.
+  //
+  // Anchor reference: 90/10 prev/arc blend. The arc still nudges
+  // long-range register trajectory, but voice-leading dominates
+  // every individual bar boundary — matching BBB where 88% of
+  // bar-to-bar intervals are ≤ a M3.
+  function pickAnchorBeat1(ce, prevPitch, eff) {
+    const arcRef = arcAnchorPitch(ce.barIdx);
+    const anchorRef = prevPitch != null
+      ? Math.round(prevPitch * 0.9 + arcRef * 0.1)
+      : arcRef;
+    const r = rng();
+    if (r < 0.14 && prevPitch != null) {
+      const tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+      let best = null, bestDist = Infinity;
+      for (const t of tones) {
+        const d = Math.abs(t.pitch - anchorRef);
+        if (d < bestDist) { bestDist = d; best = t; }
+      }
+      if (best) return best;
+    }
+    let degIdx;
+    if      (r < 0.74) degIdx = 0; // R   ~60%
+    else if (r < 0.90) degIdx = 4; // 5   ~16%
+    else if (r < 0.98) degIdx = 2; // 3    ~8%
+    else                degIdx = 6; // 7    ~3% (remaining ~14% goes to voice-led above)
+    const tone = chordTonePitch(ce, degIdx, anchorRef);
+    // Voice-leading override: if the picked chord-tone leaps more
+    // than 5 semis from the previous note, prefer the nearest
+    // scale tone instead. Replicates Chambers's bias against bar-
+    // boundary leaps even when the picked degree is far away.
+    if (tone && prevPitch != null && Math.abs(tone.pitch - prevPitch) > 5) {
+      const scaleTones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+      let bestSt = null, bestDist = Infinity;
+      for (const t of scaleTones) {
+        const d = Math.abs(t.pitch - prevPitch);
+        if (d < bestDist) { bestDist = d; bestSt = t; }
+      }
+      if (bestSt && bestDist < Math.abs(tone.pitch - prevPitch)) return bestSt;
+    }
+    return tone || chordTonePitch(ce, 0, anchorRef);
+  }
+
+  // Beat-3 secondary anchor (only fires for full-bar single-chord
+  // bars). Heavier on root than beat 1 in the corpus would suggest,
+  // but the analysis showed beat 3 mirrors beat 1's distribution
+  // weakly (R 21% / 5 13% / 3 12%); we use 50/30/15/5 here so it
+  // tilts more toward complementary chord-tone than beat 1 to keep
+  // the line moving.
+  function pickAnchorBeat3(ce, beat1Pitch) {
+    const r = rng();
+    let degIdx;
+    if      (r < 0.50) degIdx = 4; // 5    50% (complement of root-on-1)
+    else if (r < 0.80) degIdx = 0; // R    30%
+    else if (r < 0.95) degIdx = 2; // 3    15%
+    else                degIdx = 6; // 7     5%
+    let pick = chordTonePitch(ce, degIdx, beat1Pitch) || chordTonePitch(ce, 0, beat1Pitch);
+    if (pick && pick.pitch === beat1Pitch) {
+      // Avoid a duplicate chord-tone landing — try another degree
+      // closest to beat1 but not equal.
+      for (const altDeg of [0, 4, 2, 6]) {
+        if (altDeg === degIdx) continue;
+        const alt = chordTonePitch(ce, altDeg, beat1Pitch);
+        if (alt && alt.pitch !== beat1Pitch) { pick = alt; break; }
+      }
+    }
+    return pick;
+  }
+
+  // Approach picker — used on the LAST beat before a chord change.
+  // Weights tightened to match Bye Bye Blackbird's beat-4 → next-
+  // root profile: ~80% of his beat-4 notes sit within ±2 semis of
+  // the next root. Distribution:
+  //   ½-below 35, ½-above 25, whole-below 12, whole-above 10
+  //   (= 82% step-or-half-step approach)
+  //   current-3rd 8, current-5th 6, continuation 4 (= 18% larger).
+  function pickApproach(currentCe, nextTarget, prevPitch, eff) {
+    const tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+    const r = rng();
+    let pick = null;
+    if (r < 0.35) {
+      // ½-step BELOW next root.
+      pick = {
+        pitch: nextTarget.pitch - 1,
+        tpc: normalizeEnharmonic(nextTarget.tpc - 7)
+      };
+    } else if (r < 0.60) {
+      // ½-step ABOVE next root.
+      pick = {
+        pitch: nextTarget.pitch + 1,
+        tpc: normalizeEnharmonic(nextTarget.tpc + 7)
+      };
+    } else if (r < 0.72) {
+      // Whole-step (scale tone) BELOW next root.
+      pick = nextScaleToneFrom(nextTarget.pitch, -1, tones);
+    } else if (r < 0.82) {
+      // Whole-step ABOVE next root.
+      pick = nextScaleToneFrom(nextTarget.pitch, +1, tones);
+    } else if (r < 0.90) {
+      // Current chord's 3rd — Chambers occasionally "approaches"
+      // the next chord by hanging on the current chord's color
+      // tone, letting harmonic root motion handle the leap.
+      pick = chordTonePitch(currentCe, 2, prevPitch);
+    } else if (r < 0.96) {
+      // Current chord's 5th.
+      pick = chordTonePitch(currentCe, 4, prevPitch);
+    } else {
+      // Continuation: scale step from prevPitch toward nextTarget.
+      const dir = nextTarget.pitch > prevPitch ? +1 : -1;
+      pick = nextScaleToneFrom(prevPitch, dir, tones);
+    }
+    if (!pick) {
+      // Defensive fallback: chromatic below.
+      pick = {
+        pitch: nextTarget.pitch - 1,
+        tpc: normalizeEnharmonic(nextTarget.tpc - 7)
+      };
+    }
+    // Range-clamp.
+    if (pick.pitch < EX_LOW) pick = { pitch: pick.pitch + 12, tpc: pick.tpc };
+    if (pick.pitch > EX_HIGH) pick = { pitch: pick.pitch - 12, tpc: pick.tpc };
+    return pick;
+  }
+
+  // Phase 1: pick anchor pitches for every chord event (beat-1)
+  // plus secondary beat-3 anchor for full-bar chords.
+  const anchors = []; // [{ce, eventIdx, barIdx, beat, pitch, tpc}]
+  let voicePrev = null;
+  chordEvents.forEach((ce, i) => {
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const t1 = pickAnchorBeat1(ce, voicePrev, effective[i]);
+    if (!t1) return;
+    anchors.push({ ce, eventIdx: i, barIdx: ce.barIdx, beat: startBeat, pitch: t1.pitch, tpc: t1.tpc });
+    voicePrev = t1.pitch;
+    if (startBeat === 0 && endBeat >= beatsPerBar && beatsPerBar >= 4) {
+      const t3 = pickAnchorBeat3(ce, t1.pitch);
+      if (t3) {
+        anchors.push({ ce, eventIdx: i, barIdx: ce.barIdx, beat: 2, pitch: t3.pitch, tpc: t3.tpc });
+        voicePrev = t3.pitch;
+      }
+    }
+  });
+
+  // Place anchor beats.
+  for (const a of anchors) {
+    if (!results[a.barIdx][a.beat]) {
+      results[a.barIdx][a.beat] = { pitch: a.pitch, tpc: a.tpc, duration: 'q' };
+    }
+  }
+
+  // Phase 2: fill connector / approach beats between anchors.
+  for (let i = 0; i < anchors.length; i++) {
+    const a = anchors[i];
+    const next = anchors[i + 1] || null;
+    const aRange = chordBeatRange(a.ce.chordsInBar, a.ce.chordIdxInBar, beatsPerBar);
+
+    // Collect beats to fill between this anchor and the next.
+    const slots = [];
+    if (next && a.barIdx === next.barIdx) {
+      for (let b = a.beat + 1; b < next.beat; b++) slots.push({ barIdx: a.barIdx, beat: b });
+    } else if (next) {
+      for (let b = a.beat + 1; b < aRange.endBeat; b++) slots.push({ barIdx: a.barIdx, beat: b });
+      for (let bi = a.barIdx + 1; bi < next.barIdx; bi++) {
+        for (let b = 0; b < beatsPerBar; b++) slots.push({ barIdx: bi, beat: b });
+      }
+      for (let b = 0; b < next.beat; b++) slots.push({ barIdx: next.barIdx, beat: b });
+    } else {
+      // Final anchor: pad the rest of its chord with stepwise descent.
+      for (let b = a.beat + 1; b < aRange.endBeat; b++) slots.push({ barIdx: a.barIdx, beat: b });
+    }
+    if (!slots.length) continue;
+
+    const eff = effective[a.eventIdx];
+    const tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+    const sameChord = !!(next && next.ce === a.ce);
+
+    let prevP = a.pitch;
+    let prevT = a.tpc;
+    for (let k = 0; k < slots.length; k++) {
+      const slot = slots[k];
+      const isLast = (k === slots.length - 1);
+      let pick;
+      if (isLast && next && !sameChord) {
+        pick = pickApproach(a.ce, next, prevP, eff);
+      } else if (isLast && next && sameChord) {
+        // Walking into a beat-3 secondary anchor of the same chord.
+        // The anchor pitch is fixed; we just need a smooth scale step
+        // from prevP. The anchor itself is already placed.
+        // This connector beat should be one scale step closer to next.
+        const dir = next.pitch > prevP ? +1 : -1;
+        pick = nextScaleToneFrom(prevP, dir, tones) || { pitch: prevP, tpc: prevT };
+      } else if (next) {
+        // General connector: scale-step toward next anchor's pitch.
+        const dir = next.pitch > prevP ? +1 : -1;
+        pick = nextScaleToneFrom(prevP, dir, tones) || { pitch: prevP, tpc: prevT };
+      } else {
+        // No next anchor (final fill): step downward toward chord-tone.
+        pick = nextScaleToneFrom(prevP, -1, tones) || { pitch: prevP, tpc: prevT };
+      }
+      // De-dup: if the pick equals prev (rare), skip a step further.
+      if (pick.pitch === prevP) {
+        const dir = next && next.pitch >= prevP ? +1 : -1;
+        const further = nextScaleToneFrom(prevP + dir, dir, tones);
+        if (further) pick = further;
+      }
+      if (!results[slot.barIdx][slot.beat]) {
+        results[slot.barIdx][slot.beat] = { pitch: pick.pitch, tpc: pick.tpc, duration: 'q' };
+      }
+      prevP = pick.pitch;
+      prevT = pick.tpc;
+    }
+  }
+
+  // Top per-bar scale-degree shapes from the Paul Chambers corpus,
+  // sorted by frequency. Each entry is a 4-tuple of degree strings
+  // for beats 1–4. Top-5 per quality combined cover ~40% of major
+  // and minor full-bar instances, ~19% of dominant. The templates
+  // are applied as a "remix" pass that occasionally substitutes a
+  // known Chambers shape for the default per-beat picker output.
+  const PC_BAR_SHAPES = {
+    major: [
+      ['1', '7', '13', 'b13'],   // 14 — half-step descent (R 7 6 b6)
+      ['1', '3', '11', '#11'],   //  8 — ascending chromatic to 5
+      ['1', '5', '3', '11'],     //  4
+      ['5', 'b13', '13', '7'],   //  4
+      ['1', '9', '3', '11'],     //  3
+      ['5', '3', '11', '#11'],   //  3
+      ['1', '7', '13', '7'],     //  2
+      ['1', '9', '3', '5']       //  2
+    ],
+    minor: [
+      ['1', '9', 'b3', '3'],     // 14 — Chambers's classic m7 ascent (R 2 b3 3 → next root)
+      ['1', 'b7', '5', '1'],     //  6 — descending chord-tone outline
+      ['13', 'b7', '13', '11'],  //  5
+      ['1', '9', 'b3', '11'],    //  5
+      ['5', '11', 'b3', '9'],    //  3
+      ['1', '9', 'b3', '5'],     //  3
+      ['5', '1', '1', 'b7'],     //  3
+      ['1', 'b9', '1', 'b7']     //  2
+    ],
+    dominant: [
+      ['1', 'b7', '13', '5'],    //  6 — descending walk
+      ['1', '9', '#9', '3'],     //  5 — altered ascent (overlaps with sig #4)
+      ['5', '11', '3', '5'],     //  3
+      ['1', '5', '9', 'b9'],     //  3
+      ['b7', '5', '3', '5'],     //  3
+      ['1', 'b9', '9', '3'],     //  2
+      ['3', 'b7', '1', '3'],     //  2
+      ['1', '3', '9', '5']       //  2
+    ],
+    halfdim: [] // no full-bar single-chord halfdim instances in PC corpus
+  };
+  // TPC offsets from chord root for each degree string, chosen to
+  // match Chambers's typical spelling preferences (e.g. #9 spelled
+  // as same-letter-flat / b3 enharmonic in his charts, not D## /
+  // letter-up-+sharp). semi() and tpcDelta() share these.
+  const DEGREE_TO_SEMI = {
+    '1':0, 'b9':1, '9':2, 'b3':3, '#9':3, '3':4, '11':5,
+    'b5':6, '#11':6, '5':7, 'b13':8, '13':9, 'b7':10, '7':11
+  };
+  const DEGREE_TO_TPC_OFFSET = {
+    '1': 0,  'b9':-5, '9': 2, 'b3':-3, '#9':-3,
+    '3': 4,  '11':-1, 'b5':-6,'#11':6, '5': 1,
+    'b13':-4,'13': 3, 'b7':-2,'7':  5
+  };
+  // Map getChordType output to PC_BAR_SHAPES keys. 'other' chords
+  // (augmented, diminished7, sus, etc.) skip the template lookup —
+  // we don't have corpus data for them.
+  function templateKeyForType(t) {
+    if (t === 'major') return 'major';
+    if (t === 'minor') return 'minor';
+    if (t === 'dominant') return 'dominant';
+    if (t === 'halfdim') return 'halfdim';
+    return null;
+  }
+  // Apply a 4-tuple shape across the 4 beats of a chord that owns
+  // a full bar. Each beat's pitch is the closest in-range MIDI
+  // matching the degree's pitch class to a running anchor (carries
+  // forward from beat to beat for smooth voice-leading). The first
+  // beat's anchor uses the phrase-arc target so the template still
+  // rides the section's register trajectory.
+  function applyTemplate(ce, shape) {
+    if (!shape || shape.length !== beatsPerBar) return false;
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    // Anchor strictly to the previous bar's last note. The phrase
+    // arc only matters when there is no prior bar (= start of song)
+    // — otherwise voice-leading wins, because templates that "reset"
+    // the register based on the arc cause the line to jump every
+    // time a template fires. Tight prev-pitch anchoring keeps the
+    // template's contour locked into the surrounding line.
+    const prevLast = prevBarLastNote(ce.barIdx);
+    let prev = prevLast ? prevLast.pitch : arcAnchorPitch(ce.barIdx);
+    for (let b = 0; b < shape.length; b++) {
+      const deg = shape[b];
+      const semi = DEGREE_TO_SEMI[deg];
+      const tOff = DEGREE_TO_TPC_OFFSET[deg];
+      if (semi == null) continue;
+      const pc = ((rootPc + semi) % 12 + 12) % 12;
+      const tpc = normalizeEnharmonic(rootTpc + (tOff || 0));
+      let best = null, bestDist = Infinity;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) {
+          const d = Math.abs(p - prev);
+          if (d < bestDist) { bestDist = d; best = p; }
+        }
+      }
+      if (best == null) continue;
+      results[ce.barIdx][b] = { pitch: best, tpc, duration: 'q' };
+      prev = best;
+    }
+    return true;
+  }
+  // Weighted pick from a shapes list (top-5 only — beyond that the
+  // long tail thins to single occurrences and adds noise). Weight =
+  // shape index → frequency proxy: shape[0] gets highest weight,
+  // shape[4] gets lowest.
+  function pickTemplateShape(shapes) {
+    if (!shapes || !shapes.length) return null;
+    const top = shapes.slice(0, 5);
+    const weights = [5, 4, 3, 2, 1].slice(0, top.length);
+    const total = weights.reduce((s, w) => s + w, 0);
+    let r = rng() * total;
+    for (let i = 0; i < top.length; i++) {
+      r -= weights[i];
+      if (r <= 0) return top[i];
+    }
+    return top[0];
+  }
+
+  // Phase 3: Chambers signature overrides.
+  //
+  // Four characteristic gestures from the corpus, each triggered with
+  // low probability so they're occasional flavor rather than constant.
+  // Higher-priority signatures apply first; once a chord event fires
+  // a signature, lower-priority ones are skipped for that bar so
+  // overrides don't stack incoherently.
+  //
+  //   #4  Altered ascent (R b9 #9 3) over a dominant7 going P4-up
+  //       — Autumn Leaves bar 6 D7→Gm signature.
+  //   #3  Descending 5-3-9-R archetype over a full-bar Maj7
+  //       — Just Friends bar 1 signature.
+  //   #2  Diatonic enclosure of next chord's root on the prior bar's
+  //       last two beats — universal jazz "approach pattern".
+  //   #1  Chromatic-above next root (= #11 of the V) on V→I major
+  //       resolutions — Foggy Day's "5th drops a 5th with #11 colour"
+  //       move. Implemented as a beat-4 override that REPLACES whatever
+  //       the approach picker chose with the chromatic-above tone.
+  //
+  // Helper: place a specific {pc, tpc} at (barIdx, beat) in the
+  // cello range, picking the pitch nearest to anchorPitch. Returns
+  // the placed pitch (or null if no in-range option). Always
+  // overwrites whatever's already there — signatures are designed
+  // to win over the default fill.
+  function placePc(barIdx, beat, pc, tpc, anchorPitch) {
+    let best = null, bestDist = Infinity;
+    for (let p = EX_LOW; p <= EX_HIGH; p++) {
+      if ((((p % 12) + 12) % 12) === pc) {
+        const d = Math.abs(p - anchorPitch);
+        if (d < bestDist) { bestDist = d; best = p; }
+      }
+    }
+    if (best != null) {
+      results[barIdx][beat] = { pitch: best, tpc, duration: 'q' };
+    }
+    return best;
+  }
+
+  // Helper: find the previous bar's last note (or null) for
+  // voice-leading anchor choices when a signature/template starts
+  // a new bar. Without this anchor, signatures reset the register
+  // independently of the line that came before, producing
+  // 7-12 semitone jumps at every signature trigger.
+  function prevBarLastNote(barIdx) {
+    if (barIdx <= 0) return null;
+    const prev = results[barIdx - 1];
+    if (!prev) return null;
+    for (let b = beatsPerBar - 1; b >= 0; b--) {
+      if (prev[b] && prev[b].pitch != null) return prev[b];
+    }
+    return null;
+  }
+
+  // 5-3-9-R descending: takes a full-bar Maj7 chord and writes G E D C
+  // (over CMaj7) starting from a 5th close to the previous bar's
+  // last note so the descent voice-leads from the prior line. The
+  // descent needs ~7 semitones of headroom below the start, so when
+  // the voice-led 5th would clip the cello range bottom we bump up
+  // an octave (or skip the signature when neither octave fits).
+  function applyMaj7Archetype(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length < 5) return;
+    const get = (deg) => {
+      const idx = diatonicIndexInScale(deg, chordScale);
+      const sd = chordScale[idx % chordScale.length];
+      return {
+        pc: ((ce.root.pitchClass + sd.s) % 12 + 12) % 12,
+        tpc: ce.root.tpc + sd.t
+      };
+    };
+    const five  = get(4);
+    const three = get(2);
+    const nine  = get(1);
+    const root  = get(0);
+    // Voice-leading anchor: the previous bar's last note. Falls back
+    // to the phrase-arc target on the very first bar.
+    const prevLast = prevBarLastNote(ce.barIdx);
+    const anchorPitch = prevLast ? prevLast.pitch : arcAnchorPitch(ce.barIdx);
+    // Find the in-range 5th closest to anchorPitch that ALSO has
+    // enough headroom below for the 4-note descent (≈ 7 semitones).
+    const HEADROOM = 7;
+    const candidates = [];
+    for (let p = EX_LOW + HEADROOM; p <= EX_HIGH; p++) {
+      if ((((p % 12) + 12) % 12) === five.pc) candidates.push(p);
+    }
+    if (!candidates.length) return;
+    candidates.sort((a, b) => Math.abs(a - anchorPitch) - Math.abs(b - anchorPitch));
+    const fivePitch = candidates[0];
+    results[ce.barIdx][0] = { pitch: fivePitch, tpc: five.tpc, duration: 'q' };
+    let prev = fivePitch;
+    // Each subsequent note is the next descending pc <= prev.
+    const placeBelow = (beat, target) => {
+      let best = null;
+      for (let p = prev - 1; p >= EX_LOW; p--) {
+        if ((((p % 12) + 12) % 12) === target.pc) { best = p; break; }
+      }
+      if (best != null) {
+        results[ce.barIdx][beat] = { pitch: best, tpc: target.tpc, duration: 'q' };
+        prev = best;
+      }
+    };
+    placeBelow(1, three);
+    placeBelow(2, nine);
+    placeBelow(3, root);
+  }
+
+  // R b9 #9 3 ascending altered scale over a dominant7 chord going
+  // P4 up. e.g. D7 → Gm: D Eb F F♯ resolving to G by half-step.
+  // Picks the root pitch closest to the previous bar's last note
+  // (with 4 semitones of headroom above for the ascent) so the
+  // gesture voice-leads from the prior line instead of jumping.
+  function applyAlteredAscent(ce) {
+    const r_pc = ce.root.pitchClass;
+    const r_tpc = ce.root.tpc;
+    const ninth_tpc = r_tpc + 2;
+    const root   = { pc: r_pc, tpc: r_tpc };
+    const b9     = { pc: (r_pc + 1) % 12, tpc: normalizeEnharmonic(ninth_tpc - 7) };
+    const sharp9 = { pc: (r_pc + 3) % 12, tpc: normalizeEnharmonic(ninth_tpc + 7) };
+    const third  = { pc: (r_pc + 4) % 12, tpc: r_tpc + 4 };
+    const prevLast = prevBarLastNote(ce.barIdx);
+    const anchorPitch = prevLast ? prevLast.pitch : arcAnchorPitch(ce.barIdx);
+    // In-range root pitches that ALSO have 4 semis of headroom above
+    // for the ascent (root → b9 → #9 → 3 = +4 semis total).
+    const candidates = [];
+    for (let p = EX_LOW; p <= EX_HIGH - 4; p++) {
+      if ((((p % 12) + 12) % 12) === r_pc) candidates.push(p);
+    }
+    if (!candidates.length) return;
+    candidates.sort((a, b) => Math.abs(a - anchorPitch) - Math.abs(b - anchorPitch));
+    const rootPitch = candidates[0];
+    results[ce.barIdx][0] = { pitch: rootPitch,     tpc: root.tpc,   duration: 'q' };
+    results[ce.barIdx][1] = { pitch: rootPitch + 1, tpc: b9.tpc,     duration: 'q' };
+    results[ce.barIdx][2] = { pitch: rootPitch + 3, tpc: sharp9.tpc, duration: 'q' };
+    results[ce.barIdx][3] = { pitch: rootPitch + 4, tpc: third.tpc,  duration: 'q' };
+  }
+
+  // Diatonic enclosure of next chord's root: writes one scale tone
+  // ABOVE next root and one BELOW on prior bar's last two beats. The
+  // approach lands diatonically on next's beat 1.
+  function applyEnclosure(ce, nextCe, nextEff) {
+    const nextRootPitch = results[nextCe.barIdx][0]?.pitch;
+    if (nextRootPitch == null) return;
+    const tones = buildScaleTones(nextEff.root.pitchClass, nextEff.root.tpc, nextEff.scale);
+    let above = null, below = null;
+    for (const t of tones) {
+      if (t.pitch > nextRootPitch && (!above || t.pitch < above.pitch)) above = t;
+      if (t.pitch < nextRootPitch && (!below || t.pitch > below.pitch)) below = t;
+    }
+    if (!above || !below) return;
+    const lastBeat = beatsPerBar - 1;
+    const secondLast = beatsPerBar - 2;
+    if (secondLast < 0) return;
+    // Above on beat 3 (descending into below on beat 4 then up to root).
+    results[ce.barIdx][secondLast] = { pitch: above.pitch, tpc: above.tpc, duration: 'q' };
+    results[ce.barIdx][lastBeat]   = { pitch: below.pitch, tpc: below.tpc, duration: 'q' };
+  }
+
+  // V→I major #11 boost: replace beat 4 of a dominant7 chord with the
+  // chromatic-above next-root tone (= #11 of the V) when the next
+  // chord is a Maj7 a P4 above. ~25% probability — high enough to
+  // appear regularly in the corpus's strongest cadences.
+  function applyV2IChromaticAbove(ce, nextCe) {
+    const interval = (nextCe.root.pitchClass - ce.root.pitchClass + 12) % 12;
+    if (interval !== 5) return;
+    const aboveTpc = normalizeEnharmonic(nextCe.root.tpc + 7);
+    const abovePc = (nextCe.root.pitchClass + 1) % 12;
+    const range = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const lastBeat = range.endBeat - 1;
+    const refPitch = results[ce.barIdx][range.startBeat]?.pitch || 41;
+    placePc(ce.barIdx, lastBeat, abovePc, aboveTpc, refPitch);
+  }
+
+  for (let i = 0; i < chordEvents.length; i++) {
+    const ce = chordEvents[i];
+    const nextCe = chordEvents[i + 1] || null;
+    const range = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const ownsFullBar = (range.startBeat === 0 && range.endBeat === beatsPerBar);
+    const ceType = getChordType(chordToCanonical(ce.chord));
+    const phr = phraseInfo(ce.barIdx);
+    // Turnaround boost: the LAST bar of every phrase (the bar
+    // before each section repeat / cadence) tends to be more
+    // ornate in the corpus — more chromatic enclosures, more
+    // #11 colours, more altered ascents. Fire signatures at
+    // ~2× their normal probability there.
+    const turnaroundBoost = phr.isLast ? 2.0 : 1.0;
+
+    // Override-rate philosophy: PC's actual basslines have ~10-20%
+    // of bars with a recognizable signature gesture; the rest are
+    // straightforward walking quarters. Rates here are tuned so the
+    // CUMULATIVE probability of any single bar getting overridden
+    // sits in that range — anything higher kills the cohesion of
+    // the line and the bars stop "flowing" into each other.
+
+    // #4: altered ascent over dominant resolving P4 up.
+    // Boosted at turnarounds where the V→i resolution is the
+    // defining cadence of the phrase.
+    if (ownsFullBar && ceType === 'dominant' && nextCe) {
+      const interval = (nextCe.root.pitchClass - ce.root.pitchClass + 12) % 12;
+      if (interval === 5 && rng() < 0.07 * turnaroundBoost) {
+        applyAlteredAscent(ce);
+        continue;
+      }
+    }
+
+    // #3: 5-3-9-R descending Maj7 archetype.
+    // Form-aware: heavier on the FIRST bar of a phrase (Just Friends
+    // bar 1 archetype), rare mid-phrase.
+    if (ownsFullBar && ceType === 'major') {
+      const maj7Prob = phr.isFirst ? 0.18 : 0.03;
+      if (rng() < maj7Prob) {
+        applyMaj7Archetype(ce);
+        continue;
+      }
+    }
+
+    // Corpus template "remix": substitute one of Chambers's top
+    // per-bar shapes for the default walking line. Anchored to the
+    // previous bar's last note so the template's contour blends
+    // into the surrounding line.
+    if (ownsFullBar && !phr.isLast) {
+      const tplKey = templateKeyForType(ceType);
+      const shapes = tplKey ? PC_BAR_SHAPES[tplKey] : null;
+      if (shapes && shapes.length && rng() < 0.10) {
+        const shape = pickTemplateShape(shapes);
+        if (shape && applyTemplate(ce, shape)) continue;
+      }
+    }
+
+    // #2: diatonic enclosure of next chord's root, on the prior
+    // bar's last two beats. Boosted at turnarounds.
+    if (nextCe && nextCe.barIdx === ce.barIdx + 1 && nextCe.chordIdxInBar === 0
+        && range.endBeat === beatsPerBar
+        && (range.endBeat - range.startBeat) >= 2
+        && rng() < 0.06 * turnaroundBoost) {
+      applyEnclosure(ce, nextCe, effective[i + 1]);
+      continue;
+    }
+
+    // #1: V→I #11 (chromatic-above next root on beat 4).
+    // Boosted at turnarounds (cadential V→I, not passing dominants).
+    if (ceType === 'dominant' && nextCe
+        && getChordType(chordToCanonical(nextCe.chord)) === 'major'
+        && rng() < 0.15 * turnaroundBoost) {
+      applyV2IChromaticAbove(ce, nextCe);
+      // No `continue` — this is a single-beat tweak that doesn't
+      // preclude later signatures from firing on a future chord.
+    }
+  }
+
+  // Phase 3.6: bar-boundary register snap.
+  // After templates / signatures fill in their bar-local shapes,
+  // the absolute register of each bar's notes is whichever octave
+  // chordTonePitch happened to pick — which can put consecutive
+  // bars in totally different registers (e.g. one bar tails at C2
+  // and the next opens at G3). The pre-Phase-1 voice-leading anchor
+  // helps but isn't a guarantee, because templates can shift the
+  // bar's contour up or down regardless of the anchor.
+  //
+  // This pass scans each bar's beat 1 against the PRIOR bar's beat
+  // 4. If they're more than a P5 (7 semis) apart, we try octave-
+  // shifting the entire bar by ±12 to bring beat 1 within range.
+  // The shift only commits when EVERY note in the shifted bar
+  // remains inside [EX_LOW, EX_HIGH]; otherwise the bar stays where
+  // it was (some chord progressions naturally require a register
+  // jump that octave-snapping can't fix).
+  for (let bi = 1; bi < results.length; bi++) {
+    const prev = results[bi - 1];
+    const cur = results[bi];
+    if (!prev || !cur) continue;
+    let prevLast = null;
+    for (let b = beatsPerBar - 1; b >= 0; b--) {
+      if (prev[b] && prev[b].pitch != null) { prevLast = prev[b]; break; }
+    }
+    let curFirst = null;
+    for (let b = 0; b < beatsPerBar; b++) {
+      if (cur[b] && cur[b].pitch != null) { curFirst = cur[b]; break; }
+    }
+    if (!prevLast || !curFirst) continue;
+    const diff = curFirst.pitch - prevLast.pitch;
+    // PC's actual basslines (Bye Bye Blackbird across 64 bars):
+    // 88% of bar-boundary intervals are ≤ ±4 semis (= a M3 or
+    // less), the maximum is ±7, NEVER bigger. Anything more than a
+    // M3 (4 semis) between bars feels disjointed compared to the
+    // corpus, so we octave-snap whenever we're outside that window.
+    if (Math.abs(diff) <= 4) continue;
+    // Direction of shift: bring curFirst toward prevLast.
+    const shift = diff > 0 ? -12 : 12;
+    // Verify every note in cur (with a pitch) stays in range AFTER shift.
+    let canShift = true;
+    for (const slot of cur) {
+      if (!slot || slot.pitch == null) continue;
+      const np = slot.pitch + shift;
+      if (np < EX_LOW || np > EX_HIGH) { canShift = false; break; }
+    }
+    if (!canShift) continue;
+    // Apply shift in place.
+    for (const slot of cur) {
+      if (slot && slot.pitch != null) slot.pitch += shift;
+    }
+    // Re-check: if AFTER shifting we're still > 12 semis off,
+    // try ANOTHER shift in the same direction (rare, would only
+    // happen for two-octave gaps).
+    const newCurFirst = cur[0];
+    if (newCurFirst && newCurFirst.pitch != null) {
+      const newDiff = newCurFirst.pitch - prevLast.pitch;
+      if (Math.abs(newDiff) > 4) {
+        let canShift2 = true;
+        for (const slot of cur) {
+          if (!slot || slot.pitch == null) continue;
+          const np = slot.pitch + shift;
+          if (np < EX_LOW || np > EX_HIGH) { canShift2 = false; break; }
+        }
+        if (canShift2) {
+          for (const slot of cur) {
+            if (slot && slot.pitch != null) slot.pitch += shift;
+          }
+        }
+      }
+    }
+  }
+
+  // Phase 3.5: dedupe consecutive identical quarter-note pitches.
+  // Chambers's lines have <2% repeated pitches across consecutive
+  // beats; the random-template / signature passes can occasionally
+  // produce a duplicate (e.g. a template's last beat lands on the
+  // same pitch as the next bar's beat-1 anchor). Walk the rendered
+  // results bar-by-bar and nudge any consecutive duplicate by a
+  // scale step toward the next-different pitch — preserves the
+  // template's contour while breaking the repeat.
+  for (let bi = 0; bi < results.length; bi++) {
+    for (let b = 0; b < beatsPerBar; b++) {
+      const cur = results[bi][b];
+      if (!cur || cur.pitch == null) continue;
+      // Find the previous note (same bar earlier beat, or last beat
+      // of the prior bar).
+      let prev = null;
+      if (b > 0) prev = results[bi][b - 1];
+      else if (bi > 0) prev = results[bi - 1][beatsPerBar - 1];
+      if (!prev || prev.pitch == null || prev.pitch !== cur.pitch) continue;
+
+      // Find the next note (for nudge direction). Falls back to
+      // descending if there's no next reference.
+      let nxt = null;
+      if (b < beatsPerBar - 1) nxt = results[bi][b + 1];
+      else if (bi + 1 < results.length) nxt = results[bi + 1][0];
+      const dir = (nxt && nxt.pitch != null && nxt.pitch !== cur.pitch)
+        ? (nxt.pitch > cur.pitch ? +1 : -1)
+        : -1;
+
+      // Pick a scale tone in the chord's effective scale, in `dir`,
+      // closest to current pitch. Use the chord-event covering this
+      // beat. Falls back to a 1-semi nudge if no scale tone available.
+      let nudged = null;
+      const ceForBeat = chordEvents.find(c => c.barIdx === bi
+        && b >= chordBeatRange(c.chordsInBar, c.chordIdxInBar, beatsPerBar).startBeat
+        && b <  chordBeatRange(c.chordsInBar, c.chordIdxInBar, beatsPerBar).endBeat);
+      if (ceForBeat) {
+        const ceIdx = chordEvents.indexOf(ceForBeat);
+        const eff = effective[ceIdx];
+        const tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+        nudged = nextScaleToneFrom(cur.pitch, dir, tones);
+      }
+      if (!nudged) {
+        const np = cur.pitch + dir;
+        if (np >= EX_LOW && np <= EX_HIGH) {
+          nudged = { pitch: np, tpc: cur.tpc + (dir > 0 ? 7 : -7) };
+        }
+      }
+      if (nudged) results[bi][b] = { ...cur, pitch: nudged.pitch, tpc: nudged.tpc };
+    }
+  }
+
+  // Phase 4: eighth-note embellishment.
+  // ~5% of beats are split into eighth-note pairs (matches the
+  // 4.5% eighth-note rate in the corpus). The pair patterns mirror
+  // Chambers's actual usage observed across his five basslines:
+  //
+  //   - Same-pitch doubling (~28% of pairs): two eighths on the
+  //     same pitch — adds rhythmic punch without changing the line.
+  //   - Step approach (~25%): second eighth is a half/whole step
+  //     toward the NEXT beat's pitch, smoothing a leap.
+  //   - Big drop / leap (~25%): −12 (octave), −7 (P5), +5, −5.
+  //     Most often used at chord changes to set up the next root.
+  //   - Small skip (~22%): ±2, ±3 from current — chord-tone hops.
+  //
+  // Output uses 8-slot (eighth) resolution per bar. Beats that
+  // stay as quarters occupy slot 2*b with duration 'q' and slot
+  // 2*b+1 stays null (the renderer auto-detects subdiv from
+  // stepsPerBar / beatsPerBar = 2 and treats 'q' as 2 steps).
+  // At most ONE eighth-note pair per bar. The corpus census shows
+  // 4.5% of all notes are eighths (~0.36 eighth-pairs / bar on
+  // average), and Chambers basically never stacks two eighth pairs
+  // in the same bar — so we cap at one per bar even if the dice
+  // roll would have triggered another. Once `barHasEighths` flips
+  // for a bar, subsequent beats in that bar emit as quarters.
+  const EIGHTH_PROB = 0.10;
+  const expanded = bars.map(() => new Array(beatsPerBar * 2).fill(null));
+  for (let bi = 0; bi < results.length; bi++) {
+    let barHasEighths = false;
+    for (let b = 0; b < beatsPerBar; b++) {
+      const slot = results[bi][b];
+      const slotIdx = b * 2;
+      if (!slot) continue;
+      // Quarter-only emit: when this bar already has an eighth pair,
+      // when the dice say no, or when there's no pitch to embellish.
+      if (barHasEighths || rng() >= EIGHTH_PROB || slot.pitch == null) {
+        expanded[bi][slotIdx] = { pitch: slot.pitch, tpc: slot.tpc, duration: 'q' };
+        continue;
+      }
+      // Eighth-note pair. Pick second pitch by weighted style.
+      const nextSlot = (b < beatsPerBar - 1) ? results[bi][b + 1]
+                     : (bi + 1 < results.length ? results[bi + 1][0] : null);
+      const r = rng();
+      let secondPitch = slot.pitch;
+      let secondTpc = slot.tpc;
+      if (r < 0.28) {
+        // Doubled same pitch.
+        secondPitch = slot.pitch;
+        secondTpc = slot.tpc;
+      } else if (r < 0.53 && nextSlot && nextSlot.pitch != null && nextSlot.pitch !== slot.pitch) {
+        // Step approach toward next beat.
+        const dist = nextSlot.pitch - slot.pitch;
+        const dir = dist > 0 ? +1 : -1;
+        const stepSemi = Math.abs(dist) >= 4 ? 2 : 1;
+        secondPitch = slot.pitch + dir * stepSemi;
+        secondTpc = slot.tpc + dir * (stepSemi === 2 ? 2 : 7);
+      } else if (r < 0.78) {
+        // Big drop / leap. Pick from {-12, -7, +5, -5} weighted by
+        // corpus frequency.
+        const drops = [-12, -7, +5, -5];
+        const weights = [3, 6, 5, 4];
+        const total = weights.reduce((s, w) => s + w, 0);
+        let pick = rng() * total;
+        let drop = drops[0];
+        for (let k = 0; k < drops.length; k++) {
+          pick -= weights[k];
+          if (pick <= 0) { drop = drops[k]; break; }
+        }
+        secondPitch = slot.pitch + drop;
+        // TPC: octave drop preserves spelling; P5 / P4 step in
+        // circle-of-fifths.
+        if (drop === -12) secondTpc = slot.tpc;
+        else if (drop === -7) secondTpc = slot.tpc - 1;
+        else if (drop === +5) secondTpc = slot.tpc - 1;
+        else if (drop === -5) secondTpc = slot.tpc + 1;
+        if (secondPitch < EX_LOW || secondPitch > EX_HIGH) {
+          // Out of range — fall back to a same-pitch double.
+          secondPitch = slot.pitch;
+          secondTpc = slot.tpc;
+        }
+      } else {
+        // Small skip ±2 / ±3 (chord-tone hop).
+        const skips = [+2, -2, +3, -3];
+        const skip = skips[Math.floor(rng() * skips.length)];
+        secondPitch = slot.pitch + skip;
+        secondTpc = slot.tpc + (Math.abs(skip) === 2 ? Math.sign(skip) * 2 : Math.sign(skip) * (-3));
+        if (secondPitch < EX_LOW || secondPitch > EX_HIGH) {
+          secondPitch = slot.pitch;
+          secondTpc = slot.tpc;
+        }
+      }
+      expanded[bi][slotIdx]     = { pitch: slot.pitch,    tpc: slot.tpc,    duration: '8' };
+      expanded[bi][slotIdx + 1] = { pitch: secondPitch,   tpc: secondTpc,   duration: '8' };
+      barHasEighths = true;
+    }
+  }
+
+  return { results: expanded, chordEvents, patterns, effective };
+}
+
 // 3579 Range Half generator: a continuous half-note line that walks
 // up through the 3 / 5 / 7 / 9 of each chord toward F3, then turns
 // and walks back down toward F1, then turns again — repeating the
@@ -6159,6 +7399,8 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === '3579' ? generate3579QuarterNotes
             : exerciseMode === '3579Eighth' ? generate3579EighthNotes
             : exerciseMode === 'walkTriad' ? generateWalkTriadQuarterNotes
+            : exerciseMode === 'walkBass' ? generateWalkingBasslineQuarterNotes
+            : exerciseMode === 'walkBassPC' ? generatePaulChambersBasslineQuarterNotes
             : (typeof exerciseMode === 'string' && exerciseMode.startsWith('lick:'))
               ? generateExerciseLickQuarterNotes
             : generateQuarterNotes;
@@ -8028,8 +9270,15 @@ function renderChart(song, barsIn, timesigStr) {
   if (typeof renderAllNotesOverlays === 'function') renderAllNotesOverlays();
   // Same deal for the Scale Degrees overlay — re-paint after the
   // bars are re-drawn so the per-note labels reattach to the new
-  // SVGs. No-op when the toggle is off.
-  if (typeof renderAllScaleDegreesOverlays === 'function') renderAllScaleDegreesOverlays();
+  // SVGs. We pass `bars` and `ts` explicitly because `loadSong`
+  // calls `renderChart` BEFORE assigning `window.currentSong`, so
+  // the overlay's `window.currentSong.bars` fallback would still
+  // hold the PREVIOUS song's chord chart at this moment. Without
+  // the explicit hand-off, the first render after a song change
+  // would label the new bars against the old chord roots.
+  if (typeof renderAllScaleDegreesOverlays === 'function') {
+    renderAllScaleDegreesOverlays(bars, ts);
+  }
 }
 
 // ===== Chord-to-notes =====
@@ -8467,41 +9716,32 @@ function pausePlayback() {
   updateChordNav();
 }
 
-function resumePlayback() {
+async function resumePlayback() {
   if (playState !== 'paused') return;
-  // If we have an active drum loop, re-align it to Transport position.
-  // Count-in bars are the part of Transport before the song proper starts.
-  if (currentRealLoop && pauseContext) {
-    const entry = currentRealLoop;
-    const { offset, beatsPerBar } = pauseContext;
-    if (entry.player.loaded && entry.player.buffer) {
-      const transportSec = Tone.Transport.seconds;
-      const countInSec = (offset * beatsPerBar * 60) / currentTempo;
-      if (transportSec >= countInSec) {
-        // Already past count-in: start the loop immediately at the right
-        // offset into the buffer so it picks up mid-loop where we left off.
-        const rate = entry.player.playbackRate;
-        const loopLenSec = entry.player.buffer.duration / rate;
-        const songSec = transportSec - countInSec;
-        const bufOffsetSec = (songSec % loopLenSec) * rate;
-        try { entry.player.start(undefined, bufOffsetSec); } catch (e) {}
-      } else {
-        // Still in count-in: schedule the loop to start at song bar 0
-        // (same as the initial launch).
-        Tone.Transport.scheduleOnce(t => {
-          try { entry.player.start(t); } catch (e) {}
-        }, `${offset}:0:0`);
-      }
-    }
-  }
-  Tone.Transport.start();
-  playState = 'playing';
-  const btn = document.getElementById('playBtn');
-  btn.querySelector('.play-glyph').textContent = '⏸';
-  btn.classList.add('playing');
-  document.getElementById('status').textContent = 'Playing';
-  updateLoopControls();
-  updateChordNav();
+  // Naive `Tone.Transport.start()` resume leaves stale events in the
+  // scheduler — a drum hit or comp stab queued ~50ms ahead of pause
+  // can fire on resume out of phase with the rebuilt drum loop, and
+  // the result is the lead, piano, and drums drifting out of sync.
+  // Tear everything down and rebuild from scratch via startPlayback,
+  // which gives a deterministic single-source-of-truth schedule.
+  // The `prerollCountIn` flag rolls Transport BACK by `countInBars`
+  // and fires count-in clicks before resuming the song, both giving
+  // the user a beat to absorb the resume AND covering the half-bar
+  // gap from "paused mid-bar at beat N" → "restart at beat 1 of that
+  // bar" — the sync rebuild only knows whole bars.
+  if (!window.currentSong) return;
+  const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
+  // startPlayback's prerollCountIn requires countInBars > 0 AND the
+  // resume bar to be ≥ countInBars (so we have room to roll back).
+  // For early bars or count-in-disabled, fall through to a plain
+  // mid-song restart — still rebuilds cleanly, just without the
+  // click pre-roll.
+  await startPlayback(
+    window.currentSong.song,
+    expanded,
+    currentPlayingBar,
+    { prerollCountIn: countInBars > 0 }
+  );
 }
 
 function clearHighlight() {
@@ -8530,6 +9770,13 @@ let overlayBeatsOn = false;
 // jazz extension numbering (b9, 9, #9, 11, #11, b13, 13, b7, 7) for
 // non-chord-tones. Off by default; toggling re-renders the chart.
 let overlayScaleDegreesOn = false;
+// Current Note overlay: while playing back, the note currently
+// sounding gets a blue notehead tint AND its note letter painted
+// inside it (same letter style as the "Notes" overlay, but only
+// on the lit note). Off by default; toggling on without playback
+// has no immediate effect — the highlight starts firing on the
+// next playback event.
+let overlayCurrentNoteOn = false;
 // Chord-scale lines (the bold key-name + colored underline showing
 // which span of bars belongs to which key). On by default — they're
 // the most useful sight-reading aid the chart offers. When off, the
@@ -8610,15 +9857,27 @@ function clearScaleDegreesOverlay() {
 }
 
 // Paint scale-degree numbers under every note in every bar.
-function renderAllScaleDegreesOverlays() {
+function renderAllScaleDegreesOverlays(barsArg, tsArg) {
   clearScaleDegreesOverlay();
   if (!overlayScaleDegreesOn) return;
+  // Resolve bars + timesig: accept explicit args from `renderChart`
+  // (where `window.currentSong` may not yet reflect the new song),
+  // otherwise fall back to the global. Same for the toggle-handler
+  // path which fires after a song is fully loaded.
+  let bars = barsArg;
+  let ts = tsArg;
+  if (!bars) {
+    const cs = window.currentSong;
+    if (!cs || !cs.bars) return;
+    bars = cs.bars;
+    ts = cs.timesig;
+  }
   for (let bi = 0; bi < barElements.length; bi++) {
-    if (barElements[bi]) paintScaleDegreesOverlayForBar(bi);
+    if (barElements[bi]) paintScaleDegreesOverlayForBar(bi, bars, ts);
   }
 }
 
-function paintScaleDegreesOverlayForBar(barIdx) {
+function paintScaleDegreesOverlayForBar(barIdx, barsArg, tsArg) {
   if (barIdx == null || barIdx < 0) return;
   const info = barElements[barIdx];
   if (!info || !info.noteEls || !info.noteData) return;
@@ -8628,13 +9887,56 @@ function paintScaleDegreesOverlayForBar(barIdx) {
   // skipping slash continuations and N.C.). For multi-chord bars,
   // a note's beat position determines which chord is "active" for
   // its label. Single-chord bars take the only chord regardless.
-  const cs = window.currentSong;
-  if (!cs || !cs.bars) return;
-  const bar = cs.bars[barIdx % cs.bars.length];
+  //
+  // The renderer uses `expandBarsByRepeats` so the rendered bar
+  // index ranges over the EXPANDED bar list; modulo `bars.length`
+  // walks it back to the unrepeated chart. For Kcl/x "repeat prev
+  // measure" bars (bar.chords is empty or all-slashes), the chord
+  // is inherited from an earlier bar — same fallback the chart-
+  // label code uses below. Without this, every Kcl bar would render
+  // notes with no scale-degree labels.
+  //
+  // bars/ts come from the renderChart call site when available so
+  // we don't read a stale `window.currentSong` during the brief
+  // window between renderChart() and the song-state assignment in
+  // loadSong (the cause of the "wrong scale degrees on first click,
+  // correct on second click" bug).
+  let bars = barsArg;
+  let ts = tsArg;
+  if (!bars) {
+    const cs = window.currentSong;
+    if (!cs || !cs.bars) return;
+    bars = cs.bars;
+    ts = cs.timesig;
+  }
+  const baseIdx = ((barIdx % bars.length) + bars.length) % bars.length;
+  const bar = bars[baseIdx];
   if (!bar) return;
-  const liveChords = (bar.chords || []).filter(c => c && !c.slash && !c.nc);
+  let liveChords = (bar.chords || []).filter(c => c && !c.slash && !c.nc);
+  if (!liveChords.length && bar.repeatPrev) {
+    let cursor = baseIdx;
+    while (cursor >= 0) {
+      const b = bars[cursor];
+      const cs2 = (b.chords || []).filter(c => c && !c.slash && !c.nc);
+      if (cs2.length) { liveChords = cs2; break; }
+      if (!b.repeatPrev || cursor - b.repeatPrev < 0) break;
+      cursor -= b.repeatPrev;
+    }
+  }
   if (!liveChords.length) return;
-  const beatsPerBar = (cs.timesig && cs.timesig.num) || 4;
+  // ts may arrive as either a parsed `{num, denom}` object (when
+  // renderChart called us mid-render) OR as the iRealPro time-sig
+  // string `"44"` / `"34"` etc. (when we fell back to the global).
+  // Parse the string form on demand.
+  let beatsPerBar = 4;
+  if (ts) {
+    if (typeof ts === 'string' && typeof parseTimesig === 'function') {
+      const parsed = parseTimesig(ts);
+      if (parsed && parsed.num) beatsPerBar = parsed.num;
+    } else if (ts.num) {
+      beatsPerBar = ts.num;
+    }
+  }
   const stepsPerBar = beatsPerBar * 6; // 24th-note grid
   // Pre-compute each chord's [startStep, endStep) range in the bar.
   const chordRanges = liveChords.map((ch, ci) => {
@@ -8929,6 +10231,16 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
       renderAllScaleDegreesOverlays();
     });
   }
+  const currentNote = document.getElementById('overlayCurrentNoteToggle');
+  if (currentNote) {
+    currentNote.addEventListener('change', (e) => {
+      overlayCurrentNoteOn = !!e.target.checked;
+      // Toggling OFF mid-playback: strip whatever's currently lit so
+      // the user immediately sees the change. Toggling ON: the next
+      // beat tick paints the next note — no manual repaint needed.
+      if (!overlayCurrentNoteOn) clearNoteHighlight();
+    });
+  }
   if (beats) {
     beats.addEventListener('change', (e) => {
       overlayBeatsOn = !!e.target.checked;
@@ -9073,22 +10385,31 @@ async function restartPlaybackInPlaceWithCountIn() {
 }
 
 // ===== Current-note highlight in the score =====
-// Paint the currently-playing note's stavenote group blue so the reader
-// can track it, same way the scale diagram in the note-info panel lights
-// up its current note. The CSS rule for `.vf-stavenote.lit` forces fill
-// and stroke to the playback-highlight blue.
+// Paint the currently-playing note's stavenote group blue so the
+// reader can track it. Gated on the "Current Note" overlay toggle.
+// Note-letter painting is intentionally NOT done here — the user
+// can flip on the "Note Name" overlay (which paints letters on
+// every note in every bar) alongside Current Note when they want
+// the combined view.
 let lastLitNoteEl = null;
 function clearNoteHighlight() {
   if (lastLitNoteEl) lastLitNoteEl.classList.remove('lit');
   lastLitNoteEl = null;
 }
-function updateNoteHighlight(barIdx, beat) {
-  // Per-note highlight disabled — the current-measure blue wash is
-  // enough visual guidance, and a second blue tint on the note head
-  // was noisy. Kept as a no-op so the rest of the playback loop can
-  // still call it without a null check.
+function updateNoteHighlight(barIdx, step) {
   if (lastLitNoteEl) lastLitNoteEl.classList.remove('lit');
   lastLitNoteEl = null;
+  if (!overlayCurrentNoteOn) return;
+  if (barIdx == null || step == null) return;
+  const info = barElements[barIdx];
+  if (!info || !info.beatToNoteSlot || !info.noteEls || !info.noteData) return;
+  const slotIdx = info.beatToNoteSlot[step];
+  if (slotIdx == null || slotIdx < 0) return;
+  const noteEl = info.noteEls[slotIdx];
+  const nd = info.noteData[slotIdx];
+  if (!noteEl || !nd || nd.pitch == null) return; // rest
+  noteEl.classList.add('lit');
+  lastLitNoteEl = noteEl;
 }
 
 // Draw a practice-loop bracket on the specified bar. `side` is "in" (hollow
@@ -9743,7 +11064,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
           : `${absBar}:${beat}:${sixteenth}`;
         events.push({
           time,
-          type: 'beat', idx: entry.idx, beat, info, measurePitches,
+          type: 'beat', idx: entry.idx, beat, step: s, info, measurePitches,
           attackDurSec
         });
       }
@@ -10104,7 +11425,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
           chordRoot: ev.info.chordRoot,
           measurePitches: ev.measurePitches
         });
-        updateNoteHighlight(ev.idx, ev.beat);
+        updateNoteHighlight(ev.idx, ev.step);
       }, time);
       return;
     }
@@ -11121,7 +12442,7 @@ document.getElementById('playBtn').addEventListener('click', async () => {
   // (the user may have placed the loop while paused; resuming
   // the Transport mid-song would skip past it). Otherwise resume
   // from the pause point as before.
-  if (playState === 'paused' && !hasLoop) { resumePlayback(); return; }
+  if (playState === 'paused' && !hasLoop) { await resumePlayback(); return; }
   const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
   // Pick a starting bar:
   //   - a complete Loop In / Loop Out pair wins → always start at
@@ -11904,7 +13225,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -11972,7 +13293,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
