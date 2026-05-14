@@ -5542,13 +5542,28 @@ function generateExerciseLickQuarterNotes(bars, ts) {
       if (!opt) break;
       if (results[targetBarIdx][cur]) break;
       const isLastInChunk = (remaining === opt.steps);
+      // Tie flags carry TWO independent meanings: within-note
+      // chunking ties (a long note split into pieces, glued back
+      // visually with arcs) and cross-note source ties (an explicit
+      // <tie> in the MusicXML connecting THIS note to a different
+      // note). Both are emitted via the same `tieFromPrev` /
+      // `tieToNext` fields, so we OR them:
+      //   - tieFromPrev: true on any non-first chunk OR on the very
+      //     first chunk if the source said this note continues from
+      //     a prior tie (tieStop).
+      //   - tieToNext: true on any non-last chunk OR on the very
+      //     last chunk if the source said this note continues into
+      //     a following tie (tieStart).
+      // Without the cross-note half, Quote ties (e.g. Quote 2's
+      // bar-1 eighth into bar-2's whole) lose their visual arc.
+      const isPitched = !n.rest;
       results[targetBarIdx][cur] = {
         pitch: n.rest ? null : n.midi,
         tpc:   n.rest ? null : n.tpc,
         duration: opt.dur,
         rest: !!n.rest,
-        tieFromPrev: !first,
-        tieToNext: !isLastInChunk
+        tieFromPrev: (!first) || (isPitched && first && !!n.tieStop),
+        tieToNext:   (!isLastInChunk) || (isPitched && isLastInChunk && !!n.tieStart)
       };
       cur += opt.steps;
       remaining -= opt.steps;
@@ -5575,6 +5590,275 @@ function generateExerciseLickQuarterNotes(bars, ts) {
         if (n.midi != null) n.midi += octShift;
       }
     }
+  }
+
+  // ---- Quote path ----
+  // The lick file is a "Quote N.musicxml" — a short multi-bar
+  // phrase whose chord-relative shape walks THROUGH the song's
+  // form one bar at a time. Each source bar's annotated notes get
+  // scale-step-transposed (stepIdx + alteration against the source
+  // bar's chord → looked up in the target song bar's chord scale)
+  // and placed on the song bar at the same offset within the
+  // current repetition window. The pattern repeats across the
+  // whole form: a 2-bar quote covers bars 0-1, then 2-3, then
+  // 4-5, etc. Bars not covered (remainder when bars % numQuoteBars
+  // isn't zero) are left as rests.
+  if (lick.isQuote && Array.isArray(lick.barNotes) && lick.barNotes.length) {
+    const numQuoteBars = lick.barNotes.length;
+    // Walk backwards through `repeatPrev` links (iRealPro's Kcl / x)
+    // until we find a bar that actually carries chord symbols. A
+    // chord held over multiple measures might be written explicitly
+    // (each bar has its own `chords` entry) OR shorthanded with a
+    // repeat marker on every measure after the first. The shorthand
+    // leaves `bars[bi].chords` empty, and without this fallback the
+    // Quote path would skip those bars entirely — the symptom the
+    // user reported as "no note on the second measure of a held
+    // chord". Mirrors the same chord-resolution `buildChordEventList`
+    // does for the chordEvent list.
+    function resolveBarFirstChord(barIdx) {
+      let cursor = barIdx;
+      while (cursor >= 0 && cursor < bars.length) {
+        const b = bars[cursor];
+        const ch = (b.chords || []).find(c => c && !c.slash && !c.nc);
+        if (ch) return ch;
+        if (!b.repeatPrev || cursor - b.repeatPrev < 0) return null;
+        cursor -= b.repeatPrev;
+      }
+      return null;
+    }
+    // Helpers used per-chunk to track inter-bar voice-leading.
+    const firstPitched = (notes) => {
+      for (const n of notes) {
+        if (!n.rest && typeof n.midi === 'number') return n.midi;
+      }
+      return null;
+    };
+    const lastPitched = (notes) => {
+      for (let k = notes.length - 1; k >= 0; k--) {
+        const n = notes[k];
+        if (!n.rest && n.midi != null) return n.midi;
+      }
+      return null;
+    };
+    for (let startBar = 0; startBar < bars.length; startBar += numQuoteBars) {
+      // Per-quote-application state. Tracks the last pitched note
+      // we just emitted (target) and the last pitched note from
+      // the corresponding source bar, so each subsequent source-bar
+      // can compute the expected "delta" and pick the target octave
+      // that matches it most closely. Reset at the top of every
+      // chunk so quote applications don't drift across repetitions.
+      let prevTargetLast = null;
+      let prevSourceLast = null;
+      for (let q = 0; q < numQuoteBars; q++) {
+        const songBarIdx = startBar + q;
+        if (songBarIdx >= bars.length) break;
+        const sourceNotes = lick.barNotes[q];
+        if (!sourceNotes || !sourceNotes.length) continue;
+        // Target chord: the song bar's first live chord, with Kcl /
+        // repeat-prev fallback handled by `resolveBarFirstChord`.
+        const firstChord = resolveBarFirstChord(songBarIdx);
+        if (!firstChord) continue;
+        // Per-note target resolver. Most notes use the current song
+        // bar's chord, but a tied-across-bar source note (annotated
+        // with useNextBarChord at load time) needs the FOLLOWING
+        // song bar's chord so its scale-step role carries through —
+        // the bar-1 eighth of Quote 2 is "the 3 of Dm7", and over
+        // a target Em7 → Am7 it should become "the 3 of Am7" = C,
+        // not "the b6 of Em7" = C natural by coincidence elsewhere.
+        const resolveNoteTarget = (n) => {
+          const bi = n.useNextBarChord ? songBarIdx + 1 : songBarIdx;
+          if (bi < 0 || bi >= bars.length) return null;
+          const ch = (bi === songBarIdx)
+            ? firstChord
+            : resolveBarFirstChord(bi);
+          if (!ch) return null;
+          const canonical = chordToCanonical(ch);
+          const root = exParseRoot(canonical);
+          const scale = exGetScale(canonical);
+          if (!root || !scale || !scale.length) return null;
+          return { root, scale };
+        };
+        const defaultTarget = resolveNoteTarget({ useNextBarChord: false });
+        if (!defaultTarget) continue;
+        // Scale-step transposition: each source note's stepIdx is
+        // resolved in the TARGET chord's scale, so a Gm6 b3 (= step
+        // 2 of Dorian) over a target G7 becomes step 2 of Mixolydian
+        // = natural 3 (B), not Bb. octaveOffset gives the initial
+        // pitch; the per-bar shift below adjusts the whole bar's
+        // register to preserve the source's inter-bar interval.
+        const transposed = [];
+        for (const n of sourceNotes) {
+          if (n.rest || typeof n.midi !== 'number' || n.stepIdx == null) {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          const tgt = resolveNoteTarget(n) || defaultTarget;
+          const targetRoot = tgt.root;
+          const targetScale = tgt.scale;
+          // Translate the source's diatonic-step index into the
+          // target scale's actual index. For 7-note scales this is
+          // a no-op, but for HW Diminished (8 notes — the b9 chord
+          // scale) step 2 remaps to HW index 3 so a "b3 of Cm7"
+          // lands on the chord's MAJOR 3rd (F♯ on D7♭9) instead of
+          // the b3/♯9 passing tone (F). Same fix the 1235 / 3579
+          // arpeggio generators already use.
+          const realIdx = diatonicIndexInScale(n.stepIdx, targetScale);
+          const len = targetScale.length;
+          const sd = targetScale[((realIdx % len) + len) % len];
+          const alt = n.alteration || 0;
+          const newSemi = sd.s + alt;
+          const newTpc = sd.t + alt * 7;
+          const newMidi = (n.octaveOffset || 0) * 12 + targetRoot.pitchClass + newSemi;
+          const finalTpc = targetRoot.tpc + newTpc;
+          transposed.push(Object.assign({}, n, { midi: newMidi, tpc: finalTpc }));
+        }
+
+        // Tied-out notes (annotated against the NEXT bar's chord)
+        // sit at whatever octave the next-chord's math produced.
+        // That can land them in a different register from the rest
+        // of this bar — e.g. Quote 4's bar-2 G2 is annotated as
+        // "the 5 of C7" → C3 over F7, while the rest of bar 2 sits
+        // around F2. Treating them like regular bar notes lets one
+        // outlier note pull the whole bar's voice-leading anchor
+        // sky-high. So we exclude tied-out notes from both the
+        // shift-validity range check and the shift application,
+        // and post-pass them to land at the octave closest to the
+        // bar's other notes.
+        const tiedOutMask = transposed.map(n => !!n.useNextBarChord);
+        const firstPitchedSkip = (notes, mask) => {
+          for (let k = 0; k < notes.length; k++) {
+            if (mask && mask[k]) continue;
+            const n = notes[k];
+            if (!n.rest && typeof n.midi === 'number') return n.midi;
+          }
+          return null;
+        };
+
+        if (q === 0 || prevTargetLast == null || prevSourceLast == null) {
+          // First bar of the chunk (or no prior pitched anchor):
+          // ordinary octave-fit using the bar's non-tied-out notes
+          // so the line starts inside the cello range. The tied-out
+          // notes keep their raw "next-chord" pitch until the
+          // post-pass below adjusts them.
+          let minPitch = Infinity;
+          for (let k = 0; k < transposed.length; k++) {
+            if (tiedOutMask[k]) continue;
+            const n = transposed[k];
+            if (n.midi != null && n.midi < minPitch) minPitch = n.midi;
+          }
+          let octShift = 0;
+          if (minPitch < Infinity) {
+            while (minPitch + octShift < EX_LOW) octShift += 12;
+            while (minPitch + octShift > EX_LOW + 11) octShift -= 12;
+            if (minPitch + octShift < EX_LOW) octShift += 12;
+          }
+          if (octShift !== 0) {
+            for (let k = 0; k < transposed.length; k++) {
+              if (tiedOutMask[k]) continue;
+              const n = transposed[k];
+              if (n.midi != null) n.midi += octShift;
+            }
+          }
+        } else {
+          // Subsequent bar: preserve the source's last-to-first
+          // interval direction by choosing the octave of THIS
+          // bar's first pitched note that most closely matches the
+          // source delta from `prevSourceLast`. Then shift the
+          // non-tied-out notes by the chosen offset (tied-out
+          // notes are handled in the post-pass).
+          const sourceFirst = firstPitched(sourceNotes);
+          const targetFirstRaw = firstPitchedSkip(transposed, tiedOutMask);
+          if (sourceFirst != null && targetFirstRaw != null) {
+            const sourceDelta = sourceFirst - prevSourceLast;
+            let bestPitch = targetFirstRaw;
+            let bestErr = Math.abs(sourceDelta - (targetFirstRaw - prevTargetLast));
+            for (let octShift = -36; octShift <= 36; octShift += 12) {
+              if (octShift === 0) continue;
+              const candidate = targetFirstRaw + octShift;
+              if (candidate < EX_LOW || candidate > EX_HIGH) continue;
+              // Reject only if the whole-bar shift would push a
+              // NON-tied-out note out of range. Tied-out notes
+              // don't participate — they get re-anchored later.
+              let ok = true;
+              for (let k = 0; k < transposed.length; k++) {
+                if (tiedOutMask[k]) continue;
+                const tn = transposed[k];
+                if (tn.midi == null) continue;
+                const p = tn.midi + octShift;
+                if (p < EX_LOW || p > EX_HIGH) { ok = false; break; }
+              }
+              if (!ok) continue;
+              const candDelta = candidate - prevTargetLast;
+              const err = Math.abs(sourceDelta - candDelta);
+              if (err < bestErr) {
+                bestErr = err;
+                bestPitch = candidate;
+              }
+            }
+            const shift = bestPitch - targetFirstRaw;
+            if (shift !== 0) {
+              for (let k = 0; k < transposed.length; k++) {
+                if (tiedOutMask[k]) continue;
+                const tn = transposed[k];
+                if (tn.midi != null) tn.midi += shift;
+              }
+            }
+          } else {
+            // Source or target bar had no pitched notes — fall
+            // back to plain octave-fit.
+            octaveFit(transposed);
+          }
+        }
+
+        // Post-pass: anchor each tied-out note to the octave
+        // closest to the bar's RUNNING non-tied-out pitch. This is
+        // the "Quote 4 bar-2 G2 → C2 instead of C3" fix — the
+        // tied-out note plays out the end of the bar, so it should
+        // sit with the bar's other notes, not at whatever octave
+        // its next-chord scale-step math produced. The next bar's
+        // first note (the tied:stop continuation) then voice-leads
+        // from this placed pitch and lands on the same pitch
+        // naturally, preserving the tied chain at a unified
+        // register.
+        let runningPitch = (prevTargetLast != null) ? prevTargetLast : 41;
+        for (let k = 0; k < transposed.length; k++) {
+          const tn = transposed[k];
+          if (tn.midi == null) continue;
+          if (tiedOutMask[k]) {
+            let bestP = tn.midi;
+            let bestD = Math.abs(tn.midi - runningPitch);
+            for (let octShift = -36; octShift <= 36; octShift += 12) {
+              if (octShift === 0) continue;
+              const cand = tn.midi + octShift;
+              if (cand < EX_LOW || cand > EX_HIGH) continue;
+              const d = Math.abs(cand - runningPitch);
+              if (d < bestD) {
+                bestD = d;
+                bestP = cand;
+              }
+            }
+            tn.midi = bestP;
+            // Don't update runningPitch — tied-out notes don't
+            // anchor subsequent non-tied notes (and they're
+            // typically the last note of the bar anyway).
+          } else {
+            runningPitch = tn.midi;
+          }
+        }
+
+        // Update voice-leading anchors for the next bar in chunk.
+        // We DO include the tied-out's placed pitch in
+        // prevTargetLast so the next bar's first note (the tied
+        // continuation) voice-leads to the same pitch.
+        const srcLast = lastPitched(sourceNotes);
+        const tgtLast = lastPitched(transposed);
+        if (srcLast != null) prevSourceLast = srcLast;
+        if (tgtLast != null) prevTargetLast = tgtLast;
+
+        for (const tn of transposed) emitNoteIntoBar(songBarIdx, tn);
+      }
+    }
+    return { results, chordEvents, patterns, effective, subdivisions: 6 };
   }
 
   // ---- Multi-bar 251 lick path ----
@@ -5823,8 +6107,13 @@ function generateExerciseLickQuarterNotes(bars, ts) {
           out.push({ ...n, midi: null, tpc: null });
           continue;
         }
+        // diatonicIndexInScale remaps "step 2 of a 7-tone source"
+        // onto the chord-tone slot (not the b3/♯9 passing tone) for
+        // HW Diminished targets — see the Quote path's comment for
+        // the full rationale.
+        const realIdx = diatonicIndexInScale(n.stepIdx, targetScale);
         const len = targetScale.length;
-        const sd = targetScale[((n.stepIdx % len) + len) % len];
+        const sd = targetScale[((realIdx % len) + len) % len];
         const newSemi = sd.s + n.alteration;
         const newTpc = sd.t + n.alteration * 7;
         // octaveOffset is the absolute octave count (computed at
@@ -9441,6 +9730,27 @@ let guitar; // Sampler used by the "Play Score" switch.
 // Real drum loops, looped via the Transport. Each entry records the source
 // bpm so playbackRate can be adapted if the user-selected tempo differs.
 const realLoops = {};  // key "ballad-4/4" → { player, sourceBpm }
+// Map a tempo value to a loop tier. Tier names match the realLoops
+// key prefix. Boundaries are chosen so the tempo-seg buttons (80,
+// 100, 120, 180) each land on their own dedicated source-bpm file
+// when one exists. Anything in between picks the nearest tier and
+// rate-shifts inside `startPlayback`.
+function tempoTierFor(t) {
+  if (t < 90) return 'ballad';     // 80 BPM file
+  if (t < 110) return 'med-slow';  // 100 BPM file (4/4 only)
+  if (t < 150) return 'medium';    // 120 BPM file
+  return 'up';                      // 180 BPM file
+}
+// Resolve (tier, ts) → realLoops key, with a fallback for tier
+// combinations we don't have a recorded file for (e.g. med-slow has
+// no 3/4 file — falls back to medium-3/4 and the playbackRate
+// compensation in startPlayback handles the 100 → 120 BPM offset).
+function tempoLoopKey(tier, ts) {
+  const key = tier + '-' + (ts && ts.str);
+  if (realLoops[key]) return key;
+  if (tier === 'med-slow') return 'medium-' + (ts && ts.str);
+  return key; // fall through; caller handles missing entries
+}
 let currentRealLoop = null;
 let drumMode = 'ride'; // 'hat' | 'ride' | 'click'
 let countInBars = 1;  // 0, 1, or 2 measures of click before the song starts
@@ -9643,6 +9953,25 @@ async function initAudio() {
       loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
     }).connect(drumsOut),
     beats: 16 // 4 bars of 4/4
+  };
+  // 100 BPM files — their own bucket so the 100 BPM tempo button
+  // plays at the recorded tempo with no playbackRate compensation
+  // in either time signature. tempoLoopKey() still has the
+  // 'med-slow' → 'medium' fallback as a safety net for any other
+  // (tier, time-sig) gap that ever shows up.
+  realLoops['med-slow-4/4'] = {
+    player: new Tone.Player({
+      url: 'drums/medium-4-4-100bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 16 // 4 bars of 4/4
+  };
+  realLoops['med-slow-3/4'] = {
+    player: new Tone.Player({
+      url: 'drums/medium-3-4-100bpm.mp3',
+      loop: true, autostart: false, fadeIn: 0.005, fadeOut: 0.005, volume: 0
+    }).connect(drumsOut),
+    beats: 12 // 4 bars of 3/4
   };
   realLoops['up-4/4'] = {
     player: new Tone.Player({
@@ -11140,15 +11469,16 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       }
     } else if (drumMode === 'ride') {
       // "Real" mode — pick a groove based on the tempo tier.
-      //   Ballad (≤ 100): brush sweep + taps on 2 & 4
-      //   Medium (≤ 150): crisp hi-hat ride (spang-a-lang with real hihat sample)
-      //   Up (> 150):     quick brush shuffle (swung 8ths on brush tap)
-      const tempoTier = currentTempo < 100 ? 'ballad' : (currentTempo < 150 ? 'medium' : 'up');
+      //   Ballad   (< 90):    brush sweep + taps on 2 & 4
+      //   Med-slow (90-109):  crisp hi-hat ride at 100 BPM source
+      //   Medium   (110-149): crisp hi-hat ride at 120 BPM source
+      //   Up       (≥ 150):   quick brush shuffle (swung 8ths)
+      const tempoTier = tempoTierFor(currentTempo);
 
       if (tempoTier === 'ballad') {
         // Prefer the real recorded loop when we have one for this time sig.
         // Otherwise fall back to the synthesized brush layer.
-        const loopKey = 'ballad-' + ts.str;
+        const loopKey = tempoLoopKey('ballad', ts);
         if (realLoops[loopKey] && realLoops[loopKey].player.loaded) {
           // nothing to push — the player is started once after the event loop.
         } else if (beatsPerBar === 4) {
@@ -11166,10 +11496,13 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
             events.push({ time: `${absBar}:${b}:0`, type: 'brushTap' });
           }
         }
-      } else if (tempoTier === 'medium') {
-        // Prefer the real recorded loop for this time sig; otherwise fall
-        // back to the synthesized crisp hi-hat spang-a-lang.
-        const loopKey = 'medium-' + ts.str;
+      } else if (tempoTier === 'medium' || tempoTier === 'med-slow') {
+        // Both the 120 BPM medium loop and the 100 BPM med-slow loop
+        // share the same crisp hi-hat ride pattern — only the source
+        // BPM differs. Prefer the recorded loop; fall back to the
+        // synthesized spang-a-lang when no file exists for this
+        // (tier, time-sig) pairing.
+        const loopKey = tempoLoopKey(tempoTier, ts);
         if (realLoops[loopKey] && realLoops[loopKey].player.loaded) {
           // handled by the loop sync after the event loop
         } else if (beatsPerBar === 4) {
@@ -11191,7 +11524,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
         }
       } else {
         // Up tempo: prefer the recorded loop; otherwise synthesized brush shuffle.
-        const loopKey = 'up-' + ts.str;
+        const loopKey = tempoLoopKey('up', ts);
         if (realLoops[loopKey] && realLoops[loopKey].player.loaded) {
           // handled by the loop sync after the event loop
         } else {
@@ -11517,8 +11850,8 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
   currentRealLoop = null;
   let midSongDrum = null; // set when we'll start the drum synchronously below
   if (drumMode === 'ride') {
-    const tempoTier2 = currentTempo < 100 ? 'ballad' : (currentTempo < 150 ? 'medium' : 'up');
-    const key = tempoTier2 + '-' + ts.str;
+    const tempoTier2 = tempoTierFor(currentTempo);
+    const key = tempoLoopKey(tempoTier2, ts);
     const entry = realLoops[key];
     if (entry && entry.player.loaded && entry.player.buffer) {
       // Derive the loop's actual bpm from its audio duration so any tiny
@@ -12562,9 +12895,8 @@ document.querySelectorAll('#tempoSeg button').forEach(b => {
     // The "Real" drum mode picks its pattern (brushes / hi-hat / shuffle)
     // based on tempo tier, so we need to rebuild the part when the tier
     // actually changes during playback.
-    const tier = (t) => t < 100 ? 'ballad' : (t < 150 ? 'medium' : 'up');
     if (playState === 'playing' && window.currentSong && drumMode === 'ride' &&
-        tier(prevTempo) !== tier(currentTempo)) {
+        tempoTierFor(prevTempo) !== tempoTierFor(currentTempo)) {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded);
     }
@@ -12854,6 +13186,133 @@ async function loadExerciseLick(filename) {
     return null;
   }
   if (!parsed || !Array.isArray(parsed.notes) || !parsed.notes.length) return null;
+
+  // Quote detection. Filename starting with "Quote " (e.g.
+  // "Quote 1.musicxml") is treated as a multi-bar phrase whose
+  // chord-relative shape is mapped THROUGH the song's form rather
+  // than placed once at a matching progression. Each source bar's
+  // notes are scale-step-transposed against the song's bar at the
+  // same offset, then the whole pattern repeats — bar 1 of the
+  // quote goes on song bar 1, bar 2 on song bar 2, then quote bar 1
+  // again on song bar 3, etc. So a "Gm6 (G A B♭) / Cm7 (E♭)" quote
+  // applied to a song that opens "Dm7 / G7" becomes
+  // "Dm7 (D E F) / G7 (B)" (b3 of Gm becomes the scale's 3rd of
+  // Mixolydian = natural 3 on G7).
+  //
+  // Detection is by filename only so the MusicXML itself doesn't
+  // need any special markers — drop a "Quote N.musicxml" in the
+  // licks/ folder with one chord per bar and the algorithm picks
+  // it up automatically.
+  if (dom && /^quote\s/i.test(filename)) {
+    const events = parseHarmonyEvents(dom);
+    const ts = parseTimeSignatureFromMusicXML(dom);
+    const stepsPerBar = ts.num * 6;
+    // Per-bar chord lookup. If a measure has multiple harmonies the
+    // first one wins (Quote convention is one chord per source bar).
+    const chordByMeasure = new Map();
+    for (const ev of events) {
+      if (!chordByMeasure.has(ev.measureIdx)) chordByMeasure.set(ev.measureIdx, ev.chord);
+    }
+    // Number of source bars: covers every measure that carries notes.
+    let maxStep = 0;
+    for (const n of parsed.notes) {
+      const end = (n.stepStart || 0) + (n.durationSteps || 6);
+      if (end > maxStep) maxStep = end;
+    }
+    const numBars = Math.max(1, Math.ceil(maxStep / stepsPerBar));
+    // Bucket notes by source bar (stepStart re-anchored to 0 so the
+    // generator can drop the bar onto any target song bar without
+    // doing offset math itself).
+    const barNotes = [];
+    const barChords = [];
+    for (let b = 0; b < numBars; b++) {
+      barNotes.push([]);
+      barChords.push(chordByMeasure.get(b) || null);
+    }
+    for (const n of parsed.notes) {
+      const b = Math.floor((n.stepStart || 0) / stepsPerBar);
+      if (b < 0 || b >= numBars) continue;
+      barNotes[b].push(Object.assign({}, n, {
+        stepStart: (n.stepStart || 0) - b * stepsPerBar
+      }));
+    }
+    // Annotate each bar's notes with (stepIdx, alteration, octaveOffset)
+    // against the bar's source chord/scale.
+    //
+    // Cross-bar tie handling: when a note has tieStart === true and
+    // its duration reaches the end of the bar, it ties INTO the next
+    // bar. Its musical identity belongs to the NEXT bar's chord
+    // context — Quote 2's bar-1 last eighth is an F that's the 3 of
+    // bar-2's Dm7, not a b6 of bar-1's Am7. To carry that intent
+    // through transposition we annotate the note against the NEXT
+    // bar's chord (so stepIdx/alteration describe its role under
+    // the chord it lands on), and set `useNextBarChord: true` so
+    // the generator looks up the target chord from the FOLLOWING
+    // song bar at apply time.
+    const annotateNote = (n, chord) => {
+      if (n.rest || typeof n.midi !== 'number' || !chord) {
+        return Object.assign({}, n, { stepIdx: null, alteration: null });
+      }
+      const canonical = chordToCanonical(chord);
+      const sourceRoot = exParseRoot(canonical);
+      const sourceScale = exGetScale(canonical);
+      if (!sourceRoot || !sourceScale || !sourceScale.length) {
+        return Object.assign({}, n, { stepIdx: null, alteration: null });
+      }
+      const semi = (((n.midi - sourceRoot.pitchClass) % 12) + 12) % 12;
+      const tpcOff = n.tpc - sourceRoot.tpc;
+      let stepIdx = 0, alteration = 0;
+      // Exact (semi, tpc) match first.
+      outer: for (const alt of [0, 1, -1, 2, -2]) {
+        for (let i = 0; i < sourceScale.length; i++) {
+          const expSemi = (((sourceScale[i].s + alt) % 12) + 12) % 12;
+          const expTpc = sourceScale[i].t + alt * 7;
+          if (expSemi === semi && expTpc === tpcOff) {
+            stepIdx = i; alteration = alt; break outer;
+          }
+        }
+      }
+      // Loose semi-only match if exact failed.
+      if (stepIdx === 0 && alteration === 0
+          && !(sourceScale[0].s === semi && sourceScale[0].t === tpcOff)) {
+        outer2: for (const alt of [0, 1, -1, 2, -2]) {
+          for (let i = 0; i < sourceScale.length; i++) {
+            const expSemi = (((sourceScale[i].s + alt) % 12) + 12) % 12;
+            if (expSemi === semi) {
+              stepIdx = i; alteration = alt; break outer2;
+            }
+          }
+        }
+      }
+      const octaveOffset = Math.floor((n.midi - sourceRoot.pitchClass) / 12);
+      return Object.assign({}, n, { stepIdx, alteration, octaveOffset });
+    };
+    for (let b = 0; b < numBars; b++) {
+      barNotes[b] = barNotes[b].map(n => {
+        // Cross-bar tie: tieStart === true AND the note's footprint
+        // reaches the end of its bar AND the next bar exists with a
+        // chord. Those conditions describe a tie that crosses the
+        // bar line into the next chord's territory.
+        const tiesAcross = n.tieStart === true
+          && (Math.round(n.stepStart || 0) + Math.round(n.durationSteps || 0) >= stepsPerBar)
+          && (b + 1) < numBars
+          && barChords[b + 1] != null;
+        const chord = tiesAcross ? barChords[b + 1] : barChords[b];
+        const annotated = annotateNote(n, chord);
+        if (tiesAcross) annotated.useNextBarChord = true;
+        return annotated;
+      });
+    }
+    const data = {
+      isQuote: true,
+      barNotes,
+      barChords,
+      stepsPerBar,
+      ts
+    };
+    _exerciseLickCache.set(filename, data);
+    return data;
+  }
 
   // Multi-bar 251 detection. Two layouts are recognized — both
   // resolve to a ii-V-I (m7 → 7 → Maj7/6) or ii°-V-i
