@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=107" />
+<link rel="stylesheet" href="style.css?v=108" />
 </head>
 <body>
 <div id="app">
@@ -294,18 +294,20 @@
       <div class="fb-grid" id="fbGrid"></div>
     </div>
     <div id="gamePanel" class="game-panel" hidden>
-      <div class="game-score">
-        <span class="game-correct" id="gameCorrectCount" title="Correct notes">0</span>
-        <span class="game-mistakes" id="gameMistakeCount" title="Mistakes">0</span>
-        <button type="button" id="gameResetBtn" class="game-reset-btn" aria-label="Reset game">↺</button>
-      </div>
-      <div class="game-keyboard" id="gameKeyboard">
+      <div class="game-keyboard game-keyboard-left" id="gameKeyboardLeft">
         <button type="button" class="game-key" data-pc="0">C</button>
         <button type="button" class="game-key" data-pc="1">D♭ / C♯</button>
         <button type="button" class="game-key" data-pc="2">D</button>
         <button type="button" class="game-key" data-pc="3">E♭ / D♯</button>
         <button type="button" class="game-key" data-pc="4">E</button>
         <button type="button" class="game-key" data-pc="5">F</button>
+      </div>
+      <div class="game-score">
+        <span class="game-correct" id="gameCorrectCount" title="Correct notes">0</span>
+        <span class="game-mistakes" id="gameMistakeCount" title="Mistakes">0</span>
+        <button type="button" id="gameResetBtn" class="game-reset-btn" aria-label="Reset game">↺</button>
+      </div>
+      <div class="game-keyboard game-keyboard-right" id="gameKeyboardRight">
         <button type="button" class="game-key" data-pc="6">G♭ / F♯</button>
         <button type="button" class="game-key" data-pc="7">G</button>
         <button type="button" class="game-key" data-pc="8">A♭ / G♯</button>
@@ -319,7 +321,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v3.85</span>
+      <span class="app-version" id="appVersion">v3.86</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -327,7 +329,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=497"></script>
+<script src="app.js?v=498"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

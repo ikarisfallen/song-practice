@@ -728,7 +728,10 @@ main {
   border-radius: 6px;
   display: flex;
   align-items: stretch;
-  gap: 12px;
+  /* Match the inter-cell gap of the keyboards so the score column
+     between the two keyboard halves reads as a continuation of
+     the same grid spacing rather than a distinct gutter. */
+  gap: 6px;
 }
 .game-panel[hidden] { display: none; }
 /* Fixed-width score area so 1-, 2-, and 3-digit values all occupy
@@ -764,10 +767,15 @@ main {
 .game-reset-btn:hover { background: #f0f0f0; }
 /* 4×3 chromatic keyboard. Each cell shows the natural name with
    enharmonic equivalent beneath for sharp/flat keys. */
+/* Keyboard halves: each holds 6 keys in a 3-column × 2-row grid. The
+   panel lays them out as [left-keyboard | score | right-keyboard]
+   with the same gap as between the cells inside each half, so the
+   whole thing reads as one continuous grid with the score sitting
+   in the middle. */
 .game-keyboard {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   grid-auto-rows: 1fr;
   gap: 6px;
   min-height: 140px;

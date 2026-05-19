@@ -16301,9 +16301,11 @@ function gameSetMode(on) {
   if (btn) {
     btn.addEventListener('click', () => gameSetMode(!gameMode));
   }
-  const kb = document.getElementById('gameKeyboard');
-  if (kb) {
-    kb.addEventListener('click', (e) => {
+  // Two keyboard halves now: left (C..F) and right (G♭..B), with the
+  // score column between them. Both bind the same click handler.
+  const gamePanel = document.getElementById('gamePanel');
+  if (gamePanel) {
+    gamePanel.addEventListener('click', (e) => {
       const t = e.target.closest('.game-key');
       if (!t) return;
       const pc = parseInt(t.dataset.pc, 10);
