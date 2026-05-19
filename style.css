@@ -731,32 +731,35 @@ main {
   gap: 12px;
 }
 .game-panel[hidden] { display: none; }
+/* Fixed-width score area so 1-, 2-, and 3-digit values all occupy
+   the same horizontal slice — keeps the keyboard on the right from
+   shifting when the counter rolls from 99 → 100. */
 .game-score {
   flex-shrink: 0;
-  min-width: 110px;
+  width: 70px;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 4px;
   font-family: serif;
-  font-size: 42px;
+  font-size: 21px;
   font-weight: bold;
+  line-height: 1.1;
 }
 .game-correct { color: #000; }
 .game-mistakes { color: #c92a2a; }
-.game-divider  { color: #888; font-weight: normal; }
 .game-reset-btn {
-  margin-left: 8px;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   border: 1px solid #888;
   background: #fff;
   color: #333;
-  font-size: 20px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  align-self: center;
+  margin-top: 2px;
 }
 .game-reset-btn:hover { background: #f0f0f0; }
 /* 4×3 chromatic keyboard. Each cell shows the natural name with
@@ -764,10 +767,10 @@ main {
 .game-keyboard {
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   grid-auto-rows: 1fr;
   gap: 6px;
-  min-height: 180px;
+  min-height: 140px;
 }
 .game-key {
   display: flex;
