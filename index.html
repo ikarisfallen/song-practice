@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=108" />
+<link rel="stylesheet" href="style.css?v=110" />
 </head>
 <body>
 <div id="app">
@@ -295,12 +295,12 @@
     </div>
     <div id="gamePanel" class="game-panel" hidden>
       <div class="game-keyboard game-keyboard-left" id="gameKeyboardLeft">
-        <button type="button" class="game-key" data-pc="0">C</button>
-        <button type="button" class="game-key" data-pc="1">D♭ / C♯</button>
-        <button type="button" class="game-key" data-pc="2">D</button>
-        <button type="button" class="game-key" data-pc="3">E♭ / D♯</button>
-        <button type="button" class="game-key" data-pc="4">E</button>
-        <button type="button" class="game-key" data-pc="5">F</button>
+        <button type="button" class="game-key pos-0" data-pc="0">C</button>
+        <button type="button" class="game-key pos-1" data-pc="5">F</button>
+        <button type="button" class="game-key pos-2" data-pc="10">B♭ / A♯</button>
+        <button type="button" class="game-key pos-3" data-pc="3">E♭ / D♯</button>
+        <button type="button" class="game-key pos-4" data-pc="8">A♭ / G♯</button>
+        <button type="button" class="game-key pos-5" data-pc="1">D♭ / C♯</button>
       </div>
       <div class="game-score">
         <span class="game-correct" id="gameCorrectCount" title="Correct notes">0</span>
@@ -308,12 +308,12 @@
         <button type="button" id="gameResetBtn" class="game-reset-btn" aria-label="Reset game">↺</button>
       </div>
       <div class="game-keyboard game-keyboard-right" id="gameKeyboardRight">
-        <button type="button" class="game-key" data-pc="6">G♭ / F♯</button>
-        <button type="button" class="game-key" data-pc="7">G</button>
-        <button type="button" class="game-key" data-pc="8">A♭ / G♯</button>
-        <button type="button" class="game-key" data-pc="9">A</button>
-        <button type="button" class="game-key" data-pc="10">B♭ / A♯</button>
-        <button type="button" class="game-key" data-pc="11">B</button>
+        <button type="button" class="game-key pos-0" data-pc="7">G</button>
+        <button type="button" class="game-key pos-1" data-pc="2">D</button>
+        <button type="button" class="game-key pos-2" data-pc="9">A</button>
+        <button type="button" class="game-key pos-3" data-pc="4">E</button>
+        <button type="button" class="game-key pos-4" data-pc="11">B</button>
+        <button type="button" class="game-key pos-5" data-pc="6">G♭ / F♯</button>
       </div>
     </div>
   </div>
@@ -321,7 +321,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v3.86</span>
+      <span class="app-version" id="appVersion">v3.88</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
