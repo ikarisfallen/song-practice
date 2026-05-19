@@ -768,18 +768,25 @@ main {
 .game-reset-btn:hover { background: #f0f0f0; }
 /* 4×3 chromatic keyboard. Each cell shows the natural name with
    enharmonic equivalent beneath for sharp/flat keys. */
-/* Circle-of-fifths keyboard. Each half is a half-ring of 6 circular
-   keys positioned along a semicircle. The full circle would be
-   completed if you joined the two halves through the score column
-   in the middle. Left half (top → bottom): C, F, B♭/A♯, E♭/D♯,
-   A♭/G♯, D♭/C♯ (counterclockwise / flat side of the circle of
-   fifths). Right half (top → bottom): G, D, A, E, B, G♭/F♯
-   (clockwise / sharp side). Keys are 64px circles — large enough
-   for thumb-tapping on a phone. */
+/* Circle-of-fifths keyboard, C-shape layout. Each half forms the
+   letter C (left) or its horizontal mirror (right). 6 keys per
+   half arranged in a 2-column × 4-row grid where the inner column
+   only has cells at the top and bottom — leaving the score column
+   visible through the C's opening.
+   Left side (C-shape, opening to the right toward the score):
+     F (top-left)       C (top-right, inner)
+     B♭/A♯              .
+     E♭/D♯              .
+     A♭/G♯ (bot-left)   D♭/C♯ (bot-right, inner)
+   Right side (mirrored C, opening to the left):
+     G (top-left, inner)   D (top-right)
+     .                     A
+     .                     E
+     G♭/F♯ (bot-left, in)  B (bot-right) */
 .game-keyboard {
   position: relative;
-  width: 160px;
-  height: 264px;
+  width: 198px;
+  height: 274px;
   flex: 0 0 auto;
 }
 .game-key {
@@ -788,15 +795,16 @@ main {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 64px;
+  /* 50% wider than the previous 64px circles, same 64px height. */
+  width: 96px;
   height: 64px;
   padding: 0;
   border: 1px solid #888;
   background: #f5f5f5;
   color: #000;
-  border-radius: 50%;
+  border-radius: 8px;
   font-family: serif;
-  font-size: 14px;
+  font-size: 17px;
   font-weight: bold;
   white-space: nowrap;
   cursor: pointer;
@@ -808,31 +816,29 @@ main {
 .game-key.pressed { background: #cfe6f5; border-color: #3da9fc; }
 .game-key.flash-correct { background: #b8e6b8; border-color: #2b8a3e; }
 .game-key.flash-wrong   { background: #f5b5b5; border-color: #c92a2a; }
-/* Half-ring geometry (computed with R=100, K=64, container 160×264):
-   the C/G keys sit flush with the top inner corner, D♭/G♭ keys sit
-   flush with the bottom inner corner, and the middle pair on each
-   side (B♭/A♯ + E♭/D♯ on the left, A + E on the right) pushes all
-   the way out to the OUTSIDE edge of the container — almost touching
-   the screen edge. Angles for the 6 keys per half: θ = i·π/5 for
-   i = 0..5. Center of arc = (W − K/2, H/2) on the left, (K/2, H/2)
-   on the right, with the keys placed at center + R·(±sin θ, −cos θ).
-*/
-/* Left half-ring: keys hug the right edge at extremes, the middle
-   pair pushes all the way out to the left edge of the container. */
-.game-keyboard-left .game-key.pos-0 { left: 96px; top: 0px;   }
-.game-keyboard-left .game-key.pos-1 { left: 37px; top: 19px;  }
-.game-keyboard-left .game-key.pos-2 { left: 1px;  top: 69px;  }
-.game-keyboard-left .game-key.pos-3 { left: 1px;  top: 131px; }
-.game-keyboard-left .game-key.pos-4 { left: 37px; top: 181px; }
-.game-keyboard-left .game-key.pos-5 { left: 96px; top: 200px; }
-/* Right half-ring: mirror — middle pair pushes out to the right
-   edge, top/bottom keys flush with the inner (left) edge. */
-.game-keyboard-right .game-key.pos-0 { left: 0px;  top: 0px;   }
-.game-keyboard-right .game-key.pos-1 { left: 59px; top: 19px;  }
-.game-keyboard-right .game-key.pos-2 { left: 95px; top: 69px;  }
-.game-keyboard-right .game-key.pos-3 { left: 95px; top: 131px; }
-.game-keyboard-right .game-key.pos-4 { left: 59px; top: 181px; }
-.game-keyboard-right .game-key.pos-5 { left: 0px;  top: 200px; }
+/* C-shape grid coordinates. Cell stride = 102 wide, 70 tall
+   (96px key + 6px gap). Inner column = left:102 on the LEFT side
+   (closer to the score), left:0 on the RIGHT side. */
+/* LEFT C-shape — outer column on the LEFT edge, inner column on
+   the RIGHT edge (next to the score). pos-1 (F) is the top-left
+   corner; pos-4 (A♭/G♯) is the bottom-left corner. C and D♭/C♯
+   sit on the inner column at top and bottom. */
+.game-keyboard-left .game-key.pos-0 { left: 102px; top: 0px;   } /* C        */
+.game-keyboard-left .game-key.pos-1 { left: 0px;   top: 0px;   } /* F        */
+.game-keyboard-left .game-key.pos-2 { left: 0px;   top: 70px;  } /* B♭/A♯   */
+.game-keyboard-left .game-key.pos-3 { left: 0px;   top: 140px; } /* E♭/D♯   */
+.game-keyboard-left .game-key.pos-4 { left: 0px;   top: 210px; } /* A♭/G♯   */
+.game-keyboard-left .game-key.pos-5 { left: 102px; top: 210px; } /* D♭/C♯   */
+/* RIGHT mirrored-C — outer column on the RIGHT edge, inner column
+   on the LEFT edge (next to the score). pos-1 (D) is the top-right
+   corner; pos-4 (B) is the bottom-right corner. G and G♭/F♯ sit
+   on the inner column. */
+.game-keyboard-right .game-key.pos-0 { left: 0px;   top: 0px;   } /* G        */
+.game-keyboard-right .game-key.pos-1 { left: 102px; top: 0px;   } /* D        */
+.game-keyboard-right .game-key.pos-2 { left: 102px; top: 70px;  } /* A        */
+.game-keyboard-right .game-key.pos-3 { left: 102px; top: 140px; } /* E        */
+.game-keyboard-right .game-key.pos-4 { left: 102px; top: 210px; } /* B        */
+.game-keyboard-right .game-key.pos-5 { left: 0px;   top: 210px; } /* G♭/F♯   */
 /* Hide a note in the score (used by game mode to obscure
    not-yet-guessed notes). visibility:hidden keeps layout intact so
    barlines and beats stay positioned correctly. */
