@@ -1367,6 +1367,268 @@ function generateWalkTriadQuarterNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// "Mixed Triads": for each chord, plays a non-linear permutation of
+// the 1, 3, 5 chord tones. Each bar visits the 3 chord-tone degrees
+// with one degree repeated (sometimes as a back-to-back octave move).
+//
+// User-supplied patterns for a 4-beat bar over one chord:
+//   "1 5 3 1"       — root, fifth, third, root
+//   "1 3 1 5"       — root, third, root, fifth
+//   "5 1 3 5"       — fifth, root, third, fifth
+//   "1 1(oct) 5 3"  — root, root an octave away, fifth, third
+//   "5 5(oct) 1 3"  — fifth, fifth an octave away, root, third
+//
+// Each beat's pitch is the chord-tone-of-target-degree closest to the
+// PREVIOUS beat's pitch. When two adjacent beats share the same degree
+// (e.g. "1 1(oct)") the realizer forces an octave shift so the line
+// never repeats the same pitch back-to-back. Beat 1 of each chord is
+// voice-led from the previous chord's LAST beat (chained across bars)
+// with a sine-wave drift center for gentle ascending/descending shape.
+function generateMixedTriadsQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // Seeded PRNG (mulberry32) for deterministic output across re-renders.
+  function mulberry32(a) {
+    return function() {
+      let t = a += 0x6D2B79F5;
+      t = Math.imul(t ^ t >>> 15, t | 1);
+      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  const rng = mulberry32(0x4D495854); // "MIXT"
+
+  // Chord tones grouped by degree: { 0: [{pitch,tpc,...}, ...], 2: [...], 4: [...] }
+  // for the 1, 3, 5 chord tones. Uses diatonicIndexInScale so HW
+  // Diminished (over 7♭9 chords) still maps to the chord's REAL 3/5.
+  function chordTonesByDegree(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    const byDeg = {};
+    if (!chordScale || chordScale.length === 0) return byDeg;
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    for (const d of [0, 2, 4]) {
+      const idx = diatonicIndexInScale(d, chordScale);
+      if (idx >= chordScale.length) continue;
+      const sd = chordScale[idx];
+      const pc = ((rootPc + sd.s) % 12 + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      const pitches = [];
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) {
+          pitches.push({ pitch: p, tpc, pc, degree: d });
+        }
+      }
+      if (pitches.length > 0) byDeg[d] = pitches;
+    }
+    return byDeg;
+  }
+  const tonesByDeg = chordEvents.map(chordTonesByDegree);
+
+  // Closest pitch of a specific degree to refPitch.
+  function pitchForDegree(byDeg, degree, refPitch) {
+    const cands = byDeg[degree];
+    if (!cands || cands.length === 0) return null;
+    let best = cands[0];
+    let bestDist = Math.abs(best.pitch - refPitch);
+    for (let i = 1; i < cands.length; i++) {
+      const d = Math.abs(cands[i].pitch - refPitch);
+      if (d < bestDist) { bestDist = d; best = cands[i]; }
+    }
+    return best;
+  }
+
+  // Drift center: oscillates between low and high cello register so
+  // the line gently ascends and descends across the song instead of
+  // grinding on one register.
+  const driftLow = EX_LOW + 4;
+  const driftHigh = EX_HIGH - 4;
+  const driftRange = driftHigh - driftLow;
+  function driftCenter(ci) {
+    const phase = (ci / 14) * 2 * Math.PI;
+    const v = (Math.sin(phase) + 1) / 2;
+    return driftLow + v * driftRange;
+  }
+
+  // Pick a degree sequence (length numBeats) starting with beat1Deg.
+  // For 4-beat bars, samples from the user-supplied patterns
+  // ("1 5 3 1", "1 3 1 5", "5 1 3 5", "1 1(oct) 5 3", "5 5(oct) 1 3").
+  // Shorter/longer bars get adapted variants that still visit each
+  // chord-tone degree at least once when possible.
+  function pickDegreeSequence(beat1Deg, otherDegs, numBeats) {
+    if (numBeats <= 1) return [beat1Deg];
+    if (otherDegs.length === 0) {
+      // Only one chord-tone degree available — fill with the same
+      // degree everywhere; the realizer will octave-displace adjacent
+      // duplicates so it doesn't stagnate on one pitch.
+      return new Array(numBeats).fill(beat1Deg);
+    }
+    if (otherDegs.length === 1) {
+      const o = otherDegs[0];
+      if (numBeats === 2) return [beat1Deg, o];
+      if (numBeats === 3) return [beat1Deg, o, beat1Deg];
+      if (numBeats === 4) {
+        // Spread the available 2 degrees: d, o, d, o or d, d(oct), o, o(oct)
+        return rng() < 0.5 ? [beat1Deg, o, beat1Deg, o] : [beat1Deg, beat1Deg, o, o];
+      }
+      const seq = [];
+      for (let i = 0; i < numBeats; i++) seq.push(i % 2 === 0 ? beat1Deg : o);
+      return seq;
+    }
+    // 2+ other degrees: shuffle once
+    const others = otherDegs.slice();
+    if (rng() < 0.5) [others[0], others[1]] = [others[1], others[0]];
+    const a = others[0], b = others[1];
+
+    if (numBeats === 2) {
+      return [beat1Deg, rng() < 0.5 ? a : b];
+    }
+    if (numBeats === 3) {
+      const r = rng();
+      if (r < 0.4)  return [beat1Deg, a, b];
+      if (r < 0.75) return [beat1Deg, b, a];
+      return [beat1Deg, beat1Deg, rng() < 0.5 ? a : b]; // d d(oct) x
+    }
+    if (numBeats === 4) {
+      const r = rng();
+      if (r < 0.20) return [beat1Deg, b, a, beat1Deg];  // "1 5 3 1"
+      if (r < 0.40) return [beat1Deg, a, beat1Deg, b];  // "1 3 1 5"
+      if (r < 0.60) return [beat1Deg, a, b, beat1Deg];  // "5 1 3 5"
+      if (r < 0.80) return [beat1Deg, beat1Deg, b, a];  // "1 1(oct) 5 3"
+      return [beat1Deg, beat1Deg, a, b];                // "5 5(oct) 1 3"
+    }
+    // 5+ beats: walk through {beat1Deg, a, b} avoiding same-degree repeats.
+    const seq = [beat1Deg];
+    for (let i = 1; i < numBeats; i++) {
+      const prev = seq[seq.length - 1];
+      const choices = [beat1Deg, a, b].filter(c => c !== prev);
+      seq.push(choices[Math.floor(rng() * choices.length)]);
+    }
+    return seq;
+  }
+
+  // Pre-pick beat-1 degree for each chord: 50% root, 25% fifth, 25%
+  // third. Falls back to any available degree if the chosen one isn't
+  // present (rare). Doesn't bias toward root strongly — beat-1 can be
+  // any chord tone per "It doesn't have to start on the root."
+  const firstDegs = new Array(chordEvents.length).fill(-1);
+  for (let ci = 0; ci < chordEvents.length; ci++) {
+    const byDeg = tonesByDeg[ci];
+    const avail = [0, 2, 4].filter(d => byDeg[d] && byDeg[d].length > 0);
+    if (avail.length === 0) continue;
+    const r = rng();
+    let deg;
+    if (r < 0.5)       deg = 0;
+    else if (r < 0.75) deg = 4;
+    else               deg = 2;
+    if (!byDeg[deg]) deg = avail[0];
+    firstDegs[ci] = deg;
+  }
+
+  // Main pass: walk chord events in order. For each chord:
+  //   1. Pick beat-1 pitch by closest-degree to running pitch
+  //      (blended with drift center).
+  //   2. Build a degree sequence (the user-supplied patterns).
+  //   3. Realize each degree as the chord-tone pitch closest to the
+  //      previous beat's pitch. If consecutive beats share a degree
+  //      (or otherwise land on the same pitch), force an octave shift.
+  //   4. Update runningPitch = last beat's pitch so the next chord's
+  //      beat-1 voice-leads from there.
+  let runningPitch = null;
+  for (let ci = 0; ci < chordEvents.length; ci++) {
+    const ce = chordEvents[ci];
+    const byDeg = tonesByDeg[ci];
+    const firstDeg = firstDegs[ci];
+    if (firstDeg < 0) continue;
+
+    const { startBeat, endBeat } =
+      chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const numBeats = endBeat - startBeat;
+    if (numBeats <= 0) continue;
+    const barIdx = ce.barIdx;
+
+    // Beat-1 reference: 70% running pitch, 30% drift center.
+    const refPitch = (runningPitch != null)
+      ? runningPitch * 0.7 + driftCenter(ci) * 0.3
+      : driftCenter(ci);
+    const beat1 = pitchForDegree(byDeg, firstDeg, refPitch);
+    if (!beat1) continue;
+
+    // Degree sequence for this bar.
+    const otherDegs = [0, 2, 4].filter(d =>
+      d !== firstDeg && byDeg[d] && byDeg[d].length > 0);
+    const seq = pickDegreeSequence(firstDeg, otherDegs, numBeats);
+
+    // Realize each degree slot as a chord-tone pitch closest to the
+    // PREVIOUS beat's pitch. When the chosen pitch equals the previous
+    // beat's pitch (typically because the degree repeated), force an
+    // octave shift (prefer up, fall back down).
+    const placed = new Array(numBeats).fill(null);
+    placed[0] = beat1;
+    results[barIdx][startBeat] = { pitch: beat1.pitch, tpc: beat1.tpc, duration: 'q' };
+    let prevPitch = beat1.pitch;
+    let prevTpc = beat1.tpc;
+    for (let i = 1; i < numBeats; i++) {
+      const deg = seq[i];
+      let chosen = pitchForDegree(byDeg, deg, prevPitch);
+      if (!chosen) continue;
+      if (chosen.pitch === prevPitch) {
+        // Octave-displace: prefer UP, fall back DOWN.
+        let alt = null;
+        if (chosen.pitch + 12 <= EX_HIGH) alt = chosen.pitch + 12;
+        else if (chosen.pitch - 12 >= EX_LOW) alt = chosen.pitch - 12;
+        if (alt != null) chosen = { pitch: alt, tpc: chosen.tpc, pc: chosen.pc, degree: chosen.degree };
+      }
+      placed[i] = chosen;
+      results[barIdx][startBeat + i] = { pitch: chosen.pitch, tpc: chosen.tpc, duration: 'q' };
+      prevPitch = chosen.pitch;
+      prevTpc = chosen.tpc;
+    }
+
+    // Update running pitch for the next chord.
+    runningPitch = prevPitch;
+  }
+
+  // Post-pass: octave-displace any consecutive same-pitch notes so the
+  // line never repeats the exact same pitch back-to-back. Walks all
+  // sounding notes in order across every bar — catches within-bar
+  // repeats (e.g. an enclosure note that happened to match beat 1)
+  // AND across-bar repeats (e.g. the last beat of one chord equaling
+  // the first beat of the next). Prefers shifting UP an octave (per
+  // the user's "F1 G1 G2 A2" example); falls back to DOWN if out of
+  // range. If neither octave fits in cello range the note is left
+  // alone — a 2-octave cello span means this is essentially never hit.
+  {
+    let prevPitch = null;
+    for (let bi = 0; bi < results.length; bi++) {
+      const bar = results[bi];
+      if (!bar) continue;
+      for (let beat = 0; beat < bar.length; beat++) {
+        const n = bar[beat];
+        if (!n) continue;
+        if (prevPitch != null && n.pitch === prevPitch) {
+          if (n.pitch + 12 <= EX_HIGH) {
+            n.pitch += 12;
+          } else if (n.pitch - 12 >= EX_LOW) {
+            n.pitch -= 12;
+          }
+        }
+        prevPitch = n.pitch;
+      }
+    }
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
 function generateScaleChromaticQuarterNotes(bars, ts) {
   const beatsPerBar = ts.num;
   // Number of scale notes per bar before the chromatic seat. 4/4 → 3,
@@ -7688,6 +7950,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === '3579' ? generate3579QuarterNotes
             : exerciseMode === '3579Eighth' ? generate3579EighthNotes
             : exerciseMode === 'walkTriad' ? generateWalkTriadQuarterNotes
+            : exerciseMode === 'mixedTriads' ? generateMixedTriadsQuarterNotes
             : exerciseMode === 'walkBass' ? generateWalkingBasslineQuarterNotes
             : exerciseMode === 'walkBassPC' ? generatePaulChambersBasslineQuarterNotes
             : (typeof exerciseMode === 'string' && exerciseMode.startsWith('lick:'))
@@ -7946,22 +8209,48 @@ function renderChart(song, barsIn, timesigStr) {
     // wider. That gives a clean grid of identical-sized cells across
     // the whole worksheet, which is what the user expects of a
     // printed practice page.
-    const clefExtra   = (_printMode || !isFirstRow) ? 0 : firstMeasureClefWidth;
-    const extraPerBar = (_printMode || isFirstRow)  ? 0 : Math.floor(clefOnlyExtra / mpl);
     // Pickup (anacrusis) — a partial bar carried at the very start
     // of row 1, OUTSIDE the iRealPro `bars[]` array so bar numbering
     // and fingering indexing stay aligned with bar 1 = bars[0].
     // leadInBeats comes from MusicXML detection at parse time.
-    // Pickup is HEAD-MODE-ONLY: in Blank and Exercise modes, there is
-    // no melody to render in the partial bar (it would be all rests)
-    // and the playback would schedule nothing useful. Forcing
+    // On-screen, pickup is HEAD-MODE-ONLY: in Blank and Exercise modes,
+    // there is no melody to render in the partial bar (it would be all
+    // rests) and the playback would schedule nothing useful. Forcing
     // leadInBeats to 0 outside of head mode also zeroes pickupWidth,
     // pickupShrinkPerBar, and the row-1 bar-number offset so layout
     // matches a normal song-without-pickup.
+    // EXCEPTION: in PRINT mode, render the pickup bar regardless of
+    // exerciseMode. The printed worksheet should look like the source
+    // score — the head's pickup melody appears as a visual prefix
+    // ("A Foggy Day" has a quarter-note D pickup before bar 1) so
+    // the rehearsal letter "A" stays anchored to bar 1's left edge
+    // (not pushed into bar 1's content area). The pickup notes shown
+    // are the original head melody even when exercising / blanked —
+    // the rest of the row carries the exercise content as usual.
+    // Computed BEFORE clefExtra because the pickup-stave needs the
+    // clef-width slice reserved even in print mode (otherwise it
+    // gets only the proportional beat width and the clef + time sig
+    // + double bar crush together with no separation from bar 1).
     const _isHeadMode = (typeof exerciseMode !== 'undefined' && exerciseMode === 'head');
-    const leadInBeats = (isFirstRow && _isHeadMode)
+    const _showPickup = _isHeadMode || _printMode;
+    const leadInBeats = (isFirstRow && _showPickup)
       ? (window.currentSong && window.currentSong.head && window.currentSong.head.leadInBeats) || 0
       : 0;
+    // clefExtra: dedicated horizontal slice for the bass clef + time
+    // signature on row 1's first stave. Three cases:
+    //   - Continuation row: 0 (no clef redrawn).
+    //   - Row 1, print mode, NO pickup: 0 — the clef is packed into
+    //     bar 1's shared per-cell width by VexFlow's formatter,
+    //     keeping the printed grid uniform.
+    //   - Row 1 WITH pickup (any mode): firstMeasureClefWidth — the
+    //     pickup stave needs room for clef + time sig + pickup notes
+    //     + closing double bar. Without this, the print-mode pickup
+    //     overlaps bar 1 and the double-bar separator disappears.
+    //   - Row 1, non-print, no pickup: firstMeasureClefWidth (as before).
+    const clefExtra = (!isFirstRow) ? 0
+                    : (_printMode && leadInBeats === 0) ? 0
+                    : firstMeasureClefWidth;
+    const extraPerBar = (_printMode || isFirstRow) ? 0 : Math.floor(clefOnlyExtra / mpl);
     const pickupWidth = leadInBeats > 0
       ? Math.round((leadInBeats / ts.num) * measureWidth)
       : 0;
@@ -8151,7 +8440,10 @@ function renderChart(song, barsIn, timesigStr) {
     if (leadInBeats > 0 && isFirstRow) {
       const pickupTotalWidth = clefExtra + pickupWidth;
       try {
-        const isHeadMode = (exerciseMode === 'head');
+        // In print mode (or head mode), draw the head's actual pickup
+        // melody notes so the printed worksheet matches the source
+        // score. Outside of those, the pickup space is just rests.
+        const isHeadMode = (exerciseMode === 'head') || _printMode;
         const pickupNotes = (window.currentSong && window.currentSong.head && window.currentSong.head.pickupNotes) || [];
         renderPickupStave(
           context, x, staffY, pickupTotalWidth,
@@ -13684,7 +13976,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'walkBass' || ex === 'walkBassPC')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -13752,7 +14044,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'walkBass' || ex === 'walkBassPC')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
@@ -15432,7 +15724,7 @@ function emPasteFingerings() {
 // only the VERTICAL ZOOM by varying the print target aspect ratio:
 //                  aspect    row height   notehead size
 //   S (180)        9.5        0.79in       0.048in
-//   M (120)        7.4        1.01in       0.061in
+//   M (120)        6.5        1.15in       0.071in
 //   L (80)         5.5        1.36in       0.082in
 // Lower aspect → taller row → bigger notes (notehead glyph is a
 // fixed viewBox size, so when the SVG renders at 7.5in width the
@@ -15440,6 +15732,9 @@ function emPasteFingerings() {
 // Per-bar paper width stays constant within a meter — 1.875in for
 // 4/4, 2.5in for 3/4 — so inter-note spacing is the same across
 // S/M/L; only the staff and noteheads scale up or down.
+// M aspect tuned so a 32-bar / 8-row chart with one fingering or
+// note-name overlay enabled fills (but doesn't overflow) a single
+// US Letter page — about a 14% notehead bump from the prior 7.4.
 //
 // To preview on screen before printing, toggle S/M/L in the
 // Options panel — the screen rendering uses chartSize directly,
@@ -15453,7 +15748,7 @@ function emPasteFingerings() {
 // equal-width bars (overriding the note-density weighting that
 // makes some bars wider than others on screen).
 let _printMode = false;
-let _printTargetAspect = 7.4;
+let _printTargetAspect = 6.5;
 (function bindPrintLayout() {
   let savedMpl = null;
   window.addEventListener('beforeprint', () => {
@@ -15472,7 +15767,7 @@ let _printTargetAspect = 7.4;
     if (cs >= 150) {            // S — short row, small notes
       _printTargetAspect = 9.5;
     } else if (cs >= 100) {     // M — default
-      _printTargetAspect = 7.4;
+      _printTargetAspect = 6.5;
     } else {                    // L — tall row, big notes
       _printTargetAspect = 5.5;
     }
@@ -15670,3 +15965,377 @@ document.addEventListener('keydown', e => {
   if (emFingeringsTitle) emSaveFingerings(emFingeringsTitle);
   emMoveCursorRight();
 });
+
+// ===== Game mode =====
+// A simple ear-training / sight-reading game built on top of the
+// existing exercise rendering. When toggled on:
+//   - Every note in the rendered score is hidden EXCEPT the first.
+//   - A 4×3 chromatic keyboard (12 PCs) appears below the chart in
+//     place of the fingerboard panel.
+//   - Pressing a key checks the pitch-class against the NEXT hidden
+//     note in playback order. Correct → reveal the note, play it
+//     through the Lead guitar sampler, +1 to the black correct
+//     counter. Wrong → flash a red clone of the next note for one
+//     second + 1 to the red mistake counter; the note stays hidden
+//     so the player can try again.
+// The game state is rebuilt after every renderChart pass so changing
+// the song / exercise / key / repeats automatically resets the game.
+
+let gameMode = false;
+let gameSequence = [];         // [{ barIdx, slotIdx, pitch, pc }, ...]
+let gameCursor   = 0;          // # of notes revealed so far (next-expected = gameSequence[gameCursor])
+let gameCorrect  = 0;
+let gameMistakes = 0;
+let gameWrongTimer = null;     // setTimeout handle for clearing the red-flash clone
+let gameWrongEl    = null;     // current red-flash DOM element
+
+// Build the linear pitch sequence from barElements. Pulled in order
+// of bar → slot, skipping any nulls (rests) or notes without a
+// pitch. The PC (pitch-class 0..11) is what we compare against the
+// keyboard's data-pc attribute.
+function gameBuildSequence() {
+  gameSequence = [];
+  if (typeof barElements === 'undefined' || !barElements) return;
+  for (let bi = 0; bi < barElements.length; bi++) {
+    const info = barElements[bi];
+    if (!info || !info.noteData) continue;
+    for (let si = 0; si < info.noteData.length; si++) {
+      const nd = info.noteData[si];
+      if (!nd || nd.pitch == null) continue;
+      const pc = ((nd.pitch % 12) + 12) % 12;
+      gameSequence.push({ barIdx: bi, slotIdx: si, pitch: nd.pitch, pc });
+    }
+  }
+}
+
+// Apply hide/show classes to each note based on the current cursor.
+// First N notes (N = gameCursor) are visible; the rest are hidden.
+function gameApplyVisibility() {
+  if (typeof barElements === 'undefined' || !barElements) return;
+  if (!gameMode) {
+    // Clear any hidden marks left over from a previous game session.
+    for (let bi = 0; bi < barElements.length; bi++) {
+      const info = barElements[bi];
+      if (!info || !info.noteEls) continue;
+      for (const el of info.noteEls) {
+        if (el && el.classList) el.classList.remove('game-hidden');
+      }
+    }
+    return;
+  }
+  // Build a set of "visible" (barIdx, slotIdx) pairs from the
+  // revealed prefix of the sequence.
+  const visible = new Set();
+  for (let i = 0; i < gameCursor && i < gameSequence.length; i++) {
+    const e = gameSequence[i];
+    visible.add(e.barIdx + ':' + e.slotIdx);
+  }
+  for (let bi = 0; bi < barElements.length; bi++) {
+    const info = barElements[bi];
+    if (!info || !info.noteEls || !info.noteData) continue;
+    for (let si = 0; si < info.noteEls.length; si++) {
+      const el = info.noteEls[si];
+      if (!el || !el.classList) continue;
+      const nd = info.noteData[si];
+      // Rests stay visible — only PITCHED notes participate in the
+      // game (and only PITCHED notes are in gameSequence).
+      if (!nd || nd.pitch == null) {
+        el.classList.remove('game-hidden');
+        continue;
+      }
+      if (visible.has(bi + ':' + si)) {
+        el.classList.remove('game-hidden');
+      } else {
+        el.classList.add('game-hidden');
+      }
+    }
+  }
+}
+
+// Reset all game state to the start of the current song (cursor at
+// the first hidden note; counters back to zero).
+function gameReset() {
+  gameCursor = 1; // first note is given for free
+  gameCorrect = 0;
+  gameMistakes = 0;
+  gameClearWrongFlash();
+  gameUpdateCounters();
+  gameApplyVisibility();
+}
+
+function gameUpdateCounters() {
+  const c = document.getElementById('gameCorrectCount');
+  const m = document.getElementById('gameMistakeCount');
+  if (c) c.textContent = String(gameCorrect);
+  if (m) m.textContent = String(gameMistakes);
+}
+
+function gameClearWrongFlash() {
+  if (gameWrongTimer) {
+    clearTimeout(gameWrongTimer);
+    gameWrongTimer = null;
+  }
+  if (gameWrongEl) {
+    if (gameWrongEl.parentNode) gameWrongEl.parentNode.removeChild(gameWrongEl);
+    gameWrongEl = null;
+  }
+}
+
+// Closest MIDI pitch with a given PC to a reference pitch. Used to
+// pick the OCTAVE of the user's pressed key — we want the red wrong
+// note to sit in the same register as the expected note, not in some
+// far-off octave that would force a leger-line forest.
+function gamePitchInClosestOctave(refMidi, pc) {
+  const refPc = ((refMidi % 12) + 12) % 12;
+  let delta = (pc - refPc + 6 + 12) % 12 - 6; // signed distance in [-6, +5]
+  if (delta < -6) delta += 12;
+  return refMidi + delta;
+}
+
+// Diatonic staff-step for the EXPECTED note: use its actual TPC
+// (which encodes the sharp/flat spelling chosen by the chart) so
+// the step lands on the correct staff line. Eb is step (E line),
+// Db is step (D line), etc. — NOT collapsed to the chromatically
+// adjacent natural.
+const GAME_LETTER_IDX = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
+function gameExpectedStaffStep(midi, tpc) {
+  if (tpc == null) return gamePressedStaffStep(((midi % 12) + 12) % 12, midi);
+  const { letter, acc } = tpcToLetterAcc(tpc);
+  const altAdjust = { 'bb': -2, 'b': -1, '': 0, '#': 1, '##': 2 }[acc] || 0;
+  // letterRef = sounding MIDI of the natural letter this tpc spells.
+  // For Db4 (MIDI 61, acc 'b'): letterRef = 62 (D4 natural). For C#4
+  // (MIDI 61, acc '#'): letterRef = 60 (C4 natural). The displayed
+  // octave then comes from letterRef's natural-octave bucket.
+  const letterRef = midi - altAdjust;
+  const octave = Math.floor(letterRef / 12) - 1;
+  return octave * 7 + (GAME_LETTER_IDX[letter] || 0);
+}
+
+// Diatonic staff-step for the PRESSED note, using sharp-form
+// natural-letter spelling for sharp PCs (C#, D#, F#, G#, A#).
+// Sharps share the same staff line as the natural letter below
+// (C# and C both sit on the C line; the # accidental does the
+// disambiguation).
+const GAME_PC_LETTER = ['C','C','D','D','E','F','F','G','G','A','A','B'];
+const GAME_PC_IS_SHARP = [false,true,false,true,false,false,true,false,true,false,true,false];
+function gamePressedStaffStep(pc, midi) {
+  const letter = GAME_PC_LETTER[pc];
+  const isSharp = GAME_PC_IS_SHARP[pc];
+  const altAdjust = isSharp ? 1 : 0;
+  const letterRef = midi - altAdjust;
+  const octave = Math.floor(letterRef / 12) - 1;
+  return octave * 7 + (GAME_LETTER_IDX[letter] || 0);
+}
+
+// Show a red "you pressed THIS" notehead at the position of the
+// next-expected slot but at the staff line of the user's PRESSED
+// pitch. Crucially: it does NOT clone the expected note (which
+// would give away the answer). The notehead is drawn from scratch
+// with the right accidental for the pressed PC. Removed after
+// `WRONG_FLASH_MS`.
+const GAME_WRONG_FLASH_MS = 1000;
+const GAME_WRONG_COLOR = '#c92a2a';
+function gameShowWrongFlash(pressedPc) {
+  gameClearWrongFlash();
+  if (gameCursor >= gameSequence.length) return;
+  const expected = gameSequence[gameCursor];
+  const info = barElements[expected.barIdx];
+  if (!info || !info.noteData || !info.noteEls) return;
+  const nd = info.noteData[expected.slotIdx];
+  if (!nd || !nd.staveNote) return;
+  const expectedEl = info.noteEls[expected.slotIdx];
+  if (!expectedEl) return;
+  const svg = expectedEl.ownerSVGElement;
+  if (!svg) return;
+
+  // Pull the expected slot's notehead geometry from VexFlow — same
+  // calls the existing notes-overlay uses.
+  let absX, ys, noteheadW;
+  try {
+    absX = nd.staveNote.getAbsoluteX();
+    ys = nd.staveNote.getYs();
+    noteheadW = (nd.staveNote.getGlyphWidth && nd.staveNote.getGlyphWidth()) || 11;
+  } catch (e) { return; }
+  if (!isFinite(absX) || !ys || ys.length === 0) return;
+
+  const expectedCX = absX + noteheadW / 2;
+  const expectedCY = ys[0];
+
+  // Vertical offset: (expectedStep − pressedStep) * 5 px/step.
+  // Higher diatonic step = visually higher on staff = lower SVG y;
+  // so a pressed pitch one step HIGHER than expected gets a dy of −5.
+  const expectedStep = gameExpectedStaffStep(nd.pitch, nd.tpc);
+  const pressedMidi  = gamePitchInClosestOctave(nd.pitch, pressedPc);
+  const pressedStep  = gamePressedStaffStep(pressedPc, pressedMidi);
+  const STEP_PX = 5;
+  const newCY = expectedCY + (expectedStep - pressedStep) * STEP_PX;
+
+  // Draw a fresh red quarter-note glyph from scratch:
+  //   - tilted notehead ellipse (the standard VexFlow notehead slant)
+  //   - stem line (direction chosen so the stem points away from the
+  //     middle line — VexFlow's default policy)
+  //   - sharp glyph to the left of the notehead, if the pressed PC
+  //     is a sharp
+  const NS = 'http://www.w3.org/2000/svg';
+  const g = document.createElementNS(NS, 'g');
+  g.setAttribute('class', 'game-wrong-flash');
+  g.setAttribute('pointer-events', 'none');
+
+  const rx = Math.max(4, noteheadW / 2 - 0.5);
+  const ry = 4;
+  const ellipse = document.createElementNS(NS, 'ellipse');
+  ellipse.setAttribute('cx', expectedCX);
+  ellipse.setAttribute('cy', newCY);
+  ellipse.setAttribute('rx', rx);
+  ellipse.setAttribute('ry', ry);
+  ellipse.setAttribute('transform', 'rotate(-20 ' + expectedCX + ' ' + newCY + ')');
+  ellipse.setAttribute('fill', GAME_WRONG_COLOR);
+  g.appendChild(ellipse);
+
+  // Stem direction: stem-down when the notehead sits above the
+  // middle staff line, stem-up below. Approximate using the
+  // expected note's staffY (the staff middle line lives at
+  // roughly staffY + 20 for a standard 5-line staff). Fall back
+  // to the expected note's existing stem direction if accessible.
+  const staffMidY = (info.y || 0) + 20;
+  const stemDown = newCY < staffMidY;
+  const stem = document.createElementNS(NS, 'line');
+  if (stemDown) {
+    stem.setAttribute('x1', expectedCX - rx + 0.5);
+    stem.setAttribute('y1', newCY);
+    stem.setAttribute('x2', expectedCX - rx + 0.5);
+    stem.setAttribute('y2', newCY + 28);
+  } else {
+    stem.setAttribute('x1', expectedCX + rx - 0.5);
+    stem.setAttribute('y1', newCY);
+    stem.setAttribute('x2', expectedCX + rx - 0.5);
+    stem.setAttribute('y2', newCY - 28);
+  }
+  stem.setAttribute('stroke', GAME_WRONG_COLOR);
+  stem.setAttribute('stroke-width', '1.5');
+  g.appendChild(stem);
+
+  if (GAME_PC_IS_SHARP[pressedPc]) {
+    const sharp = document.createElementNS(NS, 'text');
+    sharp.setAttribute('x', expectedCX - rx - 8);
+    sharp.setAttribute('y', newCY + 5);
+    sharp.setAttribute('font-family', 'serif');
+    sharp.setAttribute('font-size', '18');
+    sharp.setAttribute('font-weight', 'bold');
+    sharp.setAttribute('fill', GAME_WRONG_COLOR);
+    sharp.textContent = '♯';
+    g.appendChild(sharp);
+  }
+
+  svg.appendChild(g);
+  gameWrongEl = g;
+  gameWrongTimer = setTimeout(() => {
+    gameClearWrongFlash();
+  }, GAME_WRONG_FLASH_MS);
+}
+
+// Play a pitch through the Lead (guitar) sampler. Mirrors the
+// midiToName + +12 convention used elsewhere for bass-clef 8vb.
+function gamePlayNote(midi) {
+  if (typeof guitar === 'undefined' || !guitar || !guitar.loaded) return;
+  try {
+    const name = midiToName(midi + 12);
+    guitar.triggerAttackRelease(name, '8n', undefined, 0.7);
+  } catch (e) { /* best-effort preview */ }
+}
+
+// Handle a keyboard key press (pc = 0..11). Compares against the
+// next-expected note's pitch-class; reveals + plays on match,
+// flashes red on miss.
+function gameHandleKeyPress(pc) {
+  if (!gameMode) return;
+  if (gameCursor >= gameSequence.length) return; // game complete
+  const expected = gameSequence[gameCursor];
+  // Visual key-press feedback (brief flash on the keyboard cell).
+  const cell = document.querySelector('.game-key[data-pc="' + pc + '"]');
+  if (cell) {
+    cell.classList.add(expected.pc === pc ? 'flash-correct' : 'flash-wrong');
+    setTimeout(() => {
+      if (cell) cell.classList.remove('flash-correct', 'flash-wrong');
+    }, 220);
+  }
+  if (expected.pc === pc) {
+    gameCorrect++;
+    gameCursor++;
+    gameApplyVisibility();
+    gamePlayNote(expected.pitch);
+    gameClearWrongFlash();
+  } else {
+    gameMistakes++;
+    gameShowWrongFlash(pc);
+  }
+  gameUpdateCounters();
+}
+
+// Toggle game mode on/off. Swaps the fingerboard panel for the
+// game panel in the bottom section, rebuilds the sequence from the
+// current render, resets counters, and reapplies visibility.
+function gameSetMode(on) {
+  gameMode = !!on;
+  const btn = document.getElementById('gameToggle');
+  const gamePanel = document.getElementById('gamePanel');
+  const fbPanel   = document.getElementById('fingerboardPanel');
+  if (btn) btn.setAttribute('aria-pressed', gameMode ? 'true' : 'false');
+  if (gameMode) {
+    if (gamePanel) gamePanel.removeAttribute('hidden');
+    if (fbPanel)   fbPanel.setAttribute('hidden', '');
+    gameBuildSequence();
+    gameReset();
+  } else {
+    if (gamePanel) gamePanel.setAttribute('hidden', '');
+    // Don't auto-show the fingerboard — leave its visibility to its
+    // own toggle button. Just clear any hidden marks on notes.
+    gameClearWrongFlash();
+    gameApplyVisibility();
+  }
+}
+
+// Bind UI handlers.
+(function bindGameControls() {
+  const btn = document.getElementById('gameToggle');
+  if (btn) {
+    btn.addEventListener('click', () => gameSetMode(!gameMode));
+  }
+  const kb = document.getElementById('gameKeyboard');
+  if (kb) {
+    kb.addEventListener('click', (e) => {
+      const t = e.target.closest('.game-key');
+      if (!t) return;
+      const pc = parseInt(t.dataset.pc, 10);
+      if (!isFinite(pc)) return;
+      gameHandleKeyPress(pc);
+    });
+  }
+  const resetBtn = document.getElementById('gameResetBtn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (!gameMode) return;
+      gameBuildSequence();
+      gameReset();
+    });
+  }
+})();
+
+// Reapply game state after every renderChart — picks up new
+// barElements references whenever the chart re-renders (song change,
+// exercise change, key change, etc.).
+const _gameOriginalRenderChart = renderChart;
+renderChart = function gameWrappedRenderChart() {
+  const result = _gameOriginalRenderChart.apply(this, arguments);
+  if (gameMode) {
+    gameBuildSequence();
+    // Clamp cursor in case the new sequence is shorter than where
+    // we were (e.g. user switched to a shorter song mid-game).
+    if (gameCursor > gameSequence.length) gameCursor = gameSequence.length;
+    if (gameCursor < 1) gameCursor = 1;
+    gameClearWrongFlash();
+    gameUpdateCounters();
+    gameApplyVisibility();
+  }
+  return result;
+};
