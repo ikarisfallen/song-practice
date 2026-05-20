@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=112" />
+<link rel="stylesheet" href="style.css?v=113" />
 </head>
 <body>
 <div id="app">
@@ -306,6 +306,15 @@
         <span class="game-correct" id="gameCorrectCount" title="Correct notes">0</span>
         <span class="game-mistakes" id="gameMistakeCount" title="Mistakes">0</span>
         <button type="button" id="gameResetBtn" class="game-reset-btn" aria-label="Reset game">↺</button>
+        <button type="button" id="gameMicBtn" class="game-mic-btn" aria-label="Listen via microphone" aria-pressed="false" title="Listen via microphone">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="3" width="6" height="11" rx="3" ry="3"
+                  stroke="currentColor" stroke-width="1.8" fill="none"/>
+            <path d="M 5 11 C 5 15 8 18 12 18 C 16 18 19 15 19 11"
+                  stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+            <line x1="12" y1="18" x2="12" y2="21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
       </div>
       <div class="game-keyboard game-keyboard-right" id="gameKeyboardRight">
         <button type="button" class="game-key pos-0" data-pc="7">G</button>
@@ -321,7 +330,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v3.90</span>
+      <span class="app-version" id="appVersion">v3.93</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -329,7 +338,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=498"></script>
+<script src="app.js?v=501"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

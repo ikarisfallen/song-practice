@@ -766,6 +766,40 @@ main {
   margin-top: 2px;
 }
 .game-reset-btn:hover { background: #f0f0f0; }
+/* Mic toggle — turns red+filled when the mic is actively listening
+   so the user has a glance-check of whether sung/played notes are
+   being detected. */
+.game-mic-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid #888;
+  background: #fff;
+  color: #555;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  margin-top: 4px;
+}
+.game-mic-btn svg { width: 20px; height: 20px; }
+.game-mic-btn:hover { background: #f0f0f0; }
+.game-mic-btn[aria-pressed="true"] {
+  background: #c92a2a;
+  border-color: #c92a2a;
+  color: #fff;
+}
+.game-mic-btn[aria-pressed="true"]:hover { background: #b02323; }
+/* Subtle pulse while actively detecting a note (energy above the
+   gate). Provides a "yes, I hear you" cue. */
+@keyframes gameMicPulse {
+  0%   { box-shadow: 0 0 0 0   rgba(201, 42, 42, 0.6); }
+  100% { box-shadow: 0 0 0 8px rgba(201, 42, 42, 0.0); }
+}
+.game-mic-btn.active-pulse {
+  animation: gameMicPulse 0.6s ease-out;
+}
 /* 4×3 chromatic keyboard. Each cell shows the natural name with
    enharmonic equivalent beneath for sharp/flat keys. */
 /* Circle-of-fifths keyboard, C-shape layout. Each half forms the

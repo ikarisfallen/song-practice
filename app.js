@@ -16292,6 +16292,10 @@ function gameSetMode(on) {
     // own toggle button. Just clear any hidden marks on notes.
     gameClearWrongFlash();
     gameApplyVisibility();
+    // Stop the mic listener if it was running — it's only meaningful
+    // while the game keyboard is visible (no notes to match against
+    // outside game mode).
+    if (typeof gameMicStop === 'function') gameMicStop();
   }
 }
 
@@ -16341,3 +16345,346 @@ renderChart = function gameWrappedRenderChart() {
   }
   return result;
 };
+
+// ===== Game mode: microphone pitch detection =====
+// Optional second input path for the game. When the user toggles the
+// 🎤 button in the game panel, we open the microphone, run a YIN
+// pitch detector on the audio stream, and feed detected pitch-classes
+// to gameHandleKeyPress — the same function the on-screen keyboard
+// uses. So singing the next note or playing it on a cello triggers
+// the game logic identically to tapping a key.
+//
+// Design notes:
+//   - YIN: classic monophonic pitch detector (de Cheveigné & Kawahara,
+//     2002). Cheap, robust on harmonic instruments, ~50ms latency at
+//     2048-sample buffers / 44.1kHz.
+//   - Energy gate: we only run YIN when the input RMS is above a
+//     threshold (gate out silence + room noise) and we lock out a
+//     re-accept until the user lets the energy drop below a lower
+//     threshold first. That handles bowed cello sustain (you can't
+//     accidentally count one bow stroke as multiple notes) and also
+//     "you played a C, took the bow off, played another C" (two
+//     attacks ⇒ two acceptances).
+//   - PC stability gate: once in a note, we require N consecutive
+//     frames to agree on the same pitch class before accepting it.
+//     Filters out the brief noisy attack transient and YIN's
+//     occasional octave glitches.
+//   - getFloatTimeDomainData() reads the most recent audio buffer
+//     from an AnalyserNode; polled from requestAnimationFrame for
+//     the detection loop. Simpler than wiring up an AudioWorklet
+//     and the ~16ms rAF interval is well within the game's latency
+//     budget.
+
+// Buffer at 4096 samples (~93ms at 44.1kHz) gives YIN's half-buffer
+// 2048 samples to work with — enough for ~22Hz minimum detection, so
+// cello C2 (65Hz) and even extension notes down to F1 (~44Hz) come
+// through reliably. (At a 2048-sample buffer the F1 period barely
+// fit twice in the analysis window, so detection was flaky.)
+const GAME_MIC_BUFFER_SIZE       = 4096;
+// RMS_LOW / RMS_HIGH form a hysteresis gate for SUSTAINED tones
+// (bowed cello, voice). Useful as a fallback even with onset
+// detection on: when energy drops to silence between phrases, the
+// "in note" state resets, ensuring the next attack rearms cleanly
+// even if the onset-ratio threshold isn't crossed.
+const GAME_MIC_RMS_LOW           = 0.005;
+const GAME_MIC_RMS_HIGH          = 0.012;
+// Onset detection — needed for PIZZICATO cello (and any plucked /
+// percussive instrument): the previous note's decay tail sits well
+// above RMS_LOW when the next pluck lands, so the silence-based
+// rearm never fires. Instead, we look for a sudden energy spike
+// relative to the smoothed background level. Any frame whose
+// instantaneous RMS exceeds the smoothed RMS by `ONSET_RATIO×` AND
+// is itself above `ONSET_FLOOR` (so quiet room noise can't trigger)
+// is treated as a fresh attack: the acceptedThisAttack flag clears
+// and the PC stability counter restarts.
+const GAME_MIC_ONSET_RATIO       = 1.7;
+const GAME_MIC_ONSET_FLOOR       = 0.008;
+const GAME_MIC_SMOOTH_ALPHA      = 0.15;   // EMA weight for current frame (higher = less smoothing)
+const GAME_MIC_ONSET_REFRACTORY  = 80;     // ms — minimum spacing between onset-driven rearms
+// Sliding-window majority vote on the last N detected PCs. Replaces
+// a strict "consecutive identical" streak so a pitch hovering near a
+// 50-cent boundary (e.g. cello F that's 45 cents sharp + slight
+// vibrato) doesn't get rejected because one frame in the middle
+// rounded to the adjacent semitone. ±50-cent tolerance comes for
+// free from rounding hz → nearest MIDI; this window adds tolerance
+// for SHORT-LIVED outliers within that range.
+const GAME_MIC_PC_HISTORY        = 5;
+const GAME_MIC_PC_QUORUM         = 3;
+const GAME_MIC_YIN_THRESHOLD     = 0.15;   // YIN aperiodicity threshold (lower = more confident)
+// MIN_HZ lowered to 40 to cover cello F1 (~43.7Hz) without false-
+// rejecting it. Octave errors at this low end are common but
+// HARMLESS for the game: F1 and F2 share the same pitch class, so a
+// YIN result that locks onto the 2nd harmonic still produces the
+// right PC.
+const GAME_MIC_MIN_HZ            = 40;
+const GAME_MIC_MAX_HZ            = 1500;
+const GAME_MIC_PULSE_CLASS_MS    = 220;
+
+let gameMic = {
+  running: false,
+  audioContext: null,
+  stream: null,
+  source: null,
+  analyser: null,
+  buffer: null,
+  rafId: null,
+  inNote: false,
+  acceptedThisAttack: false,
+  recentPcs: [],   // ring buffer of last GAME_MIC_PC_HISTORY detected PCs
+  smoothedRms: 0,
+  lastOnsetAt: 0
+};
+
+// YIN pitch detection. Returns Hz, or -1 if no confident pitch found.
+function gameYinPitch(buffer, sampleRate) {
+  const bufferSize = buffer.length;
+  const halfBufferSize = bufferSize >> 1;
+  // Reuse a thread-local workspace to avoid GC churn on each frame.
+  if (!gameYinPitch._yin || gameYinPitch._yin.length !== halfBufferSize) {
+    gameYinPitch._yin = new Float32Array(halfBufferSize);
+  }
+  const yin = gameYinPitch._yin;
+
+  // Step 1: squared difference function.
+  for (let tau = 0; tau < halfBufferSize; tau++) {
+    let sum = 0;
+    for (let i = 0; i < halfBufferSize; i++) {
+      const delta = buffer[i] - buffer[i + tau];
+      sum += delta * delta;
+    }
+    yin[tau] = sum;
+  }
+  // Step 2: cumulative mean normalized difference function (CMNDF).
+  yin[0] = 1;
+  let runningSum = 0;
+  for (let tau = 1; tau < halfBufferSize; tau++) {
+    runningSum += yin[tau];
+    yin[tau] *= tau / (runningSum || 1);
+  }
+  // Step 3: absolute-threshold pitch search. Walk past the first
+  // dip below threshold; track the local minimum within that dip.
+  let tauEstimate = -1;
+  for (let tau = 2; tau < halfBufferSize; tau++) {
+    if (yin[tau] < GAME_MIC_YIN_THRESHOLD) {
+      while (tau + 1 < halfBufferSize && yin[tau + 1] < yin[tau]) tau++;
+      tauEstimate = tau;
+      break;
+    }
+  }
+  if (tauEstimate < 0) return -1;
+  // Step 4: parabolic interpolation around the minimum for sub-sample
+  // precision (otherwise the detected pitch quantizes badly at high
+  // frequencies where the period is only a handful of samples).
+  let betterTau = tauEstimate;
+  const x0 = tauEstimate > 0 ? tauEstimate - 1 : tauEstimate;
+  const x2 = tauEstimate + 1 < halfBufferSize ? tauEstimate + 1 : tauEstimate;
+  if (x0 !== tauEstimate && x2 !== tauEstimate) {
+    const s0 = yin[x0], s1 = yin[tauEstimate], s2 = yin[x2];
+    const denom = 2 * (2 * s1 - s2 - s0);
+    if (Math.abs(denom) > 1e-9) {
+      betterTau = tauEstimate + (s2 - s0) / denom;
+    }
+  }
+  if (betterTau <= 0) return -1;
+  return sampleRate / betterTau;
+}
+
+function gameMicSetButton(active) {
+  const btn = document.getElementById('gameMicBtn');
+  if (btn) btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+}
+
+function gameMicProcessFrame() {
+  if (!gameMic.running || !gameMic.analyser || !gameMic.buffer) return;
+  gameMic.analyser.getFloatTimeDomainData(gameMic.buffer);
+  const buf = gameMic.buffer;
+
+  // Instantaneous RMS for this frame.
+  let sumSq = 0;
+  for (let i = 0; i < buf.length; i++) sumSq += buf[i] * buf[i];
+  const rms = Math.sqrt(sumSq / buf.length);
+
+  // Smoothed RMS — exponential moving average of the recent
+  // energy floor. Used by onset detection: a real attack spikes
+  // instantaneous RMS well above this baseline.
+  const prevSmoothed = gameMic.smoothedRms;
+  gameMic.smoothedRms = prevSmoothed * (1 - GAME_MIC_SMOOTH_ALPHA)
+                     + rms * GAME_MIC_SMOOTH_ALPHA;
+
+  // Silence: rearm everything so the next attack starts from a
+  // clean state.
+  if (rms < GAME_MIC_RMS_LOW) {
+    gameMic.inNote = false;
+    gameMic.acceptedThisAttack = false;
+    gameMic.recentPcs.length = 0;
+    return;
+  }
+  if (rms > GAME_MIC_RMS_HIGH) {
+    gameMic.inNote = true;
+  }
+  if (!gameMic.inNote) return;
+
+  // Onset detection — drives pizz/plucked workflow where the
+  // previous note's tail sits above RMS_LOW when the next pluck
+  // lands. A "fresh attack" is a frame whose RMS jumps above
+  // ONSET_RATIO × the smoothed baseline AND clears the absolute
+  // floor. We compare against the PREVIOUS smoothed value so a
+  // sudden spike isn't immediately blunted by including itself in
+  // the EMA. A refractory period prevents one physical pluck (which
+  // can have a multi-frame attack ramp) from registering twice.
+  const now = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  const refSmoothed = Math.max(prevSmoothed, GAME_MIC_RMS_LOW);
+  const isOnset = (rms > GAME_MIC_ONSET_FLOOR)
+               && (rms / refSmoothed > GAME_MIC_ONSET_RATIO)
+               && (now - gameMic.lastOnsetAt > GAME_MIC_ONSET_REFRACTORY);
+  if (isOnset) {
+    gameMic.acceptedThisAttack = false;
+    gameMic.recentPcs.length = 0;
+    gameMic.lastOnsetAt = now;
+  }
+
+  // Already accepted a PC for this attack — wait for either a real
+  // silence (handled above) or the next onset (handled just now).
+  if (gameMic.acceptedThisAttack) return;
+
+  const sr = gameMic.audioContext.sampleRate;
+  const hz = gameYinPitch(buf, sr);
+  if (hz < GAME_MIC_MIN_HZ || hz > GAME_MIC_MAX_HZ) return;
+
+  // Hz → PC. midi = 69 + 12·log2(hz/440); the rounding to the
+  // nearest MIDI integer is what gives the ±50-cent intonation
+  // tolerance (any pitch within 50 cents of a semitone lands on
+  // that semitone). PC = MIDI mod 12.
+  const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+  const pc = ((midi % 12) + 12) % 12;
+
+  // Push into a small ring buffer of recent detections.
+  gameMic.recentPcs.push(pc);
+  if (gameMic.recentPcs.length > GAME_MIC_PC_HISTORY) {
+    gameMic.recentPcs.shift();
+  }
+  // Need at least QUORUM samples before we can even consider
+  // accepting — keeps the very first frame of an attack (still
+  // transient) from triggering.
+  if (gameMic.recentPcs.length < GAME_MIC_PC_QUORUM) return;
+  // Tally PC counts over the window and find the plurality winner.
+  const counts = {};
+  let winnerPc = -1, winnerCount = 0;
+  for (let i = 0; i < gameMic.recentPcs.length; i++) {
+    const p = gameMic.recentPcs[i];
+    counts[p] = (counts[p] || 0) + 1;
+    if (counts[p] > winnerCount) {
+      winnerCount = counts[p];
+      winnerPc = p;
+    }
+  }
+  if (winnerCount >= GAME_MIC_PC_QUORUM) {
+    gameMic.acceptedThisAttack = true;
+    gameHandleKeyPress(winnerPc);
+    // Pulse the mic button to confirm a detection registered.
+    const btn = document.getElementById('gameMicBtn');
+    if (btn) {
+      btn.classList.remove('active-pulse');
+      // Force reflow so the animation restarts on rapid retriggers.
+      void btn.offsetWidth;
+      btn.classList.add('active-pulse');
+      setTimeout(() => btn && btn.classList.remove('active-pulse'),
+                 GAME_MIC_PULSE_CLASS_MS + 50);
+    }
+  }
+}
+
+async function gameMicStart() {
+  if (gameMic.running) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const s = document.getElementById('status');
+    if (s) s.textContent = 'Microphone not supported in this browser.';
+    return;
+  }
+  try {
+    // Disable browser DSP that would distort our pitch input:
+    //   - echoCancellation: would notch out sustained tones
+    //   - noiseSuppression: aggressive suppressor can mistake bowed
+    //     cello for noise
+    //   - autoGainControl: ramps gain mid-note, throws off energy gate
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) throw new Error('No AudioContext');
+    const ac = new AC();
+    if (ac.state === 'suspended') await ac.resume().catch(() => {});
+    const source = ac.createMediaStreamSource(stream);
+    const analyser = ac.createAnalyser();
+    analyser.fftSize = GAME_MIC_BUFFER_SIZE;
+    analyser.smoothingTimeConstant = 0;
+    source.connect(analyser);
+
+    gameMic.audioContext = ac;
+    gameMic.stream = stream;
+    gameMic.source = source;
+    gameMic.analyser = analyser;
+    gameMic.buffer = new Float32Array(analyser.fftSize);
+    gameMic.running = true;
+    gameMic.inNote = false;
+    gameMic.acceptedThisAttack = false;
+    gameMic.recentPcs.length = 0;
+    gameMic.smoothedRms = 0;
+    gameMic.lastOnsetAt = 0;
+    gameMicSetButton(true);
+
+    function tick() {
+      if (!gameMic.running) return;
+      gameMicProcessFrame();
+      gameMic.rafId = requestAnimationFrame(tick);
+    }
+    tick();
+  } catch (e) {
+    const s = document.getElementById('status');
+    if (s) s.textContent = 'Microphone access denied.';
+    gameMicSetButton(false);
+  }
+}
+
+function gameMicStop() {
+  if (!gameMic.running && !gameMic.audioContext) {
+    gameMicSetButton(false);
+    return;
+  }
+  gameMic.running = false;
+  if (gameMic.rafId) {
+    cancelAnimationFrame(gameMic.rafId);
+    gameMic.rafId = null;
+  }
+  try {
+    if (gameMic.source)    gameMic.source.disconnect();
+    if (gameMic.analyser)  gameMic.analyser.disconnect();
+    if (gameMic.stream)    gameMic.stream.getTracks().forEach(t => t.stop());
+    if (gameMic.audioContext && gameMic.audioContext.state !== 'closed') {
+      gameMic.audioContext.close();
+    }
+  } catch (e) { /* ignore teardown errors */ }
+  gameMic.audioContext = null;
+  gameMic.stream = null;
+  gameMic.source = null;
+  gameMic.analyser = null;
+  gameMic.buffer = null;
+  gameMicSetButton(false);
+}
+
+(function bindGameMicButton() {
+  const btn = document.getElementById('gameMicBtn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    if (gameMic.running) {
+      gameMicStop();
+    } else {
+      gameMicStart();
+    }
+  });
+})();
