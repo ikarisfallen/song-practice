@@ -7376,6 +7376,8 @@ function markupFlats(text) {
   return out;
 }
 let lastBeatInfo = null; // per-bar per-beat fingerboard info; populated by renderChart
+let lastChordEvents = null; // flat chord-event list from the most recent renderChart pass
+let lastBarsPerBar = 4;     // beats-per-bar (ts.num) of the most recent renderChart pass
 
 // Update the fingerboard SVG to reflect the current beat.
 // state = { litMidis: number[], scalePcs: Set<number>, chordTonesByPc: {pc:degree}, scaleLabel, chordNotesLabel }
@@ -7959,6 +7961,11 @@ function renderChart(song, barsIn, timesigStr) {
   const { results: quarterNotes, chordEvents, patterns, effective } = gen(bars, ts);
   // Per-bar/per-beat info for the fingerboard panel, keyed by expanded-bar idx.
   lastBeatInfo = buildBeatInfo(bars, ts, quarterNotes, chordEvents, effective, patterns);
+  // Expose chord events to downstream consumers (game-mode chord
+  // preview, etc.) — same lifetime as lastBeatInfo, regenerated on
+  // every renderChart pass.
+  lastChordEvents = chordEvents;
+  lastBarsPerBar = ts.num;
 
   // Each unique key-pattern name gets a stable color from a rotating palette.
   // Same key across the score → same color.
@@ -15996,14 +16003,43 @@ let gameWrongEl    = null;     // current red-flash DOM element
 function gameBuildSequence() {
   gameSequence = [];
   if (typeof barElements === 'undefined' || !barElements) return;
+  // Build a (barIdx, beat) → chordEventIndex lookup once, so we can
+  // tag each note in the sequence with the chord event it belongs to.
+  // That lets the chord-preview feature in gameHandleKeyPress fire
+  // exactly when the sequence crosses from one chord to the next.
+  const beatsPerBar = (typeof lastBarsPerBar === 'number' && lastBarsPerBar > 0)
+    ? lastBarsPerBar : 4;
+  const chordEventAtBeat = {};
+  if (Array.isArray(lastChordEvents)) {
+    lastChordEvents.forEach((ce, ci) => {
+      const range = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      for (let b = range.startBeat; b < range.endBeat; b++) {
+        chordEventAtBeat[ce.barIdx + ':' + b] = ci;
+      }
+    });
+  }
   for (let bi = 0; bi < barElements.length; bi++) {
     const info = barElements[bi];
     if (!info || !info.noteData) continue;
+    // Steps-per-beat for this bar — needed to convert each note's
+    // stepStart (in the generator's native step resolution: 1, 2, or
+    // 6 per beat) to a beat index that the chord-event lookup uses.
+    const stepsPerBar = info.noteData.length || beatsPerBar;
+    const stepsPerBeat = Math.max(1, Math.round(stepsPerBar / beatsPerBar));
     for (let si = 0; si < info.noteData.length; si++) {
       const nd = info.noteData[si];
       if (!nd || nd.pitch == null) continue;
       const pc = ((nd.pitch % 12) + 12) % 12;
-      gameSequence.push({ barIdx: bi, slotIdx: si, pitch: nd.pitch, pc });
+      const stepStart = (typeof nd.stepStart === 'number') ? nd.stepStart : si;
+      const beat = Math.floor(stepStart / stepsPerBeat);
+      const ceIdx = chordEventAtBeat[bi + ':' + beat];
+      gameSequence.push({
+        barIdx: bi,
+        slotIdx: si,
+        pitch: nd.pitch,
+        pc,
+        chordEventIdx: (ceIdx != null ? ceIdx : -1)
+      });
     }
   }
 }
@@ -16265,11 +16301,43 @@ function gameHandleKeyPress(pc) {
     gameApplyVisibility();
     gamePlayNote(expected.pitch);
     gameClearWrongFlash();
+    // Chord preview: if the note we just accepted was the LAST one
+    // of its chord (i.e., the next pending note belongs to a
+    // different chord event), play the upcoming chord on piano as
+    // a cue. Mirrors the comp-style voicing used by regular
+    // playback so the harmonic context is the same one the user
+    // hears when listening passively.
+    const nextEntry = gameSequence[gameCursor];
+    if (nextEntry && nextEntry.chordEventIdx !== expected.chordEventIdx) {
+      gamePlayNextChord(nextEntry.chordEventIdx);
+    }
   } else {
     gameMistakes++;
     gameShowWrongFlash(pc);
   }
   gameUpdateCounters();
+}
+
+// Play the chord at chordEvents[chordEventIdx] through the piano
+// sampler, using the same jazzVoicing() the regular playback comp
+// uses. No-op if the sampler isn't loaded, the chord-event lookup
+// fails, or jazzVoicing returns null (NC / slash chords).
+function gamePlayNextChord(chordEventIdx) {
+  if (chordEventIdx < 0) return;
+  if (!Array.isArray(lastChordEvents)) return;
+  const ce = lastChordEvents[chordEventIdx];
+  if (!ce || !ce.chord) return;
+  if (typeof piano === 'undefined' || !piano || !piano.loaded) return;
+  if (typeof jazzVoicing !== 'function') return;
+  let notes;
+  try { notes = jazzVoicing(ce.chord); } catch (e) { return; }
+  if (!notes || !notes.length) return;
+  try {
+    const names = notes.map(midiToName);
+    // Slightly louder + longer than a single melody note so the
+    // chord reads as a clear bed under the upcoming melody attempt.
+    piano.triggerAttackRelease(names, '2n', undefined, 0.6);
+  } catch (e) { /* best-effort cue */ }
 }
 
 // Toggle game mode on/off. Swaps the fingerboard panel for the
