@@ -16354,6 +16354,17 @@ function gameSetMode(on) {
     if (fbPanel)   fbPanel.setAttribute('hidden', '');
     gameBuildSequence();
     gameReset();
+    // Eagerly kick off audio sample loading. Without this, a fresh
+    // page-load → game-mode-on flow leaves the Tone.js samplers
+    // uninitialized (piano + guitar). The correct-note guitar cue
+    // and especially the chord-transition piano preview both rely
+    // on those samplers being ready. initAudio() is idempotent and
+    // returns immediately once samples are loaded. Tone.start()
+    // inside it requires a user gesture; the toggle click here is
+    // exactly that, so Chrome/Safari let it through.
+    if (typeof initAudio === 'function') {
+      initAudio().catch(() => {});
+    }
   } else {
     if (gamePanel) gamePanel.setAttribute('hidden', '');
     // Don't auto-show the fingerboard — leave its visibility to its
