@@ -1629,6 +1629,369 @@ function generateMixedTriadsQuarterNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// "Landmarks": quarter notes on beats 1 and 3 only, beats 2 and 4
+// left empty (rests) for the user to fill in. The notes are picked
+// to outline the harmony with chord tones (1 / 3 / 5 / 7) while
+// tracing a smooth linear arc from F1 up to F3 and back down again
+// across the song.
+//
+// Per-bar landmark selection:
+//   - 1-chord bar: beat 1 picks from priority [1, 5, 3, 7]; beat 3
+//     picks from priority [3, 7, 5, 1] (jazz-line convention —
+//     downbeats prefer stable tones, weak beats prefer color tones).
+//   - 2+ chord bar: beats 1 and 3 each fall on whichever chord owns
+//     that beat; BOTH use the beat-1 priority [1, 5, 3, 7].
+//
+// Direction wins over priority. From a running pitch the picker
+// chooses the next chord tone IN the current direction (ascending
+// or descending), regardless of where it sits in the priority
+// list. The priority kicks in only for the very first note of the
+// song (no previous direction to follow) and as a tiebreak when
+// multiple chord tones share the same distance.
+//
+// The direction reverses when the picker hits within 2 semitones
+// of the cello range extreme, producing a steady sawtooth-shaped
+// landmark line over the form.
+function generateLandmarksQuarterNotes(bars, ts) {
+  return generateLandmarksCore(bars, ts, /*fillPassingTones=*/true);
+}
+
+// Landmarks-1-3: identical landmark-placement rules (beats 1 & 3 only),
+// but with NO passing-tone fills on beats 2 & 4 — those stay as quarter
+// rests. Useful for isolating the 1/3 chord-tone targets without the
+// connecting line.
+function generateLandmarks13QuarterNotes(bars, ts) {
+  return generateLandmarksCore(bars, ts, /*fillPassingTones=*/false);
+}
+
+function generateLandmarksCore(bars, ts, fillPassingTones) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // (barIdx, beat) → chordEventIndex for fast "what chord owns this
+  // beat?" lookup. Mirrors the structure used by the game-mode
+  // chord-tagger.
+  const chordEventAtBeat = {};
+  chordEvents.forEach((ce, ci) => {
+    const range = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    for (let b = range.startBeat; b < range.endBeat; b++) {
+      chordEventAtBeat[ce.barIdx + ':' + b] = ci;
+    }
+  });
+
+  // Build the chord-tone dictionary for one chord event:
+  // degree (0=1, 2=3, 4=5, 6=7) → { pc, tpc }.
+  // Uses diatonicIndexInScale so 7♭9 / HW Diminished chords still
+  // resolve to the chord's real 3 / 5 / 7 (not the b3 passing tone).
+  function getChordTones(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    const tones = {};
+    if (!chordScale || chordScale.length === 0) return tones;
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    for (const d of [0, 2, 4, 6]) {
+      const idx = diatonicIndexInScale(d, chordScale);
+      if (idx >= chordScale.length) continue;
+      const sd = chordScale[idx];
+      tones[d] = {
+        pc: ((rootPc + sd.s) % 12 + 12) % 12,
+        tpc: rootTpc + sd.t,
+        degree: d
+      };
+    }
+    return tones;
+  }
+
+  // Closest chord tone STRICTLY in the given direction from
+  // prevPitch. Returns null if no chord tone exists past prevPitch
+  // in that direction within the cello range (caller flips
+  // direction in that case).
+  function nextChordToneInDirection(prevPitch, direction, tones) {
+    const all = [];
+    for (const d in tones) {
+      const pc = tones[d].pc;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if (((p % 12) + 12) % 12 === pc) {
+          all.push({ pitch: p, tpc: tones[d].tpc, degree: tones[d].degree });
+        }
+      }
+    }
+    all.sort((a, b) => a.pitch - b.pitch);
+    if (direction > 0) {
+      for (const c of all) if (c.pitch > prevPitch) return c;
+    } else {
+      for (let i = all.length - 1; i >= 0; i--) if (all[i].pitch < prevPitch) return all[i];
+    }
+    return null;
+  }
+
+  // First-note pick: priority alone (no previous pitch to walk
+  // from). Picks the LOWEST in-range octave so the line starts
+  // near F1 and has room to ascend.
+  function pickFirstNote(tones, priorityOrder) {
+    for (const d of priorityOrder) {
+      if (!(d in tones)) continue;
+      const pc = tones[d].pc;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if (((p % 12) + 12) % 12 === pc) {
+          return { pitch: p, tpc: tones[d].tpc, degree: tones[d].degree };
+        }
+      }
+    }
+    return null;
+  }
+
+  const BEAT_1_PRIORITY = [0, 4, 2, 6]; // 1, 5, 3, 7
+  const BEAT_3_PRIORITY = [2, 6, 4, 0]; // 3, 7, 5, 1
+
+  let prevPitch = null;
+  let direction = +1; // start ascending
+
+  for (let bi = 0; bi < bars.length; bi++) {
+    // Landmarks land on beats 1 and 3 (0-indexed: 0 and 2). For
+    // meters with fewer than 3 beats (rare), drop the beat-3 slot.
+    const landmarkBeats = [0];
+    if (beatsPerBar >= 3) landmarkBeats.push(2);
+
+    for (const beat of landmarkBeats) {
+      const ceIdx = chordEventAtBeat[bi + ':' + beat];
+      if (ceIdx == null) continue;
+      const ce = chordEvents[ceIdx];
+      if (!ce) continue;
+      const tones = getChordTones(ce);
+      if (Object.keys(tones).length === 0) continue;
+
+      // Pick the priority order:
+      //   - beat 1 always uses [1, 5, 3, 7]
+      //   - beat 3 uses [3, 7, 5, 1] IFF the chord on beat 3 also
+      //     owned beat 1 (i.e., it's a 1-chord bar OR the same
+      //     chord spans both landmark beats). When beat 3 falls on
+      //     a DIFFERENT chord event (2-chord bar where chord 2
+      //     starts on beat 3), use the beat-1 priority instead.
+      let priorityOrder;
+      if (beat === 0) {
+        priorityOrder = BEAT_1_PRIORITY;
+      } else {
+        const beat0Ce = chordEventAtBeat[bi + ':' + 0];
+        priorityOrder = (beat0Ce === ceIdx) ? BEAT_3_PRIORITY : BEAT_1_PRIORITY;
+      }
+
+      let note;
+      if (prevPitch == null) {
+        note = pickFirstNote(tones, priorityOrder);
+      } else {
+        note = nextChordToneInDirection(prevPitch, direction, tones);
+        if (!note) {
+          // Hit the range extreme; flip direction and try again.
+          direction = -direction;
+          note = nextChordToneInDirection(prevPitch, direction, tones);
+        }
+        // Still nothing? Fall back to the priority-based pick.
+        if (!note) note = pickFirstNote(tones, priorityOrder);
+      }
+      if (!note) continue;
+
+      // Safety net: guarantee the chosen pitch's PC is actually one
+      // of the chord's 1/3/5/7 PCs. Both the in-direction picker and
+      // the priority picker SHOULD only ever return chord tones —
+      // but this assert-then-recover behavior ensures the staff
+      // never displays a stray tension (9/11/13/etc.) even if a
+      // future scale-table tweak shifts how `getChordTones` indexes
+      // into a custom chord scale.
+      const validPcs = new Set();
+      for (const d in tones) validPcs.add(tones[d].pc);
+      const notePc = ((note.pitch % 12) + 12) % 12;
+      if (!validPcs.has(notePc)) {
+        // Snap to the closest chord tone, ignoring direction.
+        let snap = null, bestDist = Infinity;
+        for (const d in tones) {
+          const pc = tones[d].pc;
+          for (let p = EX_LOW; p <= EX_HIGH; p++) {
+            if (((p % 12) + 12) % 12 !== pc) continue;
+            const dist = Math.abs(p - note.pitch);
+            if (dist < bestDist) {
+              bestDist = dist;
+              snap = { pitch: p, tpc: tones[d].tpc, degree: tones[d].degree };
+            }
+          }
+        }
+        if (snap) note = snap;
+      }
+
+      results[bi][beat] = { pitch: note.pitch, tpc: note.tpc, duration: 'q' };
+      prevPitch = note.pitch;
+
+      // Direction reversal at extremes — within 2 semitones of
+      // F1 / F3 we flip so the next landmark moves the other way.
+      if (prevPitch >= EX_HIGH - 2) direction = -1;
+      if (prevPitch <= EX_LOW + 2) direction = +1;
+    }
+  }
+
+  // === Pass 2: fill non-landmark beats with passing tones ===
+  // Skipped entirely when fillPassingTones is false (Landmarks-1-3
+  // variant), in which case beats 2 & 4 remain quarter rests.
+  //
+  // Rule for each empty beat:
+  //   1. Prefer a DIATONIC chord-scale tone strictly between prev/next
+  //      (closest to prev so we move by one scale step).
+  //   2. If no diatonic step exists (prev & next are a half-step or
+  //      same), fall back to CHROMATIC:
+  //        ascending  → half-step BELOW next (e.g. F → F# → G);
+  //        descending → half-step ABOVE next.
+  //      If that chromatic equals prev, flip to the opposite side
+  //      (e.g. B → Db → C across the bar line when the half-step below
+  //      C would just repeat B).
+  //   3. Never repeat prev or next.
+  // Everything stays inside F1..F3.
+  if (fillPassingTones) {
+  function getScalePitchesInRange(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const out = [];
+    for (const sd of chordScale) {
+      const pc = ((rootPc + sd.s) % 12 + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if (((p % 12) + 12) % 12 === pc) out.push({ pitch: p, tpc });
+      }
+    }
+    out.sort((a, b) => a.pitch - b.pitch);
+    return out;
+  }
+
+  function nextScaleToneInDirection(prev, dir, scalePitches) {
+    if (dir > 0) {
+      for (const sp of scalePitches) if (sp.pitch > prev) return sp;
+    } else {
+      for (let i = scalePitches.length - 1; i >= 0; i--) {
+        if (scalePitches[i].pitch < prev) return scalePitches[i];
+      }
+    }
+    return null;
+  }
+
+  // Chromatic spelling — same TPC rules as generateScaleChromaticQuarterNotes
+  // so accidentals read consistently across exercises.
+  function chromBelow(targetMidi, targetTpc) {
+    const altLevel = Math.floor((targetTpc - 6) / 7);
+    const tpc = altLevel >= 2 ? targetTpc - 7 : targetTpc + 5;
+    return { pitch: targetMidi - 1, tpc };
+  }
+  function chromAbove(targetMidi, targetTpc) {
+    const altLevel = Math.floor((targetTpc - 6) / 7);
+    const tpc = altLevel <= 0 ? targetTpc + 7 : targetTpc - 5;
+    return { pitch: targetMidi + 1, tpc };
+  }
+  function inRange(p) { return p >= EX_LOW && p <= EX_HIGH; }
+
+  function pickPassingTone(prev, next, nextTpc, scalePitches) {
+    if (prev != null && next != null) {
+      if (next > prev) {
+        // Ascending: strictly-between diatonic, closest to prev.
+        const strict = scalePitches.filter(sp => sp.pitch > prev && sp.pitch < next);
+        if (strict.length) return strict[0];
+        // Chromatic: leading-tone below next.
+        if (nextTpc != null) {
+          const below = chromBelow(next, nextTpc);
+          if (below.pitch !== prev && inRange(below.pitch)) return below;
+          // Opposite — chromatic upper neighbor of next.
+          const above = chromAbove(next, nextTpc);
+          if (above.pitch !== prev && inRange(above.pitch)) return above;
+        }
+        return null;
+      } else if (next < prev) {
+        // Descending: strictly-between diatonic, closest to prev.
+        const strict = scalePitches.filter(sp => sp.pitch < prev && sp.pitch > next);
+        if (strict.length) return strict[strict.length - 1];
+        // Chromatic: leading-tone above next.
+        if (nextTpc != null) {
+          const above = chromAbove(next, nextTpc);
+          if (above.pitch !== prev && inRange(above.pitch)) return above;
+          const below = chromBelow(next, nextTpc);
+          if (below.pitch !== prev && inRange(below.pitch)) return below;
+        }
+        return null;
+      } else {
+        // prev == next — upper diatonic neighbor (then lower).
+        const upper = nextScaleToneInDirection(prev, +1, scalePitches);
+        if (upper && upper.pitch !== prev) return upper;
+        const lower = nextScaleToneInDirection(prev, -1, scalePitches);
+        if (lower && lower.pitch !== prev) return lower;
+        return null;
+      }
+    }
+    if (prev != null) {
+      return nextScaleToneInDirection(prev, +1, scalePitches)
+          || nextScaleToneInDirection(prev, -1, scalePitches);
+    }
+    if (next != null) {
+      return nextScaleToneInDirection(next, -1, scalePitches)
+          || nextScaleToneInDirection(next, +1, scalePitches);
+    }
+    if (scalePitches.length) return scalePitches[Math.floor(scalePitches.length / 2)];
+    return null;
+  }
+
+  function findPrevPitched(bi, beat) {
+    for (let b = beat - 1; b >= 0; b--) {
+      if (results[bi][b]) return results[bi][b];
+    }
+    for (let pb = bi - 1; pb >= 0; pb--) {
+      for (let b = results[pb].length - 1; b >= 0; b--) {
+        if (results[pb][b]) return results[pb][b];
+      }
+    }
+    return null;
+  }
+
+  function findNextPitched(bi, beat) {
+    for (let b = beat + 1; b < results[bi].length; b++) {
+      if (results[bi][b]) return results[bi][b];
+    }
+    for (let nb = bi + 1; nb < bars.length; nb++) {
+      for (let b = 0; b < results[nb].length; b++) {
+        if (results[nb][b]) return results[nb][b];
+      }
+    }
+    return null;
+  }
+
+  for (let bi = 0; bi < bars.length; bi++) {
+    for (let beat = 0; beat < beatsPerBar; beat++) {
+      if (results[bi][beat]) continue;
+      const ceIdx = chordEventAtBeat[bi + ':' + beat];
+      if (ceIdx == null) continue;
+      const ce = chordEvents[ceIdx];
+      if (!ce) continue;
+      const scalePitches = getScalePitchesInRange(ce);
+      const prev = findPrevPitched(bi, beat);
+      const next = findNextPitched(bi, beat);
+      const passing = pickPassingTone(
+        prev ? prev.pitch : null,
+        next ? next.pitch : null,
+        next ? next.tpc : null,
+        scalePitches
+      );
+      if (passing && inRange(passing.pitch)) {
+        results[bi][beat] = { pitch: passing.pitch, tpc: passing.tpc, duration: 'q' };
+      }
+    }
+  }
+  } // end if (fillPassingTones)
+
+  return { results, chordEvents, patterns, effective };
+}
+
 function generateScaleChromaticQuarterNotes(bars, ts) {
   const beatsPerBar = ts.num;
   // Number of scale notes per bar before the chromatic seat. 4/4 → 3,
@@ -7953,6 +8316,8 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === '3579Eighth' ? generate3579EighthNotes
             : exerciseMode === 'walkTriad' ? generateWalkTriadQuarterNotes
             : exerciseMode === 'mixedTriads' ? generateMixedTriadsQuarterNotes
+            : exerciseMode === 'landmarks' ? generateLandmarksQuarterNotes
+            : exerciseMode === 'landmarks13' ? generateLandmarks13QuarterNotes
             : exerciseMode === 'walkBass' ? generateWalkingBasslineQuarterNotes
             : exerciseMode === 'walkBassPC' ? generatePaulChambersBasslineQuarterNotes
             : (typeof exerciseMode === 'string' && exerciseMode.startsWith('lick:'))
@@ -10565,13 +10930,33 @@ function paintScaleDegreesOverlayForBar(barIdx, barsArg, tsArg) {
       beatsPerBar = ts.num;
     }
   }
-  const stepsPerBar = beatsPerBar * 6; // 24th-note grid
-  // Pre-compute each chord's [startStep, endStep) range in the bar.
+  // Generator's actual step resolution for this bar. nd.stepStart is
+  // expressed in THIS resolution, NOT a fixed 24th-note grid:
+  //   - quarter-note exercises (scale, triads, walk, landmarks, ...)
+  //     → 1 step per beat → stepsPerBar = beatsPerBar
+  //   - eighth-note exercises (1235Eighth, 3579Eighth)
+  //     → 2 steps per beat → stepsPerBar = 2 × beatsPerBar
+  //   - head mode + triplet-capable generators
+  //     → 6 steps per beat → stepsPerBar = 6 × beatsPerBar
+  // The previous "always × 6" code only worked for the head-mode
+  // generator and silently mis-mapped chord boundaries for every
+  // quarter-note exercise on multi-chord bars (e.g. a Cm7 | F7 bar:
+  // the F7's beat-3 note has stepStart=2 in quarter-note units, the
+  // chordRange for F7 started at step 12 in 24th-note units, so the
+  // lookup attributed the note to Cm7 instead and the scale-degree
+  // label rendered against Cm7's root — producing "13" for the A
+  // that should have labeled as "3" over F7).
+  const stepsPerBar = (info.beatToNoteSlot && info.beatToNoteSlot.length)
+    ? info.beatToNoteSlot.length
+    : beatsPerBar * 6;
+  const stepsPerBeat = Math.max(1, Math.round(stepsPerBar / beatsPerBar));
+  // Pre-compute each chord's [startStep, endStep) range in the bar
+  // in the generator's native step units.
   const chordRanges = liveChords.map((ch, ci) => {
     const r = chordBeatRange(liveChords.length, ci, beatsPerBar);
     return {
-      startStep: r.startBeat * 6,
-      endStep:   r.endBeat   * 6,
+      startStep: r.startBeat * stepsPerBeat,
+      endStep:   r.endBeat   * stepsPerBeat,
       chord: ch,
       canonical: chordToCanonical(ch),
       type: getChordType(chordToCanonical(ch)),
@@ -13199,6 +13584,12 @@ document.querySelectorAll('#tempoSeg button').forEach(b => {
       const expanded = expandBarsByRepeats(window.currentSong.bars, songRepeats);
       await startPlayback(window.currentSong.song, expanded);
     }
+    // Re-pace the game-mode metronome if it's running so it follows
+    // the new BPM instead of staying on the previous tempo.
+    if (typeof gameMetronome !== 'undefined' && gameMetronome.running) {
+      gameMetronomeStop();
+      gameMetronomeStart();
+    }
   });
 });
 // ===== Wake Lock (prevent phone sleep while practicing) =====
@@ -13983,7 +14374,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'walkBass' || ex === 'walkBassPC')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -14051,7 +14442,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'walkBass' || ex === 'walkBassPC')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
@@ -15989,12 +16380,32 @@ document.addEventListener('keydown', e => {
 // the song / exercise / key / repeats automatically resets the game.
 
 let gameMode = false;
-let gameSequence = [];         // [{ barIdx, slotIdx, pitch, pc }, ...]
-let gameCursor   = 0;          // # of notes revealed so far (next-expected = gameSequence[gameCursor])
+// Two distinct gameplay flavors. Default 'follow'.
+//   'hidden': original behavior — all notes start hidden except the
+//             first; player reveals each next note by playing it
+//             correctly. Wrong note rewinds to the start of the
+//             current chord.
+//   'follow': all notes visible from the start; metronome paces the
+//             cursor (one note per tick). Wrong notes get a
+//             permanent red mark. At the end, bars containing any
+//             red note get a semi-transparent red wash. No chord
+//             stab between chord changes.
+let gameKind     = 'follow';
+let gameSequence = [];         // [{ barIdx, slotIdx, pitch, pc, chordEventIdx }, ...]
+let gameCursor   = 0;          // index of the next-expected note in gameSequence
 let gameCorrect  = 0;
 let gameMistakes = 0;
 let gameWrongTimer = null;     // setTimeout handle for clearing the red-flash clone
 let gameWrongEl    = null;     // current red-flash DOM element
+// Game-mode bookkeeping.
+const gameRedNotes    = new Set(); // 'barIdx:slotIdx' for notes the user played wrong
+const gameGreenNotes  = new Set(); // 'barIdx:slotIdx' for notes the user got right (or freebies)
+const gamePlayedNotes = new Set(); // 'barIdx:slotIdx' for notes the user attempted this play-through
+const gameFilledRests = new Set(); // 'barIdx:slotIdx' for rest slots the user filled in (Landmarks)
+let gameFillNoteEls = [];          // DOM elements of placed fill notes (for reset cleanup)
+let gameBeatMap = [];              // one entry per beat in the song (see gameBuildSequence)
+let gameCurrentBeat = -1;          // Follow-mode beat cursor; -1 before the first metronome tick
+let gameFollowFinished = false;    // true once the metronome has walked off the end
 
 // Build the linear pitch sequence from barElements. Pulled in order
 // of bar → slot, skipping any nulls (rests) or notes without a
@@ -16002,6 +16413,7 @@ let gameWrongEl    = null;     // current red-flash DOM element
 // keyboard's data-pc attribute.
 function gameBuildSequence() {
   gameSequence = [];
+  gameBeatMap = [];
   if (typeof barElements === 'undefined' || !barElements) return;
   // Build a (barIdx, beat) → chordEventIndex lookup once, so we can
   // tag each note in the sequence with the chord event it belongs to.
@@ -16018,12 +16430,13 @@ function gameBuildSequence() {
       }
     });
   }
+  // First pass: build gameSequence (every pitched note, regardless
+  // of beat position). Also map (barIdx:slotIdx) → seqIdx so the
+  // beat-map pass below can cross-reference on-beat notes.
+  const seqIdxByBarSlot = new Map();
   for (let bi = 0; bi < barElements.length; bi++) {
     const info = barElements[bi];
     if (!info || !info.noteData) continue;
-    // Steps-per-beat for this bar — needed to convert each note's
-    // stepStart (in the generator's native step resolution: 1, 2, or
-    // 6 per beat) to a beat index that the chord-event lookup uses.
     const stepsPerBar = info.noteData.length || beatsPerBar;
     const stepsPerBeat = Math.max(1, Math.round(stepsPerBar / beatsPerBar));
     for (let si = 0; si < info.noteData.length; si++) {
@@ -16033,6 +16446,7 @@ function gameBuildSequence() {
       const stepStart = (typeof nd.stepStart === 'number') ? nd.stepStart : si;
       const beat = Math.floor(stepStart / stepsPerBeat);
       const ceIdx = chordEventAtBeat[bi + ':' + beat];
+      const seqIdx = gameSequence.length;
       gameSequence.push({
         barIdx: bi,
         slotIdx: si,
@@ -16040,31 +16454,88 @@ function gameBuildSequence() {
         pc,
         chordEventIdx: (ceIdx != null ? ceIdx : -1)
       });
+      seqIdxByBarSlot.set(bi + ':' + si, seqIdx);
+    }
+  }
+  // Second pass: build gameBeatMap with ONE entry per beat in the
+  // song. Each entry records whether that beat has a landmark (a
+  // pitched note at the beat's first step) or is a rest beat. Used
+  // by Follow mode to pace the cursor through the score one beat
+  // at a time — so a Landmarks exercise (notes on beats 1+3, rests
+  // on 2+4) lets the user play landmark notes on the strong beats
+  // AND drop free "fill" notes on the rest beats without either
+  // input being mis-attributed to the other.
+  for (let bi = 0; bi < barElements.length; bi++) {
+    const info = barElements[bi];
+    const hasInfo = !!(info && info.noteData);
+    const stepsPerBar = hasInfo
+      ? ((info.beatToNoteSlot && info.beatToNoteSlot.length) || info.noteData.length || beatsPerBar)
+      : beatsPerBar;
+    const stepsPerBeat = Math.max(1, Math.round(stepsPerBar / beatsPerBar));
+    for (let beatInBar = 0; beatInBar < beatsPerBar; beatInBar++) {
+      const stepStart = beatInBar * stepsPerBeat;
+      // Slot index in noteData for this beat's first step. Use
+      // beatToNoteSlot (the step → slot lookup the renderer built)
+      // when available; fall back to stepStart for simple
+      // quarter-note grids.
+      let slotIdx = -1;
+      if (hasInfo && info.beatToNoteSlot && info.beatToNoteSlot[stepStart] != null
+          && info.beatToNoteSlot[stepStart] >= 0) {
+        slotIdx = info.beatToNoteSlot[stepStart];
+      } else if (hasInfo && stepStart < info.noteData.length) {
+        slotIdx = stepStart;
+      }
+      const seqIdxLookup = (slotIdx >= 0)
+        ? seqIdxByBarSlot.get(bi + ':' + slotIdx)
+        : undefined;
+      const ceIdx = chordEventAtBeat[bi + ':' + beatInBar];
+      gameBeatMap.push({
+        barIdx: bi,
+        beatInBar,
+        slotIdx,
+        seqIdx: (seqIdxLookup != null ? seqIdxLookup : -1),
+        chordEventIdx: (ceIdx != null ? ceIdx : -1)
+      });
     }
   }
 }
 
-// Apply hide/show classes to each note based on the current cursor.
-// First N notes (N = gameCursor) are visible; the rest are hidden.
+// Apply visibility + color-mark classes for the current game state.
+// Color rules:
+//   - In Hidden mode, the "green" set is implicit: every note at an
+//     index < gameCursor is a note the player has either been given
+//     for free (index 0) or played correctly (each correct play
+//     bumps the cursor). Compute that set here on every repaint;
+//     gameGreenNotes is tracked explicitly in Follow mode instead.
+//   - Red notes always win over green (if a key somehow ends up in
+//     both sets, paint it red — wrong inputs are louder feedback).
+//   - Visibility (`game-hidden`) only applies in Hidden mode.
 function gameApplyVisibility() {
   if (typeof barElements === 'undefined' || !barElements) return;
+  // Clear-all when game mode is off.
   if (!gameMode) {
-    // Clear any hidden marks left over from a previous game session.
     for (let bi = 0; bi < barElements.length; bi++) {
       const info = barElements[bi];
       if (!info || !info.noteEls) continue;
       for (const el of info.noteEls) {
-        if (el && el.classList) el.classList.remove('game-hidden');
+        if (el && el.classList) {
+          el.classList.remove('game-hidden');
+          el.classList.remove('game-wrong-note');
+          el.classList.remove('game-correct-note');
+        }
       }
     }
     return;
   }
-  // Build a set of "visible" (barIdx, slotIdx) pairs from the
-  // revealed prefix of the sequence.
-  const visible = new Set();
-  for (let i = 0; i < gameCursor && i < gameSequence.length; i++) {
-    const e = gameSequence[i];
-    visible.add(e.barIdx + ':' + e.slotIdx);
+  // Compute the active green set per-mode.
+  const greenKeys = new Set();
+  if (gameKind === 'follow') {
+    for (const k of gameGreenNotes) greenKeys.add(k);
+  } else {
+    for (let i = 0; i < gameCursor && i < gameSequence.length; i++) {
+      const e = gameSequence[i];
+      greenKeys.add(e.barIdx + ':' + e.slotIdx);
+    }
   }
   for (let bi = 0; bi < barElements.length; bi++) {
     const info = barElements[bi];
@@ -16072,31 +16543,376 @@ function gameApplyVisibility() {
     for (let si = 0; si < info.noteEls.length; si++) {
       const el = info.noteEls[si];
       if (!el || !el.classList) continue;
+      const key = bi + ':' + si;
       const nd = info.noteData[si];
-      // Rests stay visible — only PITCHED notes participate in the
-      // game (and only PITCHED notes are in gameSequence).
-      if (!nd || nd.pitch == null) {
-        el.classList.remove('game-hidden');
-        continue;
-      }
-      if (visible.has(bi + ':' + si)) {
-        el.classList.remove('game-hidden');
-      } else {
+      const isPitched = !!(nd && nd.pitch != null);
+      // ---- Visibility ----
+      if (gameKind === 'hidden' && isPitched && !greenKeys.has(key)) {
         el.classList.add('game-hidden');
+      } else {
+        el.classList.remove('game-hidden');
+      }
+      // ---- Color ----
+      const isRed   = gameRedNotes.has(key);
+      const isGreen = greenKeys.has(key);
+      if (isRed) {
+        el.classList.add('game-wrong-note');
+        el.classList.remove('game-correct-note');
+      } else if (isGreen) {
+        el.classList.add('game-correct-note');
+        el.classList.remove('game-wrong-note');
+      } else {
+        el.classList.remove('game-wrong-note');
+        el.classList.remove('game-correct-note');
       }
     }
   }
 }
 
+// Paint a semi-transparent red rect over every bar that contains
+// at least one wrong note. Called when Follow mode finishes the
+// last note in the sequence.
+function gameMarkWrongBars() {
+  gameClearWrongBars();
+  if (typeof barElements === 'undefined' || !barElements) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  const wrongBars = new Set();
+  for (const key of gameRedNotes) {
+    const bi = parseInt(key.split(':')[0], 10);
+    if (isFinite(bi)) wrongBars.add(bi);
+  }
+  for (const bi of wrongBars) {
+    const info = barElements[bi];
+    if (!info || !info.rowEl) continue;
+    const svg = info.rowEl.querySelector('svg');
+    if (!svg) continue;
+    const rect = document.createElementNS(NS, 'rect');
+    rect.setAttribute('class', 'game-wrong-bar-overlay');
+    rect.setAttribute('x', info.x);
+    rect.setAttribute('y', info.y - 4);
+    rect.setAttribute('width', info.w);
+    rect.setAttribute('height', info.h);
+    rect.setAttribute('fill', 'rgba(201, 42, 42, 0.18)');
+    rect.setAttribute('pointer-events', 'none');
+    svg.appendChild(rect);
+  }
+}
+
+function gameClearWrongBars() {
+  document.querySelectorAll('.game-wrong-bar-overlay').forEach(el => el.remove());
+}
+
 // Reset all game state to the start of the current song (cursor at
 // the first hidden note; counters back to zero).
 function gameReset() {
-  gameCursor = 1; // first note is given for free
+  // Hidden mode reveals the first note for free, so the cursor
+  // starts at 1. Follow mode requires every note to be played in
+  // time with the metronome — cursor starts at -1 so the FIRST
+  // metronome tick advances it to 0 (the user's first expected
+  // note), instead of immediately consuming note 0 before they've
+  // had a chance to play it.
+  gameCursor = (gameKind === 'follow') ? -1 : 1;
+  gameCurrentBeat = -1; // pre-start; first metronome tick advances to 0
   gameCorrect = 0;
   gameMistakes = 0;
+  gameFollowFinished = false;
+  gameRedNotes.clear();
+  gameGreenNotes.clear();
+  gamePlayedNotes.clear();
+  gameFilledRests.clear();
+  // Mark the first pitched note green as a "you start here"
+  // landmark. In Hidden mode the green for the freebie comes out
+  // of the cursor-based green-set rebuild in gameApplyVisibility,
+  // so we don't need to seed gameGreenNotes there; in Follow mode
+  // we DO seed it explicitly because Follow mode's green set is
+  // tracked, not derived.
+  if (gameKind === 'follow' && gameSequence.length > 0) {
+    const first = gameSequence[0];
+    gameGreenNotes.add(first.barIdx + ':' + first.slotIdx);
+  }
   gameClearWrongFlash();
+  gameClearWrongBars();
+  gameClearFillNotes();
   gameUpdateCounters();
   gameApplyVisibility();
+}
+
+// Remove every fill-note DOM element from the chart AND restore
+// any rest glyphs that were hidden to make room for them. Called
+// on game reset so the next play-through starts with a clean
+// staff.
+function gameClearFillNotes() {
+  for (const el of gameFillNoteEls) {
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+  gameFillNoteEls = [];
+  document.querySelectorAll('.vf-stavenote.game-rest-filled').forEach(el => {
+    el.classList.remove('game-rest-filled');
+    if (el.style) el.style.visibility = '';
+  });
+}
+
+// Reference pitch the fill-note placer uses to pick an octave for
+// the user's pressed PC. Walks BACKWARD from the current cursor
+// to find the most recently-encountered landmark — that's the
+// pitch the line would currently sit on. Falls forward if no
+// previous landmark exists yet (e.g., the user plays a fill before
+// any landmark has fired), so the very first fill still lands in
+// a sensible register.
+function gameGetReferencePitchForFill() {
+  for (let i = gameCursor - 1; i >= 0; i--) {
+    if (gameSequence[i] && gameSequence[i].pitch != null) return gameSequence[i].pitch;
+  }
+  for (let i = 0; i < gameSequence.length; i++) {
+    if (gameSequence[i] && gameSequence[i].pitch != null) return gameSequence[i].pitch;
+  }
+  return 41; // F2 — cello midrange fallback
+}
+
+// Render a "fill" notehead at the rest at barIdx + restSlot, at
+// the staff position for the user's played pitch. When micMidi is
+// provided (mic-driven input), uses that ACTUAL detected octave;
+// otherwise (keyboard input) picks the octave closest to the
+// surrounding landmarks. Returns the MIDI pitch placed (so the
+// caller can play it through the lead sampler when the input came
+// from the on-screen keyboard), or null if rendering failed.
+function gamePlaceFillNote(barIdx, restSlot, pressedPc, micMidi) {
+  if (typeof barElements === 'undefined' || !barElements) return null;
+  const info = barElements[barIdx];
+  if (!info || !info.noteEls) return null;
+  const restEl = info.noteEls[restSlot];
+  if (!restEl) return null;
+  const svg = restEl.ownerSVGElement;
+  if (!svg) return null;
+
+  // MIDI pitch resolution:
+  //   - micMidi given → use the user's ACTUAL detected octave.
+  //   - otherwise → guess via closest-octave to a surrounding
+  //     landmark (on-screen keyboard inputs don't carry octave).
+  let pressedMidi;
+  if (micMidi != null && isFinite(micMidi)) {
+    pressedMidi = micMidi;
+  } else {
+    const refMidi = gameGetReferencePitchForFill();
+    pressedMidi = gamePitchInClosestOctave(refMidi, pressedPc);
+  }
+
+  // X position: center of the rest's bounding box, converted from
+  // screen space to the SVG's viewBox coords.
+  const rect = restEl.getBoundingClientRect();
+  if (!rect || rect.width <= 0) return null;
+  const svgRect = svg.getBoundingClientRect();
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const vbOK = vb && vb.width > 0 && vb.height > 0;
+  const vbSX = vbOK ? vb.width  / svgRect.width  : 1;
+  const vbOX = vbOK ? vb.x : 0;
+  const cx = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
+
+  // Y position: compute the written staff position for this pitch
+  // (8vb bass clef means written = sounding + 1 octave) and
+  // convert to SVG y using the bar's staffY. VexFlow's default
+  // bass clef puts the BOTTOM line at staffY + 40, top line at
+  // staffY, with 5px between consecutive staff positions.
+  const LETTER_IDX = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
+  const letter = GAME_PC_LETTER[pressedPc] || 'C';
+  const writtenOctave = Math.floor(pressedMidi / 12); // sounding octave + 1 for 8vb
+  // Bottom line of bass clef = G2 written = letter index 4, octave 2 → step 18.
+  const staffStep = (LETTER_IDX[letter] || 0) + writtenOctave * 7 - 18;
+  const staffY = (typeof info.y === 'number') ? info.y : 36;
+  const cy = staffY + 40 - 5 * staffStep;
+
+  // Borrow geometry + glyph from the FIRST landmark notehead we
+  // can find in this bar. Cloning the landmark's actual
+  // `<g class="vf-notehead">` (VexFlow's Bravura glyph as an SVG
+  // path) into a translating wrapper gives us a PIXEL-PERFECT
+  // size + shape match with the staff's other noteheads. Falls
+  // back to a drawn ellipse only when no clonable landmark is
+  // available (rare — Landmarks always has 2 landmarks per bar).
+  let refNoteheadEl = null;
+  let refX = null, refY = null;
+  let noteheadW = 11;
+  let stemLen = 32;
+  if (info.noteData) {
+    for (let i = 0; i < info.noteData.length; i++) {
+      const nd = info.noteData[i];
+      if (!nd || !nd.staveNote) continue;
+      try {
+        const w = nd.staveNote.getGlyphWidth && nd.staveNote.getGlyphWidth();
+        if (w && w > 0) noteheadW = w;
+        const absX = nd.staveNote.getAbsoluteX();
+        const ys = nd.staveNote.getYs && nd.staveNote.getYs();
+        if (isFinite(absX) && ys && ys.length) {
+          refX = absX + noteheadW / 2;
+          refY = ys[0];
+        }
+      } catch (e) { /* ignore */ }
+      const el = info.noteEls[i];
+      if (el) {
+        const nh = el.querySelector('.vf-notehead');
+        if (nh && refX != null && refY != null) {
+          refNoteheadEl = nh;
+          break;
+        }
+      }
+    }
+  }
+
+  // Build the fill group: notehead (cloned VexFlow glyph if
+  // possible, otherwise a tilted ellipse fallback) + stem +
+  // optional sharp glyph. Standard black so it reads as a normal
+  // note (no special "feedback" color).
+  const NS = 'http://www.w3.org/2000/svg';
+  const COLOR = '#000';
+  const g = document.createElementNS(NS, 'g');
+  g.setAttribute('class', 'game-fill-note');
+  g.setAttribute('pointer-events', 'none');
+
+  // The bounding-X for the stem placement. Differs depending on
+  // whether we cloned a glyph (use the glyph's intrinsic half-
+  // width) or drew an ellipse (use rx).
+  let stemRx = noteheadW / 2;
+
+  // Ledger lines: draw the horizontal short lines that anchor any
+  // notehead landing outside the 5-staff-line range. VexFlow does
+  // this automatically for real staveNotes; we have to do it
+  // manually for the custom-drawn fill. Without them, a high or
+  // low fill floats with no visual reference and the octave is
+  // unreadable.
+  //
+  // Bottom line G2(written) sits at staffY + 40. The first ledger
+  // below is at staffY + 50 (E2), the next at +60 (C2), etc. Top
+  // line A3(written) sits at staffY. First ledger above is at
+  // staffY - 10 (C4), next at -20 (E4), etc. Each ledger is one
+  // diatonic step (5px) past the previous space, i.e. ledger Y
+  // values are at the 10-multiple boundaries past the staff edge.
+  const ledgerHalfLen = Math.max(7, noteheadW / 2 + 2);
+  let topMostDrawY = cy; // tracked to extend the viewBox if needed
+  for (let y = staffY + 50; y <= cy + 0.5; y += 10) {
+    const ll = document.createElementNS(NS, 'line');
+    ll.setAttribute('x1', cx - ledgerHalfLen);
+    ll.setAttribute('y1', y);
+    ll.setAttribute('x2', cx + ledgerHalfLen);
+    ll.setAttribute('y2', y);
+    ll.setAttribute('stroke', COLOR);
+    ll.setAttribute('stroke-width', '1.5');
+    g.appendChild(ll);
+  }
+  for (let y = staffY - 10; y >= cy - 0.5; y -= 10) {
+    const ll = document.createElementNS(NS, 'line');
+    ll.setAttribute('x1', cx - ledgerHalfLen);
+    ll.setAttribute('y1', y);
+    ll.setAttribute('x2', cx + ledgerHalfLen);
+    ll.setAttribute('y2', y);
+    ll.setAttribute('stroke', COLOR);
+    ll.setAttribute('stroke-width', '1.5');
+    g.appendChild(ll);
+    if (y < topMostDrawY) topMostDrawY = y;
+  }
+
+  // Extend the SVG viewBox upward if our fill (with its stem +
+  // ledger lines) lands above the current viewable area. VexFlow's
+  // renderChart only auto-shifts the viewBox for the landmark
+  // notes it knows about — custom fills land outside that math, so
+  // a high pizz fill can paint its notehead at the top of the SVG
+  // with ledger lines technically AT the right y-coordinate but
+  // clipped by the viewBox boundary.
+  try {
+    const vb = svg.viewBox && svg.viewBox.baseVal;
+    if (vb && isFinite(vb.y) && isFinite(vb.height)) {
+      // Estimate the topmost pixel the fill paints: ledger lines
+      // extend up to topMostDrawY; the stem goes from the notehead
+      // up to cy - stemLen when stem-up; the sharp glyph sits
+      // around the notehead. Take the most extreme.
+      const fillTop = Math.min(
+        topMostDrawY - 2,             // ledger lines (small margin)
+        cy - stemLen - 2,             // stem-up endpoint
+        cy - (noteheadW * 0.36) - 2   // notehead top
+      );
+      if (fillTop < vb.y) {
+        const extend = vb.y - fillTop;
+        const newY = fillTop;
+        const newH = vb.height + extend;
+        svg.setAttribute('viewBox',
+          vb.x + ' ' + newY + ' ' + vb.width + ' ' + newH);
+      }
+    }
+  } catch (e) { /* viewBox API quirky in some browsers — best-effort */ }
+
+  if (refNoteheadEl) {
+    // Clone the landmark's notehead glyph. The clone keeps its
+    // original (absolute) coordinates baked in; wrap it in a
+    // translating <g> so the entire glyph shifts to (cx, cy)
+    // without disturbing its internal transforms.
+    const wrapper = document.createElementNS(NS, 'g');
+    const dx = cx - refX;
+    const dy = cy - refY;
+    wrapper.setAttribute('transform', 'translate(' + dx + ',' + dy + ')');
+    const clone = refNoteheadEl.cloneNode(true);
+    // Clear any inline visibility:hidden that may have been
+    // copied from the source (shouldn't normally happen for a
+    // landmark, but defensive).
+    clone.style.visibility = '';
+    wrapper.appendChild(clone);
+    g.appendChild(wrapper);
+  } else {
+    // Fallback: drawn ellipse approximating a notehead.
+    const rx = Math.max(4.5, noteheadW / 2);
+    const ry = Math.max(4,   noteheadW * 0.36); // ~7/11 aspect
+    stemRx = rx;
+    const ellipse = document.createElementNS(NS, 'ellipse');
+    ellipse.setAttribute('cx', cx);
+    ellipse.setAttribute('cy', cy);
+    ellipse.setAttribute('rx', rx);
+    ellipse.setAttribute('ry', ry);
+    ellipse.setAttribute('transform', 'rotate(-20 ' + cx + ' ' + cy + ')');
+    ellipse.setAttribute('fill', COLOR);
+    g.appendChild(ellipse);
+  }
+
+  // Stem direction: down when notehead is above the middle staff
+  // line, up when below — matches VexFlow's default.
+  const staffMidY = staffY + 20;
+  const stemDown = cy < staffMidY;
+  const stem = document.createElementNS(NS, 'line');
+  if (stemDown) {
+    stem.setAttribute('x1', cx - stemRx + 0.5);
+    stem.setAttribute('y1', cy);
+    stem.setAttribute('x2', cx - stemRx + 0.5);
+    stem.setAttribute('y2', cy + stemLen);
+  } else {
+    stem.setAttribute('x1', cx + stemRx - 0.5);
+    stem.setAttribute('y1', cy);
+    stem.setAttribute('x2', cx + stemRx - 0.5);
+    stem.setAttribute('y2', cy - stemLen);
+  }
+  stem.setAttribute('stroke', COLOR);
+  stem.setAttribute('stroke-width', '1.5');
+  g.appendChild(stem);
+
+  if (GAME_PC_IS_SHARP[pressedPc]) {
+    const sharp = document.createElementNS(NS, 'text');
+    sharp.setAttribute('x', cx - stemRx - 8);
+    sharp.setAttribute('y', cy + 5);
+    sharp.setAttribute('font-family', 'serif');
+    sharp.setAttribute('font-size', '18');
+    sharp.setAttribute('font-weight', 'bold');
+    sharp.setAttribute('fill', COLOR);
+    sharp.textContent = '♯';
+    g.appendChild(sharp);
+  }
+
+  svg.appendChild(g);
+  gameFillNoteEls.push(g);
+  // Hide the rest glyph so the user sees only the fill notehead
+  // in that slot. Apply both a class AND an inline style — the
+  // class is the documented mechanism but the inline style is
+  // defensive in case the rest's outer <g> has a class that
+  // doesn't include `vf-stavenote` in some VexFlow build.
+  // visibility:hidden keeps the slot's layout box in place
+  // (barlines / downstream notes don't shift).
+  restEl.classList.add('game-rest-filled');
+  restEl.style.visibility = 'hidden';
+  return pressedMidi;
 }
 
 function gameUpdateCounters() {
@@ -16283,11 +17099,90 @@ function gamePlayNote(midi) {
 // Handle a keyboard key press (pc = 0..11). Compares against the
 // next-expected note's pitch-class; reveals + plays on match,
 // flashes red on miss.
-function gameHandleKeyPress(pc) {
+//
+// micMidi is the actual detected MIDI value when the call comes
+// from the mic path (which can resolve the OCTAVE, not just PC).
+// On a rest beat in Follow mode, the fill-note placer uses this
+// to draw the note in the user's ACTUAL octave instead of
+// guessing one from surrounding landmarks. Undefined when the
+// input came from the on-screen keyboard (which has no octave).
+function gameHandleKeyPress(pc, playLead, micMidi) {
+  // playLead controls whether a CORRECT note triggers the guitar
+  // sampler. Defaults to true. The mic-driven path passes false:
+  // the user just produced the audio themselves, so adding a
+  // guitar layer would be redundant (and risks the guitar feeding
+  // back into the mic detector).
+  if (playLead === undefined) playLead = true;
   if (!gameMode) return;
-  if (gameCursor >= gameSequence.length) return; // game complete
+  if (gameFollowFinished) return;
+
+  // ----- Follow mode -----
+  // Drives off gameCurrentBeat (the metronome's beat cursor), so
+  // landmark beats and rest beats are handled independently. On a
+  // landmark beat the input is checked against the landmark; on a
+  // rest beat the input gets dropped onto the staff as a free
+  // "fill" note in green at the rest's position.
+  if (gameKind === 'follow') {
+    if (gameCurrentBeat < 0 || gameCurrentBeat >= gameBeatMap.length) return;
+    const beatInfo = gameBeatMap[gameCurrentBeat];
+    if (!beatInfo) return;
+
+    // Landmark beat — compare against the expected pitch class.
+    if (beatInfo.seqIdx >= 0) {
+      const expected = gameSequence[beatInfo.seqIdx];
+      if (!expected) return;
+      // Visual key-press feedback on the keyboard cell.
+      const cell = document.querySelector('.game-key[data-pc="' + pc + '"]');
+      if (cell) {
+        cell.classList.add(expected.pc === pc ? 'flash-correct' : 'flash-wrong');
+        setTimeout(() => {
+          if (cell) cell.classList.remove('flash-correct', 'flash-wrong');
+        }, 220);
+      }
+      const key = expected.barIdx + ':' + expected.slotIdx;
+      // First attempt wins. Once a note has been played (correctly
+      // or not) in this beat, ignore subsequent presses.
+      if (gamePlayedNotes.has(key)) return;
+      gamePlayedNotes.add(key);
+      if (expected.pc === pc) {
+        gameCorrect++;
+        gameGreenNotes.add(key);
+        gameApplyVisibility();
+        if (playLead) gamePlayNote(expected.pitch);
+        gameClearWrongFlash();
+      } else {
+        gameMistakes++;
+        gameRedNotes.add(key);
+        gameApplyVisibility();
+        gameShowWrongFlash(pc);
+      }
+      gameUpdateCounters();
+      return;
+    }
+
+    // Rest beat — place a green "fill" notehead at the rest's
+    // position. No correct/mistake score change for fills (the
+    // user is improvising; we just paint what they played so they
+    // can see their line shape).
+    if (beatInfo.slotIdx < 0) return; // nowhere to place the fill
+    const cell2 = document.querySelector('.game-key[data-pc="' + pc + '"]');
+    if (cell2) {
+      cell2.classList.add('flash-correct');
+      setTimeout(() => { if (cell2) cell2.classList.remove('flash-correct'); }, 220);
+    }
+    const fillKey = beatInfo.barIdx + ':' + beatInfo.slotIdx;
+    if (gameFilledRests.has(fillKey)) return;
+    gameFilledRests.add(fillKey);
+    const placedMidi = gamePlaceFillNote(beatInfo.barIdx, beatInfo.slotIdx, pc, micMidi);
+    if (playLead && placedMidi != null) gamePlayNote(placedMidi);
+    return;
+  }
+
+  // ----- Hidden mode (original behavior) -----
+  // Cursor < 0: pre-start. Cursor >= length: game complete.
+  if (gameCursor < 0 || gameCursor >= gameSequence.length) return;
   const expected = gameSequence[gameCursor];
-  // Visual key-press feedback (brief flash on the keyboard cell).
+  // Visual key-press feedback on the keyboard cell.
   const cell = document.querySelector('.game-key[data-pc="' + pc + '"]');
   if (cell) {
     cell.classList.add(expected.pc === pc ? 'flash-correct' : 'flash-wrong');
@@ -16299,23 +17194,127 @@ function gameHandleKeyPress(pc) {
     gameCorrect++;
     gameCursor++;
     gameApplyVisibility();
-    gamePlayNote(expected.pitch);
+    if (playLead) gamePlayNote(expected.pitch);
     gameClearWrongFlash();
-    // Chord preview: if the note we just accepted was the LAST one
-    // of its chord (i.e., the next pending note belongs to a
-    // different chord event), play the upcoming chord on piano as
-    // a cue. Mirrors the comp-style voicing used by regular
-    // playback so the harmonic context is the same one the user
-    // hears when listening passively.
+    // Chord confirmation: if the note we just accepted was the LAST
+    // one of its chord (the next pending note belongs to a different
+    // chord event, OR the song just ended), play THAT chord — the
+    // one we just finished — as audible confirmation.
     const nextEntry = gameSequence[gameCursor];
-    if (nextEntry && nextEntry.chordEventIdx !== expected.chordEventIdx) {
-      gamePlayNextChord(nextEntry.chordEventIdx);
+    const justCompletedChord = !nextEntry
+                            || nextEntry.chordEventIdx !== expected.chordEventIdx;
+    if (justCompletedChord) {
+      gamePlayNextChord(expected.chordEventIdx);
+      if (nextEntry && Array.isArray(lastChordEvents)) {
+        const upcomingBar = lastChordEvents[nextEntry.chordEventIdx]
+          ? lastChordEvents[nextEntry.chordEventIdx].barIdx : -1;
+        if (upcomingBar >= 0) gameScrollToBar(upcomingBar);
+      }
     }
   } else {
     gameMistakes++;
     gameShowWrongFlash(pc);
+    // Punish a wrong note by REWINDING to the start of the current
+    // chord. The very first note of the song is exempt — it's
+    // always given for free (gameCursor starts at 1), so we floor
+    // the rewind target at 1.
+    if (expected.chordEventIdx >= 0) {
+      let chordStart = -1;
+      for (let i = 0; i < gameSequence.length; i++) {
+        if (gameSequence[i].chordEventIdx === expected.chordEventIdx) {
+          chordStart = i;
+          break;
+        }
+      }
+      if (chordStart >= 0) {
+        if (chordStart < 1) chordStart = 1;
+        if (chordStart < gameCursor) {
+          gameCursor = chordStart;
+          gameApplyVisibility();
+        }
+      }
+    }
   }
   gameUpdateCounters();
+}
+
+// Follow-mode tick: called by gameMetronomeTick on each beat.
+// Advances one BEAT (not one landmark) so exercises with rests on
+// some beats (Landmarks: notes on 1+3, rests on 2+4) let the user
+// play landmark notes on the strong beats AND drop free fill
+// notes on rest beats. Evaluates the beat that just ended: if it
+// was a landmark beat and the user didn't play the landmark, it
+// counts as a miss. Rest beats are not evaluated.
+function gameFollowAdvance() {
+  if (!gameMode || gameKind !== 'follow' || gameFollowFinished) return;
+  // Evaluate the beat that just ended (gameCurrentBeat). Only
+  // landmark beats need evaluation — for rest beats the user can
+  // play anything (or nothing) without penalty.
+  if (gameCurrentBeat >= 0 && gameCurrentBeat < gameBeatMap.length) {
+    const beatInfo = gameBeatMap[gameCurrentBeat];
+    if (beatInfo && beatInfo.seqIdx >= 0) {
+      const entry = gameSequence[beatInfo.seqIdx];
+      if (entry) {
+        const key = entry.barIdx + ':' + entry.slotIdx;
+        if (!gamePlayedNotes.has(key)) {
+          gameMistakes++;
+          gameUpdateCounters();
+        }
+        // Sync gameCursor so any code still reading it stays
+        // consistent with the beat-driven cursor.
+        gameCursor = beatInfo.seqIdx + 1;
+      }
+    }
+  }
+  gameCurrentBeat++;
+  if (gameCurrentBeat >= gameBeatMap.length) {
+    // Walked past the last beat — finalize.
+    gameFollowFinished = true;
+    if (typeof gameMetronomeStop === 'function') gameMetronomeStop();
+    gameMarkWrongBars();
+    return;
+  }
+  const next = gameBeatMap[gameCurrentBeat];
+  if (next) gameScrollToBar(next.barIdx);
+  // Chord stab — fire when we're advancing onto the FIRST beat of
+  // a new chord (either the very first beat of the song or the
+  // chord event index differs from the previous beat's). One
+  // octave up and 200ms mic-duck (see gamePlayChordStab).
+  const prevBeat = gameCurrentBeat > 0 ? gameBeatMap[gameCurrentBeat - 1] : null;
+  if (next && next.chordEventIdx >= 0
+      && (!prevBeat || prevBeat.chordEventIdx !== next.chordEventIdx)) {
+    gamePlayChordStab(next.chordEventIdx, 1, 200);
+  }
+}
+
+// Scroll the chart container so the row containing `barIdx` is
+// brought into view. Used by the chord-preview path so a chord
+// change that lands on a new line of the score also pulls the
+// view down to that line. Skips scrolling when the target row is
+// already comfortably inside the viewport so we don't twitch the
+// view on every chord change within the same row.
+function gameScrollToBar(barIdx) {
+  if (typeof barElements === 'undefined' || !barElements) return;
+  const info = barElements[barIdx];
+  if (!info || !info.rowEl) return;
+  const chartEl = document.getElementById('chart');
+  if (!chartEl) return;
+  const rowRect   = info.rowEl.getBoundingClientRect();
+  const chartRect = chartEl.getBoundingClientRect();
+  const rowTop    = rowRect.top - chartRect.top + chartEl.scrollTop;
+  const rowBot    = rowTop + rowRect.height;
+  const viewTop   = chartEl.scrollTop;
+  const viewBot   = viewTop + chartEl.clientHeight;
+  // Already fully on-screen — do nothing.
+  if (rowTop >= viewTop + 4 && rowBot <= viewBot - 4) return;
+  // Same TOP_BUFFER value as the playback page-flip logic — clears
+  // chord labels and gives the row some headroom from the top of
+  // the chart container.
+  const TOP_BUFFER = 56;
+  const target = Math.max(0, rowTop - TOP_BUFFER);
+  if (Math.abs(target - viewTop) >= 20) {
+    chartEl.scrollTo({ top: target, behavior: 'smooth' });
+  }
 }
 
 // Play the chord at chordEvents[chordEventIdx] through the piano
@@ -16323,6 +17322,21 @@ function gameHandleKeyPress(pc) {
 // uses. No-op if the sampler isn't loaded, the chord-event lookup
 // fails, or jazzVoicing returns null (NC / slash chords).
 function gamePlayNextChord(chordEventIdx) {
+  // Convenience wrapper kept for the Hidden-mode "chord just
+  // completed" call site. No octave shift, no mic duck — the
+  // chord plays after a note acceptance, so the mic isn't actively
+  // racing the stab for the next attack.
+  gamePlayChordStab(chordEventIdx, 0, 0);
+}
+
+// Play a piano chord stab voiced by jazzVoicing(). Optionally
+// shifts every note in the voicing by `octaveOffset` octaves and
+// ducks the mic detector for `duckMs` milliseconds — both used by
+// the Follow-mode "stab at start of each chord" cue so the chord
+// sits above the cello's typical playing range AND so its attack
+// transient can't fool the YIN/onset detector into mis-locking on
+// the piano's fundamentals.
+function gamePlayChordStab(chordEventIdx, octaveOffset, duckMs) {
   if (chordEventIdx < 0) return;
   if (!Array.isArray(lastChordEvents)) return;
   const ce = lastChordEvents[chordEventIdx];
@@ -16332,12 +17346,20 @@ function gamePlayNextChord(chordEventIdx) {
   let notes;
   try { notes = jazzVoicing(ce.chord); } catch (e) { return; }
   if (!notes || !notes.length) return;
+  if (octaveOffset) {
+    notes = notes.map(n => n + 12 * octaveOffset);
+  }
   try {
     const names = notes.map(midiToName);
-    // Slightly louder + longer than a single melody note so the
-    // chord reads as a clear bed under the upcoming melody attempt.
-    piano.triggerAttackRelease(names, '2n', undefined, 0.6);
+    // Quick "stab" — a sharp 16th-note hit. Reads as a punctuation
+    // mark, not as a pad sustaining underneath the next melody attempt.
+    piano.triggerAttackRelease(names, '16n', undefined, 0.6);
   } catch (e) { /* best-effort cue */ }
+  if (duckMs > 0) {
+    const nowMs = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now() : Date.now();
+    gameMic.duckUntil = nowMs + duckMs;
+  }
 }
 
 // Toggle game mode on/off. Swaps the fingerboard panel for the
@@ -16375,6 +17397,12 @@ function gameSetMode(on) {
     // while the game keyboard is visible (no notes to match against
     // outside game mode).
     if (typeof gameMicStop === 'function') gameMicStop();
+    // Same reasoning for the metronome — the click is a game-mode
+    // pacing tool, not a general practice metronome.
+    if (typeof gameMetronomeStop === 'function') gameMetronomeStop();
+    // Tear down any fill notes the user placed during the session.
+    gameClearFillNotes();
+    gameFilledRests.clear();
   }
 }
 
@@ -16383,6 +17411,22 @@ function gameSetMode(on) {
   const btn = document.getElementById('gameToggle');
   if (btn) {
     btn.addEventListener('click', () => gameSetMode(!gameMode));
+  }
+  // Game-kind selector — switch between Follow and Hidden.
+  // Changing the kind resets the play-through so the previous run's
+  // red marks / cursor state don't leak into the new mode.
+  const kindSel = document.getElementById('gameKindSelect');
+  if (kindSel) {
+    gameKind = kindSel.value || 'follow';
+    kindSel.addEventListener('change', () => {
+      gameKind = kindSel.value || 'follow';
+      if (gameMode) {
+        // Stop the metronome before reset — Follow mode will
+        // re-arm its own metronome state on the next user toggle.
+        if (typeof gameMetronomeStop === 'function') gameMetronomeStop();
+        gameReset();
+      }
+    });
   }
   // Two keyboard halves now: left (C..F) and right (G♭..B), with the
   // score column between them. Both bind the same click handler.
@@ -16404,6 +17448,18 @@ function gameSetMode(on) {
       gameReset();
     });
   }
+  // Keyboard show/hide toggle. Adds/removes the `.kbd-hidden` class
+  // on the game panel — the CSS collapses both keyboard halves and
+  // centers the score column when that class is present.
+  const kbdToggle = document.getElementById('gameKeyboardToggle');
+  if (kbdToggle) {
+    kbdToggle.addEventListener('click', () => {
+      const panel = document.getElementById('gamePanel');
+      if (!panel) return;
+      const isHidden = panel.classList.toggle('kbd-hidden');
+      kbdToggle.setAttribute('aria-pressed', isHidden ? 'false' : 'true');
+    });
+  }
 })();
 
 // Reapply game state after every renderChart — picks up new
@@ -16414,10 +17470,20 @@ renderChart = function gameWrappedRenderChart() {
   const result = _gameOriginalRenderChart.apply(this, arguments);
   if (gameMode) {
     gameBuildSequence();
-    // Clamp cursor in case the new sequence is shorter than where
+    // Clamp cursors in case the new sequence is shorter than where
     // we were (e.g. user switched to a shorter song mid-game).
     if (gameCursor > gameSequence.length) gameCursor = gameSequence.length;
     if (gameCursor < 1) gameCursor = 1;
+    if (gameCurrentBeat >= gameBeatMap.length) gameCurrentBeat = gameBeatMap.length - 1;
+    // Re-render wipes the previous chart's SVG, so any fill-note
+    // <g> elements we appended live as detached DOM in the
+    // gameFillNoteEls array. Drop the references — the fills also
+    // need to be cleared from the in-game state since the new
+    // chart has no rests at the same coords. Hitting Reset is a
+    // hard restart anyway; this just keeps the render-wrapper
+    // path from carrying ghost references forward.
+    gameFillNoteEls = [];
+    gameFilledRests.clear();
     gameClearWrongFlash();
     gameUpdateCounters();
     gameApplyVisibility();
@@ -16509,9 +17575,18 @@ let gameMic = {
   rafId: null,
   inNote: false,
   acceptedThisAttack: false,
-  recentPcs: [],   // ring buffer of last GAME_MIC_PC_HISTORY detected PCs
+  // Ring buffer of (last GAME_MIC_PC_HISTORY) detected MIDI values.
+  // We track full MIDI — not just PC — so the fill-note placer can
+  // use the user's ACTUAL octave instead of guessing one from
+  // surrounding landmarks. The PC quorum is still derived from
+  // these MIDIs (`m % 12`).
+  recentMidis: [],
   smoothedRms: 0,
-  lastOnsetAt: 0
+  lastOnsetAt: 0,
+  // performance.now() timestamp until which mic detection should be
+  // skipped. Set by the metronome on each tick so the click's noise
+  // burst doesn't trip the onset detector or mask the cello attack.
+  duckUntil: 0
 };
 
 // YIN pitch detection. Returns Hz, or -1 if no confident pitch found.
@@ -16573,8 +17648,34 @@ function gameMicSetButton(active) {
   if (btn) btn.setAttribute('aria-pressed', active ? 'true' : 'false');
 }
 
+// Update the live detected-note readout in the score column. Pass
+// a MIDI value to show as letter+octave ("F1", "B♭2"); pass null
+// to clear the readout (mic stopped, or silence frame).
+function gameSetDetectedNote(midi) {
+  const el = document.getElementById('gameDetectedNote');
+  if (!el) return;
+  if (midi == null || !isFinite(midi)) {
+    el.textContent = '—';
+    return;
+  }
+  // midiToName gives sharps-form (C#, D#, F#, G#, A#). Substitute
+  // the unicode sharp glyph for a more musical look.
+  const name = midiToName(midi).replace('#', '♯');
+  el.textContent = name;
+}
+
 function gameMicProcessFrame() {
   if (!gameMic.running || !gameMic.analyser || !gameMic.buffer) return;
+  // If the metronome just clicked, skip detection for a short window
+  // so the click's noise burst can't fool the onset detector or
+  // briefly mask the cello attack. The click itself is high-pass
+  // filtered far above the cello range — YIN won't lock onto it
+  // even outside the duck — but the RMS spike from the click is
+  // still enough to trip onset detection, which would reset the
+  // accept gate prematurely.
+  const nowMs = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  if (gameMic.duckUntil && nowMs < gameMic.duckUntil) return;
   gameMic.analyser.getFloatTimeDomainData(gameMic.buffer);
   const buf = gameMic.buffer;
 
@@ -16595,7 +17696,8 @@ function gameMicProcessFrame() {
   if (rms < GAME_MIC_RMS_LOW) {
     gameMic.inNote = false;
     gameMic.acceptedThisAttack = false;
-    gameMic.recentPcs.length = 0;
+    gameMic.recentMidis.length = 0;
+    gameSetDetectedNote(null);
     return;
   }
   if (rms > GAME_MIC_RMS_HIGH) {
@@ -16619,7 +17721,7 @@ function gameMicProcessFrame() {
                && (now - gameMic.lastOnsetAt > GAME_MIC_ONSET_REFRACTORY);
   if (isOnset) {
     gameMic.acceptedThisAttack = false;
-    gameMic.recentPcs.length = 0;
+    gameMic.recentMidis.length = 0;
     gameMic.lastOnsetAt = now;
   }
 
@@ -16631,36 +17733,70 @@ function gameMicProcessFrame() {
   const hz = gameYinPitch(buf, sr);
   if (hz < GAME_MIC_MIN_HZ || hz > GAME_MIC_MAX_HZ) return;
 
-  // Hz → PC. midi = 69 + 12·log2(hz/440); the rounding to the
+  // Hz → MIDI. midi = 69 + 12·log2(hz/440); the rounding to the
   // nearest MIDI integer is what gives the ±50-cent intonation
   // tolerance (any pitch within 50 cents of a semitone lands on
   // that semitone). PC = MIDI mod 12.
   const midi = Math.round(69 + 12 * Math.log2(hz / 440));
-  const pc = ((midi % 12) + 12) % 12;
 
-  // Push into a small ring buffer of recent detections.
-  gameMic.recentPcs.push(pc);
-  if (gameMic.recentPcs.length > GAME_MIC_PC_HISTORY) {
-    gameMic.recentPcs.shift();
+  // Live readout — update every frame so the user sees the
+  // detected note in real time (including pre-quorum frames, so
+  // they can confirm the mic is picking up the right pitch even
+  // before it commits to a final answer).
+  gameSetDetectedNote(midi);
+
+  // Push the full MIDI into a small ring buffer of recent detections.
+  gameMic.recentMidis.push(midi);
+  if (gameMic.recentMidis.length > GAME_MIC_PC_HISTORY) {
+    gameMic.recentMidis.shift();
   }
   // Need at least QUORUM samples before we can even consider
   // accepting — keeps the very first frame of an attack (still
   // transient) from triggering.
-  if (gameMic.recentPcs.length < GAME_MIC_PC_QUORUM) return;
-  // Tally PC counts over the window and find the plurality winner.
-  const counts = {};
-  let winnerPc = -1, winnerCount = 0;
-  for (let i = 0; i < gameMic.recentPcs.length; i++) {
-    const p = gameMic.recentPcs[i];
-    counts[p] = (counts[p] || 0) + 1;
-    if (counts[p] > winnerCount) {
-      winnerCount = counts[p];
+  if (gameMic.recentMidis.length < GAME_MIC_PC_QUORUM) return;
+  // Tally PC counts over the window, and (per PC) tally MIDI
+  // counts so we can pick the most-common ACTUAL octave for the
+  // winning PC. YIN occasionally locks onto the 2nd harmonic at
+  // low frequencies (e.g. reports A2 when the user played A1);
+  // by picking the mode of the winning-PC MIDIs and tiebreaking
+  // toward the LOWER MIDI, those octave-up artifacts are filtered
+  // out of the final answer.
+  const pcCounts = {};
+  const midisByPc = {};
+  let winnerPc = -1, winnerPcCount = 0;
+  for (let i = 0; i < gameMic.recentMidis.length; i++) {
+    const m = gameMic.recentMidis[i];
+    const p = ((m % 12) + 12) % 12;
+    pcCounts[p] = (pcCounts[p] || 0) + 1;
+    if (!midisByPc[p]) midisByPc[p] = [];
+    midisByPc[p].push(m);
+    if (pcCounts[p] > winnerPcCount) {
+      winnerPcCount = pcCounts[p];
       winnerPc = p;
     }
   }
-  if (winnerCount >= GAME_MIC_PC_QUORUM) {
+  if (winnerPcCount >= GAME_MIC_PC_QUORUM) {
     gameMic.acceptedThisAttack = true;
-    gameHandleKeyPress(winnerPc);
+    // Pick the most-common MIDI within the winning PC (lower MIDI
+    // wins ties — prefers fundamental over harmonic).
+    const midis = midisByPc[winnerPc];
+    const midiCounts = {};
+    for (const m of midis) midiCounts[m] = (midiCounts[m] || 0) + 1;
+    let winnerMidi = midis[0];
+    let bestCount = -1;
+    for (const mStr in midiCounts) {
+      const m = +mStr;
+      const c = midiCounts[mStr];
+      if (c > bestCount || (c === bestCount && m < winnerMidi)) {
+        bestCount = c;
+        winnerMidi = m;
+      }
+    }
+    // playLead=false: the user just produced this note themselves,
+    // so layering the guitar sampler on top would be redundant.
+    // micMidi=winnerMidi: the actual detected octave, so the
+    // fill-note placer doesn't have to guess.
+    gameHandleKeyPress(winnerPc, false, winnerMidi);
     // Pulse the mic button to confirm a detection registered.
     const btn = document.getElementById('gameMicBtn');
     if (btn) {
@@ -16712,7 +17848,7 @@ async function gameMicStart() {
     gameMic.running = true;
     gameMic.inNote = false;
     gameMic.acceptedThisAttack = false;
-    gameMic.recentPcs.length = 0;
+    gameMic.recentMidis.length = 0;
     gameMic.smoothedRms = 0;
     gameMic.lastOnsetAt = 0;
     gameMicSetButton(true);
@@ -16754,6 +17890,7 @@ function gameMicStop() {
   gameMic.analyser = null;
   gameMic.buffer = null;
   gameMicSetButton(false);
+  gameSetDetectedNote(null);
 }
 
 (function bindGameMicButton() {
@@ -16764,6 +17901,138 @@ function gameMicStop() {
       gameMicStop();
     } else {
       gameMicStart();
+    }
+  });
+})();
+
+// ===== Game mode: metronome =====
+// Independent click track for game mode. Runs off setInterval keyed
+// to `currentTempo` (the BPM picked by the Tempo segmented control).
+// Uses the same `click` Tone.NoiseSynth that drum-mode "Click" uses.
+//
+// Mic conflict avoidance:
+//   - The click is a high-pass-filtered (>2500Hz) noise burst, well
+//     above cello fundamentals (≤880Hz). YIN's range gate
+//     (40-1500Hz) drops it even if it managed to find a pitch.
+//   - To stop the click's RMS spike from tripping the mic's onset
+//     detector (which would reset the accept gate and briefly mask
+//     a cello attack landing on the same beat), the tick handler
+//     sets `gameMic.duckUntil` to `now + GAME_METRONOME_DUCK_MS`.
+//     gameMicProcessFrame bails early while in that window.
+
+const GAME_METRONOME_DUCK_MS = 90; // mic-detection blackout after each click
+
+let gameMetronome = {
+  running: false,
+  intervalId: null,
+  bpm: 120,
+  // Count-in: clicks-only (no cursor advancement, no game scoring)
+  // for the first N beats after pressing Play. Lets the user press
+  // Play, lift their bow / get ready, and start playing in time
+  // when the count-in lapses. N = countInBars × beatsPerBar at the
+  // time Play was pressed.
+  countInRemaining: 0
+};
+
+function gameMetronomeSetButton(active) {
+  const btn = document.getElementById('gameMetronomeBtn');
+  if (btn) btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+}
+
+function gameMetronomeTick() {
+  // Play the click via the existing Tone.NoiseSynth used by the
+  // "Click" drum mode. Short '32n' release so the click reads as
+  // a tight tick, not a sweeping burst.
+  if (typeof click !== 'undefined' && click) {
+    try { click.triggerAttackRelease('32n', undefined, 0.7); }
+    catch (e) { /* sampler not ready yet */ }
+  }
+  // Duck the mic detector so this click doesn't trip the onset
+  // edge or mask a simultaneous cello attack.
+  const nowMs = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  gameMic.duckUntil = nowMs + GAME_METRONOME_DUCK_MS;
+  // Visual pulse on the button. During the count-in we use an
+  // orange-tinted pulse so the user has a clear "I'm warming up"
+  // vs. "I'm playing now" visual cue.
+  const btn = document.getElementById('gameMetronomeBtn');
+  if (btn) {
+    btn.classList.remove('tick-pulse', 'count-in-pulse');
+    void btn.offsetWidth; // reflow so the animation restarts
+    btn.classList.add(
+      gameMetronome.countInRemaining > 0 ? 'count-in-pulse' : 'tick-pulse'
+    );
+  }
+  // Count-in: just play the click and decrement; don't advance the
+  // game cursor yet. When the count-in counter reaches zero the
+  // NEXT tick (and all subsequent ticks) runs the normal game
+  // advancement.
+  if (gameMetronome.countInRemaining > 0) {
+    gameMetronome.countInRemaining--;
+    return;
+  }
+  // Follow mode: each tick drives the cursor through the score.
+  // Hidden mode just gets the audible/visual click — cursor is
+  // driven by the user's correct inputs there.
+  if (gameMode && gameKind === 'follow') {
+    gameFollowAdvance();
+  }
+}
+
+function gameMetronomeStart() {
+  if (gameMetronome.running) return;
+  // Kick off audio so the click sampler is loaded. The button click
+  // is a user gesture, so Tone.start() inside initAudio() succeeds.
+  if (typeof initAudio === 'function') initAudio().catch(() => {});
+  const bpm = (typeof currentTempo === 'number' && currentTempo > 0)
+    ? currentTempo : 120;
+  const intervalMs = 60000 / bpm;
+  gameMetronome.bpm = bpm;
+  gameMetronome.running = true;
+  // Count-in beats = countInBars setting × beats-per-bar of the
+  // current song. Reads from the existing global `countInBars`
+  // (Instruments panel → Count-in seg). With 0, the very first
+  // tick is already a "game" beat — no warm-up. With 1, the first
+  // bar's worth of ticks is click-only; the cursor starts advancing
+  // on the FIRST tick of the second bar (which doubles as the
+  // downbeat of the music).
+  const ts = (window.currentSong && typeof parseTimesig === 'function')
+    ? parseTimesig(window.currentSong.timesig) : null;
+  const beatsPerBar = (ts && ts.num) ? ts.num : 4;
+  const bars = (typeof countInBars === 'number') ? countInBars : 0;
+  gameMetronome.countInRemaining = Math.max(0, bars * beatsPerBar);
+  gameMetronomeSetButton(true);
+  // First tick immediately so the user gets feedback the moment
+  // they toggle on; subsequent ticks at `intervalMs` cadence.
+  gameMetronomeTick();
+  gameMetronome.intervalId = setInterval(gameMetronomeTick, intervalMs);
+}
+
+function gameMetronomeStop() {
+  if (gameMetronome.intervalId != null) {
+    clearInterval(gameMetronome.intervalId);
+    gameMetronome.intervalId = null;
+  }
+  gameMetronome.running = false;
+  gameMetronome.countInRemaining = 0;
+  gameMetronomeSetButton(false);
+  // Clear any residual mic duck so detection resumes immediately.
+  gameMic.duckUntil = 0;
+  // Also clear any leftover button pulse classes from the count-in
+  // or in-game ticks so the icon settles cleanly on the stopped
+  // state.
+  const btn = document.getElementById('gameMetronomeBtn');
+  if (btn) btn.classList.remove('tick-pulse', 'count-in-pulse');
+}
+
+(function bindGameMetronomeButton() {
+  const btn = document.getElementById('gameMetronomeBtn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    if (gameMetronome.running) {
+      gameMetronomeStop();
+    } else {
+      gameMetronomeStart();
     }
   });
 })();

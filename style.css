@@ -735,27 +735,57 @@ main {
   gap: 4px;
 }
 .game-panel[hidden] { display: none; }
-/* Fixed-width score area so 1-, 2-, and 3-digit values all occupy
-   the same horizontal slice — keeps the keyboard on the right from
-   shifting when the counter rolls from 99 → 100. */
+/* Score area — fixed-width column that sits between the two C-shape
+   keyboard halves. Wider than before so the previously-stacked
+   controls can fan out into a tighter, more visible grid instead
+   of an over-tall vertical stack with a lot of empty space below.
+   Layout:
+     [ Follow / Hidden dropdown          ]  full width
+     [ correct count   |   mistake count ]  2-col, large serif numerals
+     [ ↺  |  🎤  |  ▶                    ]  3-button row
+*/
 .game-score {
   flex-shrink: 0;
-  width: 70px;
+  width: 130px;
   display: flex;
   flex-direction: column;
-  align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 6px;
   font-family: serif;
-  font-size: 21px;
   font-weight: bold;
   line-height: 1.1;
 }
-.game-correct { color: #000; }
+.game-score-counters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  justify-items: center;
+  gap: 6px;
+  font-size: 26px;
+}
+.game-correct  { color: #000; }
 .game-mistakes { color: #c92a2a; }
+/* Live mic-detected-note readout. Updates every audio frame in
+   game mode so you can see what YIN/the spectral correction is
+   resolving to in real time ("F1", "B♭2", "—" when silent). */
+.game-detected {
+  text-align: center;
+  font-family: serif;
+  font-size: 15px;
+  font-weight: bold;
+  color: #1e6fd4;
+  min-height: 17px;
+  line-height: 1;
+}
+.game-score-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  justify-items: center;
+}
 .game-reset-btn {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   border: 1px solid #888;
   background: #fff;
@@ -763,15 +793,14 @@ main {
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  margin-top: 2px;
 }
 .game-reset-btn:hover { background: #f0f0f0; }
 /* Mic toggle — turns red+filled when the mic is actively listening
    so the user has a glance-check of whether sung/played notes are
    being detected. */
 .game-mic-btn {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   border: 1px solid #888;
   background: #fff;
@@ -781,9 +810,8 @@ main {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  margin-top: 4px;
 }
-.game-mic-btn svg { width: 20px; height: 20px; }
+.game-mic-btn svg { width: 18px; height: 18px; }
 .game-mic-btn:hover { background: #f0f0f0; }
 .game-mic-btn[aria-pressed="true"] {
   background: #c92a2a;
@@ -800,6 +828,81 @@ main {
 .game-mic-btn.active-pulse {
   animation: gameMicPulse 0.6s ease-out;
 }
+/* Play/Stop toggle — kicks off the game (count-in clicks, then the
+   game cursor advances on each beat in Follow mode; just an audible
+   metronome in Hidden mode). Triangle icon when stopped, square
+   icon when playing. Lights up green while running; pulses on
+   every beat so the user can sync visually. */
+.game-play-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid #888;
+  background: #fff;
+  color: #555;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.game-play-btn svg { width: 18px; height: 18px; }
+.game-play-btn .game-stop-icon { display: none; }
+.game-play-btn:hover { background: #f0f0f0; }
+.game-play-btn[aria-pressed="true"] {
+  background: #2b8a3e;
+  border-color: #2b8a3e;
+  color: #fff;
+}
+.game-play-btn[aria-pressed="true"]:hover { background: #226c30; }
+.game-play-btn[aria-pressed="true"] .game-play-icon { display: none; }
+.game-play-btn[aria-pressed="true"] .game-stop-icon { display: inline; }
+@keyframes gamePlayPulse {
+  0%   { box-shadow: 0 0 0 0   rgba(43, 138, 62, 0.6); }
+  100% { box-shadow: 0 0 0 8px rgba(43, 138, 62, 0.0); }
+}
+.game-play-btn.tick-pulse {
+  animation: gamePlayPulse 0.25s ease-out;
+}
+/* Count-in tick — pulses the play button orange to distinguish
+   from a regular in-game beat. */
+@keyframes gameCountInPulse {
+  0%   { box-shadow: 0 0 0 0   rgba(217, 72, 15, 0.6); }
+  100% { box-shadow: 0 0 0 8px rgba(217, 72, 15, 0.0); }
+}
+.game-play-btn.count-in-pulse {
+  animation: gameCountInPulse 0.25s ease-out;
+}
+/* Keyboard show/hide toggle. Press to collapse the two C-shape
+   halves; the score column (dropdown, counters, action buttons,
+   and this toggle) stays in place so the panel compresses to a
+   narrow strip. aria-pressed=true means the keyboard is CURRENTLY
+   SHOWN (the default). */
+.game-kbd-toggle {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid #888;
+  background: #fff;
+  color: #555;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.game-kbd-toggle svg { width: 20px; height: 20px; }
+.game-kbd-toggle:hover { background: #f0f0f0; }
+.game-kbd-toggle[aria-pressed="false"] {
+  /* Keyboard hidden — show the button "off" (greyed-out look). */
+  background: #ddd;
+  color: #555;
+}
+/* When the kbd-hidden class is on the game-panel, collapse both
+   keyboard halves. The score column shrinks to its content width
+   so the whole panel reads as a compact controls bar. */
+.game-panel.kbd-hidden .game-keyboard { display: none; }
+.game-panel.kbd-hidden { justify-content: center; }
 /* 4×3 chromatic keyboard. Each cell shows the natural name with
    enharmonic equivalent beneath for sharp/flat keys. */
 /* Circle-of-fifths keyboard, C-shape layout. Each half forms the
@@ -889,6 +992,42 @@ main {
 .vf-stavenote.game-wrong-flash * {
   fill: #c92a2a !important;
   stroke: #c92a2a !important;
+}
+/* Persistent red mark on a note the user got wrong in Follow mode.
+   Stays until the next reset. */
+.vf-stavenote.game-wrong-note,
+.vf-stavenote.game-wrong-note * {
+  fill: #c92a2a !important;
+  stroke: #c92a2a !important;
+}
+/* Persistent green mark on a note the user got right (or that was
+   given for free, i.e. the very first note of the play-through).
+   Stays until the next reset. */
+.vf-stavenote.game-correct-note,
+.vf-stavenote.game-correct-note * {
+  fill: #2b8a3e !important;
+  stroke: #2b8a3e !important;
+}
+/* Rest hidden because the user filled it with their own note. The
+   custom fill notehead drawn at the rest's x-position replaces the
+   rest glyph visually but the layout slot stays in place so
+   barlines and downstream notes don't shift. Cleared on reset by
+   gameClearFillNotes. */
+.vf-stavenote.game-rest-filled { visibility: hidden; }
+/* Game kind selector — small dropdown above the score counters in
+   the score column. Narrow because the score column is 70px wide. */
+.game-kind-select {
+  width: 100%;
+  font-family: serif;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 2px 4px;
+  margin-bottom: 4px;
+  border: 1px solid #888;
+  border-radius: 4px;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
 }
 .fb-left {
   flex: 1 1 auto;
