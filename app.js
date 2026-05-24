@@ -327,14 +327,30 @@ const HW_DIATONIC_REMAP = [0, 1, 3, 4, 5, 6, 7]; // diatonic 0..6 → HW 0..7
 function diatonicIndexInScale(diatonicIdx, scale) {
   if (!scale || scale.length !== 8) return diatonicIdx;
   const sig = scale.map(x => x.s).join(',');
-  if (sig !== '0,1,3,4,6,7,9,10') return diatonicIdx;
-  // HW diminished. Diatonic-octave wrap is 7 (R, 2, 3, 4, 5, 6, 7,
-  // then R+oct); HW-octave wrap is 8 (the scale itself has 8 entries
-  // before the next R). So idx 8 (= "9th" in diatonic terms) becomes
-  // HW idx 1 + 1 octave = 9 in raw terms.
-  const oct = Math.floor(diatonicIdx / 7);
-  const within = ((diatonicIdx % 7) + 7) % 7;
-  return HW_DIATONIC_REMAP[within] + oct * 8;
+  // HW diminished — used by 7♭9 chords. Diatonic-octave wrap is 7
+  // (R, 2, 3, 4, 5, 6, 7, then R+oct); HW-octave wrap is 8 (the
+  // scale itself has 8 entries before the next R). So idx 8 (=
+  // "9th" in diatonic terms) becomes HW idx 1 + 1 octave = 9 raw.
+  // The remap also skips HW idx 2 so a "3rd of 7♭9" lands on the
+  // chord's MAJOR 3rd (HW[3]) rather than the b3/♯9 passing tone.
+  if (sig === '0,1,3,4,6,7,9,10') {
+    const oct = Math.floor(diatonicIdx / 7);
+    const within = ((diatonicIdx % 7) + 7) % 7;
+    return HW_DIATONIC_REMAP[within] + oct * 8;
+  }
+  // WH diminished — used by fully-diminished (dim7 / °7) chords. The
+  // 8-note scale's positions ALREADY line up with diatonic chord
+  // tones (scale[2] = b3, scale[4] = b5, scale[6] = bb7), so no
+  // per-position remap is needed — but the octave wrap still has
+  // to translate diatonic-7 → scale-8 so the "9th" of a dim7 lands
+  // on the 2 + octave (scale[1] + 8) and not the root + octave
+  // (scale[0] + 8, which would be just the 1 again).
+  if (sig === '0,2,3,5,6,8,9,11') {
+    const oct = Math.floor(diatonicIdx / 7);
+    const within = ((diatonicIdx % 7) + 7) % 7;
+    return within + oct * 8;
+  }
+  return diatonicIdx;
 }
 
 function exParseRoot(chordText) {
@@ -1652,6 +1668,159 @@ function generateMixedTriadsQuarterNotes(bars, ts) {
 // The direction reverses when the picker hits within 2 semitones
 // of the cello range extreme, producing a steady sawtooth-shaped
 // landmark line over the form.
+// Three Seven generator: each chord plays its 3 and 7 alternating
+// (e.g. A#1 D#2 A#1 D#2 for BMaj7), using EXACTLY two pitches per
+// chord — both the 3 and the 7 sit at one specific octave that's
+// fixed for the entire duration of that chord (no octave hopping
+// within a single chord).
+//
+// Direction is per-chord and alternates: chord 1 ascends relative to
+// chord 0 (its two pitches sit higher overall), chord 2 descends
+// relative to chord 1, etc.
+//
+// Enclosure preference: pick octaves so that the FIRST played note
+// of each new chord sits BETWEEN the previous chord's two pitches —
+// e.g. BMaj7 plays A#1 D#2 (34, 39), then Bb7 starts on D2 (38)
+// which is bracketed by A#1 and D#2, before continuing up to Ab2
+// (44). When no enclosing option exists, a chromatic-neighbor bonus
+// of prev's last pitch is the next-best preference; the direction
+// score and overall distance act as additional tiebreakers. Stays
+// inside the F1..F3 cello range.
+function generateThreeSevenQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  // Resolve the chord's actual 3 and 7 via diatonicIndexInScale, so
+  // altered/HW chords still yield their real 3 and b7 rather than a
+  // passing-tone enharmonic.
+  function get3And7(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return null;
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const out = {};
+    for (const d of [2, 6]) {
+      const idx = diatonicIndexInScale(d, chordScale);
+      if (idx >= chordScale.length) continue;
+      const sd = chordScale[idx];
+      out[d] = {
+        pc: ((rootPc + sd.s) % 12 + 12) % 12,
+        tpc: rootTpc + sd.t
+      };
+    }
+    return out;
+  }
+
+  // Enumerate every (3-octave, 7-octave) pair in the F1..F3 range.
+  // Internal play order is always ascending (lower pitch first) so
+  // the chord plays low→high→low→high — matches the user's example
+  // pattern (A#1 D#2 A#1 D#2 for BMaj7).
+  function getChordOptions(ce) {
+    const t = get3And7(ce);
+    if (!t || !t[2] || !t[6]) return [];
+    const cA = [], cB = [];
+    for (let p = EX_LOW; p <= EX_HIGH; p++) {
+      const pc = ((p % 12) + 12) % 12;
+      if (pc === t[2].pc) cA.push({ pitch: p, tpc: t[2].tpc });
+      if (pc === t[6].pc) cB.push({ pitch: p, tpc: t[6].tpc });
+    }
+    const opts = [];
+    for (const a of cA) for (const b of cB) {
+      if (a.pitch === b.pitch) continue;
+      const lo = Math.min(a.pitch, b.pitch);
+      const hi = Math.max(a.pitch, b.pitch);
+      const loTone = (a.pitch < b.pitch) ? a : b;
+      const hiTone = (a.pitch < b.pitch) ? b : a;
+      opts.push({ first: loTone, second: hiTone, lo, hi });
+    }
+    return opts;
+  }
+
+  // First chord: lowest pair, tightest interval.
+  function scoreFirst(opt) {
+    return -opt.lo - (opt.hi - opt.lo) * 2;
+  }
+
+  // Subsequent chord scoring.
+  //   - REPEAT (forbidden): the first played note of the new chord
+  //     must not equal the previous chord's last played pitch.
+  //   - INTERVAL TIGHTNESS (heavy): wider-than-minimum intervals get
+  //     a large penalty. For a Maj7 chord the tightest pair sits a
+  //     perfect 4th apart (5 semitones); the alternative octave
+  //     placement gives a perfect 5th (7 semitones), which is what
+  //     we want to avoid when a tight option exists.
+  //   - ENCLOSURE: first note strictly between prev chord's two
+  //     pitches — preferred but not required.
+  //   - CHROMATIC NEIGHBOR: first note a half-step from prev's last.
+  //   - SMOOTHNESS: distance from prev's last pitch.
+  //   - DIRECTION: chord center above/below prev center per the
+  //     alternating-direction pattern. Subordinate to tightness.
+  function scoreSubsequent(opt, prev, desiredDir, minInterval) {
+    if (opt.first.pitch === prev.lastPitch) return -Infinity;
+    let score = 0;
+    const dist = Math.abs(opt.first.pitch - prev.lastPitch);
+    score -= dist * 3;
+    if (opt.first.pitch > prev.lo && opt.first.pitch < prev.hi) score += 60;
+    if (dist === 1) score += 40;
+    score -= ((opt.hi - opt.lo) - minInterval) * 80;
+    const myAvg = (opt.lo + opt.hi) / 2;
+    const prevAvg = (prev.lo + prev.hi) / 2;
+    if ((desiredDir > 0 && myAvg > prevAvg) || (desiredDir < 0 && myAvg < prevAvg)) {
+      score += 20;
+    }
+    return score;
+  }
+
+  let prevState = null;
+  // direction = sign the NEXT subsequent chord should move relative
+  // to the previous chord. First subsequent chord (ci=1) ascends.
+  let direction = +1;
+
+  for (let ci = 0; ci < chordEvents.length; ci++) {
+    const ce = chordEvents[ci];
+    const range = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const opts = getChordOptions(ce);
+    if (opts.length === 0) continue;
+
+    // Tightest available interval for this chord — anything wider
+    // gets a heavy penalty in scoreSubsequent.
+    let minInterval = Infinity;
+    for (const opt of opts) minInterval = Math.min(minInterval, opt.hi - opt.lo);
+
+    const isFirst = !prevState;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const opt of opts) {
+      const s = isFirst ? scoreFirst(opt)
+                        : scoreSubsequent(opt, prevState, direction, minInterval);
+      if (s > bestScore) { bestScore = s; best = opt; }
+    }
+    if (!best) continue;
+
+    const nBeats = range.endBeat - range.startBeat;
+    for (let i = 0; i < nBeats; i++) {
+      const beat = range.startBeat + i;
+      const tone = (i % 2 === 0) ? best.first : best.second;
+      results[ce.barIdx][beat] = { pitch: tone.pitch, tpc: tone.tpc, duration: 'q' };
+    }
+    const lastTone = ((nBeats - 1) % 2 === 0) ? best.first : best.second;
+    prevState = { lo: best.lo, hi: best.hi, lastPitch: lastTone.pitch };
+
+    // Flip alternation only after a subsequent chord — the first
+    // chord doesn't establish a direction yet.
+    if (!isFirst) direction = -direction;
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
 function generateLandmarksQuarterNotes(bars, ts) {
   return generateLandmarksCore(bars, ts, /*fillPassingTones=*/true);
 }
@@ -6265,6 +6434,245 @@ function generateExerciseLickQuarterNotes(bars, ts) {
       }
       return null;
     };
+
+    // === 3579 projection ===
+    // Plays the lick's rhythm against a sawtooth walk through 3-5-7-9
+    // chord tones — same logic as the 3579 Range exercise, but the
+    // walk advances ONCE PER CHORD EVENT (not per beat), and the
+    // lick's onsets decide when those notes sound.
+    //
+    // Pre-pass walks chordEvents in song order:
+    //   - For each event, build the in-range 3/5/7/9 candidates.
+    //   - First event: take the lowest, set direction = ascending.
+    //   - Ascending events: next candidate ABOVE prev. If none in
+    //     range, flip direction and take the closest BELOW.
+    //   - Descending events: mirror image.
+    //   - On boundary failures (extremes of F1..F3), fall back to
+    //     the candidate closest to prev's pitch.
+    //
+    // Apply pass: for each song bar's source notes, look up the
+    // chord event that owns each pitched note's beat and emit that
+    // event's pre-picked pitch. Rest events stay rests.
+    if (_lickProjectionMode === '3579') {
+      function chordToneOptions(ce) {
+        const chordScale = exGetScale(chordToCanonical(ce.chord));
+        if (!chordScale || chordScale.length === 0) return [];
+        const rootPc = ce.root.pitchClass;
+        const rootTpc = ce.root.tpc;
+        const degIdxs = [2, 4, 6, 8]; // 3, 5, 7, 9 (HW-remap aware)
+        const opts = [];
+        for (const di of degIdxs) {
+          const ridx = diatonicIndexInScale(di, chordScale);
+          const oct = Math.floor(ridx / chordScale.length);
+          const sd  = chordScale[ridx % chordScale.length];
+          const pc  = (((rootPc + sd.s + oct * 12) % 12) + 12) % 12;
+          const tpc = rootTpc + sd.t;
+          for (let p = EX_LOW; p <= EX_HIGH; p++) {
+            if ((((p % 12) + 12) % 12) === pc) opts.push({ pitch: p, tpc });
+          }
+        }
+        opts.sort((a, b) => a.pitch - b.pitch);
+        return opts;
+      }
+
+      const pitchByCe = new Map();
+      let direction = 1;
+      let lastPitch = -1;
+      for (const ce of chordEvents) {
+        const opts = chordToneOptions(ce);
+        if (opts.length === 0) continue;
+        let chosen = null;
+        if (lastPitch < 0) {
+          chosen = opts[0];
+          direction = 1;
+        } else if (direction > 0) {
+          chosen = opts.find(o => o.pitch > lastPitch);
+          if (!chosen) {
+            direction = -1;
+            for (let i = opts.length - 1; i >= 0; i--) {
+              if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
+            }
+          }
+        } else {
+          for (let i = opts.length - 1; i >= 0; i--) {
+            if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
+          }
+          if (!chosen) {
+            direction = 1;
+            chosen = opts.find(o => o.pitch > lastPitch);
+          }
+        }
+        if (!chosen) {
+          // Pinned at a boundary — fall back to closest 3/5/7/9.
+          chosen = opts[0];
+          for (let i = 1; i < opts.length; i++) {
+            if (Math.abs(opts[i].pitch - lastPitch) < Math.abs(chosen.pitch - lastPitch)) {
+              chosen = opts[i];
+            }
+          }
+        }
+        pitchByCe.set(ce, chosen);
+        lastPitch = chosen.pitch;
+      }
+
+      function findChordEventAtBeat(barIdx, beat) {
+        for (const ce of chordEvents) {
+          if (ce.barIdx !== barIdx) continue;
+          const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+          if (beat >= r.startBeat && beat < r.endBeat) return ce;
+        }
+        return null;
+      }
+
+      for (let songBarIdx = 0; songBarIdx < bars.length; songBarIdx++) {
+        const q = songBarIdx % numQuoteBars;
+        const sourceNotes = lick.barNotes[q];
+        if (!sourceNotes || !sourceNotes.length) continue;
+        const transposed = [];
+        for (const n of sourceNotes) {
+          if (typeof n.stepStart !== 'number') {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          if (n.rest) {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          // useNextBarChord ties honour the next bar's first chord;
+          // every other note uses the chord active at its own beat.
+          let ce = null;
+          if (n.useNextBarChord) {
+            const nb = songBarIdx + 1;
+            if (nb < bars.length) {
+              for (const c of chordEvents) {
+                if (c.barIdx !== nb) continue;
+                const r = chordBeatRange(c.chordsInBar, c.chordIdxInBar, beatsPerBar);
+                if (r.startBeat === 0) { ce = c; break; }
+              }
+            }
+          } else {
+            const beat = Math.floor(n.stepStart / 6);
+            ce = findChordEventAtBeat(songBarIdx, beat);
+          }
+          const placed = ce ? pitchByCe.get(ce) : null;
+          if (!placed) {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          transposed.push(Object.assign({}, n, {
+            midi: placed.pitch, tpc: placed.tpc
+          }));
+        }
+        for (const tn of transposed) emitNoteIntoBar(songBarIdx, tn);
+      }
+      return { results, chordEvents, patterns, effective, subdivisions: 6 };
+    }
+
+    // === Scale projection ===
+    // Use the source lick PURELY for rhythm. We pre-compute a
+    // CONTINUOUS scale walk across the whole song at eighth-note
+    // resolution — same algorithm as the Scale Notes exercise
+    // (generateQuarterNotes), just with 2× the slots per bar and a
+    // direction that reverses at the cello range extremes. The walk
+    // ascends until it hits the top of F1..F3, then descends, then
+    // ascends again, so the line breathes across the whole form
+    // instead of restarting at each bar's root.
+    //
+    // Once the per-bar slot table is built, the lick's rhythm masks
+    // it: each source note's stepStart picks an eighth-note slot of
+    // its bar (slot = floor(stepStart / 3) on the 24th-note grid),
+    // and we emit either the slot's scale pitch (for pitched events)
+    // or a rest (for rest events), preserving the source's duration.
+    if (_lickProjectionMode === 'scale') {
+      const numSlotsPerBar = beatsPerBar * 2;
+      const barSlots = bars.map(() => new Array(numSlotsPerBar).fill(null));
+
+      let direction = -1;
+      let tones = [];
+      let toneIdx = 0;
+      let lastPitch = -1;
+      let lastTpc = -1;
+      let lastSig = null;
+
+      chordEvents.forEach((ce, i) => {
+        const eff = effective[i];
+        const sig = eff.root.pitchClass + '|' + eff.root.tpc + '|' + eff.scale.map(x => x.s).join(',');
+        if (sig !== lastSig) {
+          tones = buildScaleTones(eff.root.pitchClass, eff.root.tpc, eff.scale);
+          lastSig = sig;
+          if (tones.length === 0) return;
+          if (lastPitch < 0) {
+            let sp = eff.root.pitchClass + 48;
+            while (sp < EX_LOW) sp += 12;
+            while (sp > EX_HIGH) sp -= 12;
+            toneIdx = findClosestIndex(tones, sp);
+          } else {
+            const cont = findSmoothContinuation(tones, lastPitch, lastTpc, direction);
+            toneIdx = cont.idx;
+            direction = cont.dir;
+          }
+        }
+        if (tones.length === 0) return;
+
+        const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+        const startSlot = startBeat * 2;
+        const endSlot   = endBeat * 2;
+        for (let s = startSlot; s < endSlot; s++) {
+          let p = tones[toneIdx].pitch;
+          let t = tones[toneIdx].tpc;
+          if (p === lastPitch && tones.length > 1) {
+            let ti = toneIdx + direction;
+            if (ti < 0) { direction = 1; ti = toneIdx + 1; }
+            else if (ti >= tones.length) { direction = -1; ti = toneIdx - 1; }
+            if (ti >= 0 && ti < tones.length && tones[ti].pitch !== lastPitch) {
+              toneIdx = ti; p = tones[ti].pitch; t = tones[ti].tpc;
+            }
+          }
+          barSlots[ce.barIdx][s] = { pitch: p, tpc: t };
+          lastPitch = p;
+          lastTpc = t;
+
+          let ni = toneIdx + direction;
+          if (ni < 0) { direction = 1; ni = toneIdx + 1; }
+          else if (ni >= tones.length) { direction = -1; ni = toneIdx - 1; }
+          if (ni < 0) ni = 0;
+          if (ni >= tones.length) ni = tones.length - 1;
+          toneIdx = ni;
+        }
+      });
+
+      // Apply the source's rhythm to each song bar, masking the
+      // pre-computed walk. Multi-bar quotes repeat: song bar N uses
+      // source bar N % numQuoteBars.
+      for (let songBarIdx = 0; songBarIdx < bars.length; songBarIdx++) {
+        const q = songBarIdx % numQuoteBars;
+        const sourceNotes = lick.barNotes[q];
+        if (!sourceNotes || !sourceNotes.length) continue;
+        const slots = barSlots[songBarIdx];
+        if (!slots) continue;
+        const transposed = [];
+        for (const n of sourceNotes) {
+          if (typeof n.stepStart !== 'number') {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          if (n.rest) {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          const slotIdx = Math.floor(n.stepStart / 3);
+          const sc = slots[Math.max(0, Math.min(numSlotsPerBar - 1, slotIdx))];
+          if (!sc) {
+            transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
+            continue;
+          }
+          transposed.push(Object.assign({}, n, { midi: sc.pitch, tpc: sc.tpc }));
+        }
+        for (const tn of transposed) emitNoteIntoBar(songBarIdx, tn);
+      }
+      return { results, chordEvents, patterns, effective, subdivisions: 6 };
+    }
+
     for (let startBar = 0; startBar < bars.length; startBar += numQuoteBars) {
       // Per-quote-application state. Tracks the last pitched note
       // we just emitted (target) and the last pitched note from
@@ -6305,6 +6713,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
         };
         const defaultTarget = resolveNoteTarget({ useNextBarChord: false });
         if (!defaultTarget) continue;
+
         // Scale-step transposition: each source note's stepIdx is
         // resolved in the TARGET chord's scale, so a Gm6 b3 (= step
         // 2 of Dorian) over a target G7 becomes step 2 of Mixolydian
@@ -8316,6 +8725,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === '3579Eighth' ? generate3579EighthNotes
             : exerciseMode === 'walkTriad' ? generateWalkTriadQuarterNotes
             : exerciseMode === 'mixedTriads' ? generateMixedTriadsQuarterNotes
+            : exerciseMode === 'threeSeven' ? generateThreeSevenQuarterNotes
             : exerciseMode === 'landmarks' ? generateLandmarksQuarterNotes
             : exerciseMode === 'landmarks13' ? generateLandmarks13QuarterNotes
             : exerciseMode === 'walkBass' ? generateWalkingBasslineQuarterNotes
@@ -14161,6 +14571,41 @@ let _exerciseDropdownHTML = null;
 let _dropdownMode = 'exercise'; // 'exercise' | 'score' | 'lick'
 let _lastExerciseValue = 'scale';
 let _lastLickValue = null; // remembered across mode toggles
+// Lick projection mode controls how a Quote-style lick re-projects
+// onto the song's chord changes:
+//   'functional'  — original behavior: each source note's scale
+//                   degree is computed in its source chord, then
+//                   played at the SAME degree of the target chord
+//                   (octave-fitted per bar). Preserves harmonic
+//                   character precisely; each chord change tends
+//                   to reset the line's register.
+//   '3579'        — uses the source PURELY for rhythm. The whole
+//                   song is pre-walked through 3/5/7/9 chord tones
+//                   in a sawtooth pattern (same as the 3579 Range
+//                   exercise: ascend until F3, descend until F1,
+//                   repeat). Advances ONCE PER CHORD EVENT, not per
+//                   beat, so multi-chord bars get a fresh 3/5/7/9
+//                   for each chord while same-chord beats hold
+//                   their pitch. The lick's onsets pick when those
+//                   pitches sound; rest events stay rests.
+//   'scale'       — uses the source PURELY for rhythm. The whole
+//                   song is pre-filled with a CONTINUOUS scale walk
+//                   at eighth-note resolution — same algorithm as
+//                   the Scale Notes exercise (ascend, hit the top
+//                   of the cello range, descend, …) — and the
+//                   lick's onset pattern masks it. Pitched events
+//                   pick up the bar's eighth-note slot they land
+//                   on, rest events stay rests. Pitches are
+//                   independent of the source's pitches.
+let _lickProjectionMode = (() => {
+  try {
+    const v = localStorage.getItem('lickProjectionMode');
+    if (v === '3579' || v === 'scale') return v;
+    // Legacy: 'intervallic' (removed) and '3rd' (replaced by '3579')
+    // both migrate back to the default.
+    return 'functional';
+  } catch (_) { return 'functional'; }
+})();
 function _stashExerciseDropdownIfNeeded() {
   if (_exerciseDropdownHTML !== null) return;
   const sel = document.getElementById('exerciseSelect');
@@ -14374,7 +14819,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -14442,7 +14887,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
@@ -14451,6 +14896,10 @@ async function refreshScoreDropdownForCurrentSong() {
       // updates the live `songRepeats` global so the rerender picks
       // up the right effective count.
       if (typeof _updateRepeatsSegLock === 'function') _updateRepeatsSegLock();
+      // The lick-projection seg is only meaningful in Lick mode;
+      // show it there and hide everywhere else.
+      const lps = document.getElementById('lickProjSeg');
+      if (lps) lps.hidden = (mode !== 'lick');
       updateScoreTitle();
       rerenderCurrent();
       // Switching INTO Head on a song without one disables Play;
@@ -14460,6 +14909,37 @@ async function refreshScoreDropdownForCurrentSong() {
       // AND a head was loaded. Toggle off automatically when leaving.
       if (typeof emUpdateAvailability === 'function') emUpdateAvailability();
       await restartPlaybackInPlaceWithCountIn();
+    });
+  });
+})();
+
+// Lick projection-mode toggle: visible only in Lick mode (see
+// bindModeSeg above). Switches between Functional (scale-degree
+// mapping) and Intervallic (voice-led + contour-walked) projection,
+// persisted across reloads via localStorage.
+(function bindLickProjSeg() {
+  const seg = document.getElementById('lickProjSeg');
+  if (!seg) return;
+  // Sync visual active state with the persisted preference at boot.
+  seg.querySelectorAll('button').forEach(b => {
+    b.classList.toggle('active', b.dataset.proj === _lickProjectionMode);
+  });
+  seg.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const next = btn.dataset.proj;
+      if (next !== 'functional' && next !== '3579' && next !== 'scale') return;
+      if (next === _lickProjectionMode) return;
+      _lickProjectionMode = next;
+      try { localStorage.setItem('lickProjectionMode', next); } catch (_) {}
+      seg.querySelectorAll('button').forEach(b => {
+        b.classList.toggle('active', b.dataset.proj === next);
+      });
+      // Only rerender if a lick is the active exercise — otherwise
+      // the new mode just sits there until the user picks one.
+      if (typeof exerciseMode === 'string' && exerciseMode.startsWith('lick:')) {
+        rerenderCurrent();
+        await restartPlaybackInPlaceWithCountIn();
+      }
     });
   });
 })();
