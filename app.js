@@ -13249,6 +13249,41 @@ function expandDCAl2ndEnding(bars) {
   return out;
 }
 
+// Some iRealPro charts use a `}` (repeatEnd) WITHOUT an explicit
+// `{` (repeatStart) — the convention is that the repeat goes back
+// to the start of the current section (`*A`, `*B`, …) or to the
+// song's first bar if no section marker has been seen yet. Almost
+// Like Being In Love is one such chart: its A section has N1/N2
+// endings closed by `}` but no opening `{`, so the repeater needs
+// to infer that the repeat starts at bar 0.
+//
+// Walk the bars left-to-right. Track the most recent section
+// marker (or 0). When a `repeatEnd` arrives without an active
+// `repeatStart`, promote the section-start bar's left barline to
+// `repeatStart` so expandIRealRepeats handles it the same way as
+// an explicit `{...}`. Explicit `{` bars set the active marker;
+// the active marker clears when a matching `}` is consumed, so
+// multiple non-overlapping repeats in the same song still work.
+function inferImplicitRepeats(bars) {
+  const out = bars.map(b => ({ ...b, markers: b.markers ? [...b.markers] : [] }));
+  let sectionStart = 0;
+  let activeRepeatStart = -1;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].section) sectionStart = i;
+    if (out[i].leftBar === 'repeatStart') activeRepeatStart = i;
+    if (out[i].rightBar === 'repeatEnd') {
+      if (activeRepeatStart < 0) {
+        const startIdx = Math.min(sectionStart, i);
+        if (out[startIdx] && out[startIdx].leftBar !== 'repeatStart') {
+          out[startIdx].leftBar = 'repeatStart';
+        }
+      }
+      activeRepeatStart = -1;
+    }
+  }
+  return out;
+}
+
 // Expand iReal Pro repeat markers ({ ... }) into two literal copies of the
 // bars so the chord sequence shows twice and the quarter-note walker can
 // continue through the second pass with different notes. Non-repeated bars
@@ -13560,6 +13595,7 @@ function loadFromURL(url) {
   const song = parseIRealSong(url);
   const tokens = tokenize(song.body);
   let { bars, timesig } = buildBars(tokens);
+  bars = inferImplicitRepeats(bars);
   bars = expandIRealRepeats(bars);
   // Flatten D.C. al Fine so the score literally contains ABA —
   // this lets the renderer show the second A pass and lets the
