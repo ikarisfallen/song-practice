@@ -4261,6 +4261,111 @@ function generateRange3579HalfNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
+// Chord Tones — Half generator: same sawtooth between F1 and F3 as
+// 3579 Range Half, but the walk steps through 1 / 3 / 5 / 7 chord
+// tones instead of 3 / 5 / 7 / 9. One half note every two beats,
+// ascending until the chord's tones run out at the top, then
+// descending, alternating without enclosures. Uses
+// diatonicIndexInScale so altered / HW-dim / WH-dim chords still
+// resolve to their real chord 3 / 5 / 7 (and bb7 on dim7).
+function generateChordTonesHalfNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+
+  function findChordEventAtBeat(barIdx, beatIdx) {
+    for (let i = 0; i < chordEvents.length; i++) {
+      const ce = chordEvents[i];
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return ce;
+    }
+    return null;
+  }
+
+  // All 1 / 3 / 5 / 7 pitches for a chord across F1..F3, sorted
+  // ascending. Same structure as the 3579 variant's helper, just
+  // with the chord-tone diatonic indices.
+  function chordToneOptions(ce) {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return [];
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+    const degIdxs = [0, 2, 4, 6]; // diatonic indices for 1, 3, 5, 7
+    const opts = [];
+    for (const di of degIdxs) {
+      const ridx = diatonicIndexInScale(di, chordScale);
+      const oct = Math.floor(ridx / chordScale.length);
+      const sd  = chordScale[ridx % chordScale.length];
+      const pc  = (((rootPc + sd.s + oct * 12) % 12) + 12) % 12;
+      const tpc = rootTpc + sd.t;
+      for (let p = EX_LOW; p <= EX_HIGH; p++) {
+        if ((((p % 12) + 12) % 12) === pc) opts.push({ pitch: p, tpc });
+      }
+    }
+    opts.sort((a, b) => a.pitch - b.pitch);
+    return opts;
+  }
+
+  let direction = 1;
+  let lastPitch = -1;
+
+  for (let barIdx = 0; barIdx < bars.length; barIdx++) {
+    for (let beatIdx = 0; beatIdx < beatsPerBar; beatIdx += 2) {
+      if (beatIdx + 2 > beatsPerBar) continue;
+      const ce = findChordEventAtBeat(barIdx, beatIdx);
+      if (!ce) continue;
+      const opts = chordToneOptions(ce);
+      if (opts.length === 0) continue;
+
+      let chosen = null;
+      if (lastPitch < 0) {
+        // First note — lowest in-range chord tone, head upward.
+        chosen = opts[0];
+        direction = 1;
+      } else if (direction > 0) {
+        chosen = opts.find(o => o.pitch > lastPitch);
+        if (!chosen) {
+          // Top of the sweep — flip and take the highest pitch below.
+          direction = -1;
+          for (let i = opts.length - 1; i >= 0; i--) {
+            if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
+          }
+        }
+      } else {
+        for (let i = opts.length - 1; i >= 0; i--) {
+          if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
+        }
+        if (!chosen) {
+          direction = 1;
+          chosen = opts.find(o => o.pitch > lastPitch);
+        }
+      }
+      if (!chosen) {
+        // Neither direction had a strictly-stepping option — closest
+        // pitch wins so the bar still gets a note.
+        chosen = opts[0];
+        for (let i = 1; i < opts.length; i++) {
+          if (Math.abs(opts[i].pitch - lastPitch) < Math.abs(chosen.pitch - lastPitch)) {
+            chosen = opts[i];
+          }
+        }
+      }
+
+      results[barIdx][beatIdx] = { pitch: chosen.pitch, tpc: chosen.tpc, duration: 'h' };
+      lastPitch = chosen.pitch;
+    }
+  }
+
+  return { results, chordEvents, patterns, effective };
+}
+
 // 3579 Range generator (quarter-note variant): same sawtooth between
 // F1 and F3 as 3579 Range Half, but stepping ONCE PER BEAT instead of
 // every two beats. The chord-tone walk through {3, 5, 7, 9} produces
@@ -8527,6 +8632,36 @@ function chordScaleNotesText(ch, nextCh) {
   }
   return out.join(' ');
 }
+// "Chord tones" overlay variant. Returns the chord's 1 / 3 / 5 / 7
+// as letter-name tokens (e.g. "C E G B" for CMaj7, "C E♭ G B♭" for
+// Cm7, "C E♭ G♭ B♭♭" for Cdim7). Uses diatonicIndexInScale so
+// altered / HW-diminished / WH-diminished chords still produce
+// their real chord 3 / 5 / 7. Empty string for slash / N.C. chords.
+function chordToneText(ch, nextCh) {
+  if (!ch || ch.slash || ch.nc) return '';
+  const canonical = chordToCanonical(ch);
+  const root = exParseRoot(canonical);
+  if (!root) return '';
+  const nextCanonical = (nextCh && !nextCh.slash && !nextCh.nc)
+    ? chordToCanonical(nextCh) : null;
+  const scale = exGetScaleContextual(canonical, nextCanonical);
+  if (!scale || !scale.length) return '';
+  const ACC_GLYPHS = { '': '', '#': '♯', 'b': '♭', '##': '𝄪', 'bb': '𝄫' };
+  const out = [];
+  const seen = new Set();
+  for (const di of [0, 2, 4, 6]) {
+    const ridx = diatonicIndexInScale(di, scale);
+    const sd = scale[((ridx % scale.length) + scale.length) % scale.length];
+    if (!sd) continue;
+    const tpc = root.tpc + sd.t;
+    if (seen.has(tpc)) continue;
+    seen.add(tpc);
+    const { letter, acc } = tpcToLetterAcc(tpc);
+    out.push(letter + (ACC_GLYPHS[acc] || ''));
+  }
+  return out.join(' ');
+}
+
 // "Chord notes — simplified" overlay variant. Same scale-tone walk
 // as `chordScaleNotesText`, but skips every NATURAL note and only
 // emits notes that carry a sharp or flat. So a chord whose scale is
@@ -8714,6 +8849,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === 'targetTriad' ? generateTargetTriadQuarterNotes
             : exerciseMode === 'range3579' ? generateRange3579QuarterNotes
             : exerciseMode === 'range3579Half' ? generateRange3579HalfNotes
+            : exerciseMode === 'chordTonesHalf' ? generateChordTonesHalfNotes
             : exerciseMode === 'enclosures' ? generateEnclosuresQuarterNotes
             : exerciseMode === 'longEnclosures' ? generateLongEnclosuresQuarterNotes
             : exerciseMode === 'scaleChromatic' ? generateScaleChromaticQuarterNotes
@@ -8814,7 +8950,7 @@ function renderChart(song, barsIn, timesigStr) {
   // below the chord-symbol row. Simplified text is often empty for
   // a given chord, but we still need the row height so non-empty
   // entries have somewhere to land.
-  const chordNotesAnyOn = overlayChordNotesOn || overlayChordNotesSimplifiedOn;
+  const chordNotesAnyOn = overlayChordNotesOn || overlayChordNotesSimplifiedOn || overlayChordTonesOn;
   const chordNotesY1 = chordNotesAnyOn
     ? (overlayChordScalesOn ? patternLineY + 18 : 148)
     : 0;
@@ -9921,11 +10057,12 @@ function renderChart(song, barsIn, timesigStr) {
           // notes into the next chord's slot. If the rendered text
           // overflows the slot, the notes are split across two lines
           // via a second <tspan>.
-          if (overlayChordNotesOn) {
-            // Per-chord text rendering is the FULL Chord Notes path
-            // only — the Simplified variant uses a separate per-row
-            // line+ticks+text pass below (modeled on Chord Scales)
-            // that groups adjacent chords sharing the same note.
+          if (overlayChordNotesOn || overlayChordTonesOn) {
+            // Per-chord text rendering — shared path for the FULL
+            // Chord Notes overlay AND the Chord Tones overlay. (The
+            // Simplified variant uses a separate per-row line+
+            // ticks+text pass below, modeled on Chord Scales, that
+            // groups adjacent chords sharing the same note set.)
             // Find the chord that follows this one in song order —
             // either the next chord in the same bar, or the first
             // non-empty chord of a later bar. The contextual scale
@@ -9941,7 +10078,9 @@ function renderChart(song, barsIn, timesigStr) {
                 if (nextChords.length) { nextCh = nextChords[0]; break; }
               }
             }
-            const noteStr = chordScaleNotesText(ch, nextCh);
+            const noteStr = overlayChordTonesOn
+              ? chordToneText(ch, nextCh)
+              : chordScaleNotesText(ch, nextCh);
             if (noteStr) {
               // Slot width: from this chord's cx to the next chord's
               // cx (or to the bar's right edge for the last chord).
@@ -10631,14 +10770,20 @@ function renderChart(song, barsIn, timesigStr) {
   // and renderChart just destroyed every bar's SVG, so any prior
   // overlay groups are gone with them. No-op when the toggle is off.
   if (typeof renderAllNotesOverlays === 'function') renderAllNotesOverlays();
-  // Same deal for the Scale Degrees overlay — re-paint after the
-  // bars are re-drawn so the per-note labels reattach to the new
-  // SVGs. We pass `bars` and `ts` explicitly because `loadSong`
-  // calls `renderChart` BEFORE assigning `window.currentSong`, so
-  // the overlay's `window.currentSong.bars` fallback would still
-  // hold the PREVIOUS song's chord chart at this moment. Without
-  // the explicit hand-off, the first render after a song change
-  // would label the new bars against the old chord roots.
+  // Same deal for the Degree Name overlay (inside-the-head numbers)
+  // and the Scale Degrees overlay (below-the-staff full labels) —
+  // re-paint after the bars are re-drawn so the per-note marks
+  // reattach to the new SVGs. We pass `bars` and `ts` explicitly
+  // because `loadSong` calls `renderChart` BEFORE assigning
+  // `window.currentSong`, so the overlay's `window.currentSong.bars`
+  // fallback would still hold the PREVIOUS song's chord chart at
+  // this moment.
+  if (typeof renderAllDegreeNamesOverlays === 'function') {
+    renderAllDegreeNamesOverlays(bars, ts);
+  }
+  if (typeof renderAllChordToneNamesOverlays === 'function') {
+    renderAllChordToneNamesOverlays(bars, ts);
+  }
   if (typeof renderAllScaleDegreesOverlays === 'function') {
     renderAllScaleDegreesOverlays(bars, ts);
   }
@@ -11198,6 +11343,12 @@ let overlayChordNotesOn = false;
 // regular Chord Notes overlay; the toggles below uncheck each
 // other so only one is active at a time.
 let overlayChordNotesSimplifiedOn = false;
+// Chord tones overlay — only the 1 / 3 / 5 / 7 of each chord (e.g.
+// CMaj7 → "C E G B", Cm7 → "C E♭ G B♭"). Shares the same bottom
+// band as the two Chord Notes variants and is mutually exclusive
+// with both — the same painter renders all three, swapping which
+// text extractor it calls.
+let overlayChordTonesOn = false;
 // "Diagram" overlay: draw a miniature monochrome cello-fingerboard
 // diagram below the staff at the start of each new chord-scale
 // group, with dots at every scale-tone fret position. Mirrors the
@@ -11226,6 +11377,106 @@ function renderAllNotesOverlays() {
   for (let bi = 0; bi < barElements.length; bi++) {
     if (barElements[bi]) paintNotesOverlayForBar(bi);
   }
+}
+
+// Degree Name overlay — paints a single digit 1..7 inside every
+// notehead, the note's scale-degree position in its current chord's
+// scale. Mutually exclusive with Note Name (both fill the notehead).
+// Uses its own DOM class so each overlay clears only its own marks.
+let overlayDegreeNamesOn = false;
+function clearDegreeNamesOverlay() {
+  document.querySelectorAll('.degree-name-overlay').forEach(n => {
+    if (n.parentNode) n.parentNode.removeChild(n);
+  });
+}
+function renderAllDegreeNamesOverlays(barsArg, tsArg) {
+  clearDegreeNamesOverlay();
+  if (!overlayDegreeNamesOn) return;
+  let bars = barsArg, ts = tsArg;
+  if (!bars) {
+    const cs = window.currentSong;
+    if (!cs || !cs.bars) return;
+    bars = cs.bars;
+    ts = cs.timesig;
+  }
+  for (let bi = 0; bi < barElements.length; bi++) {
+    if (barElements[bi]) paintDegreeNamesOverlayForBar(bi, bars, ts);
+  }
+}
+
+// Chord Tone Names overlay — paints 1 / 3 / 5 / 7 inside the
+// notehead, but ONLY on actual chord tones. Every other note
+// (passing tones, tensions, chromatic neighbours) is left blank.
+// Resolves chord tones through diatonicIndexInScale so altered /
+// HW-dim / WH-dim chords return their real 3 / 5 / 7 rather than a
+// scale-passing-tone enharmonic.
+let overlayChordToneNamesOn = false;
+function clearChordToneNamesOverlay() {
+  document.querySelectorAll('.chord-tone-name-overlay').forEach(n => {
+    if (n.parentNode) n.parentNode.removeChild(n);
+  });
+}
+function renderAllChordToneNamesOverlays(barsArg, tsArg) {
+  clearChordToneNamesOverlay();
+  if (!overlayChordToneNamesOn) return;
+  let bars = barsArg, ts = tsArg;
+  if (!bars) {
+    const cs = window.currentSong;
+    if (!cs || !cs.bars) return;
+    bars = cs.bars;
+    ts = cs.timesig;
+  }
+  for (let bi = 0; bi < barElements.length; bi++) {
+    if (barElements[bi]) paintChordToneNamesOverlayForBar(bi, bars, ts);
+  }
+}
+
+// Resolve a chord into the semitone-offsets of its 1 / 3 / 5 / 7,
+// keyed by that label. Returns e.g. { 0:'1', 4:'3', 7:'5', 11:'7' }
+// for a maj7 in Ionian, or { 0:'1', 3:'3', 6:'5', 9:'7' } for a
+// dim7 in WH-diminished. Used by the per-note labeler below.
+function chordToneOffsetMap(chord) {
+  const canonical = chordToCanonical(chord);
+  const root = exParseRoot(canonical);
+  const scale = exGetScale(canonical);
+  if (!root || !scale || !scale.length) return null;
+  const out = {};
+  for (const [di, label] of [[0,'1'],[2,'3'],[4,'5'],[6,'7']]) {
+    const ridx = diatonicIndexInScale(di, scale);
+    const sd = scale[((ridx % scale.length) + scale.length) % scale.length];
+    if (!sd) continue;
+    const offset = ((sd.s % 12) + 12) % 12;
+    // Skip duplicates so an 8-note scale's wrap-around doesn't
+    // overwrite the previous label at the same offset.
+    if (!(offset in out)) out[offset] = label;
+  }
+  return out;
+}
+
+// Strip accidentals/extensions from noteToScaleDegreeLabel's output,
+// collapsing everything to a plain 1..7 degree number. Examples:
+//   b3 → 3, #9 → 3, 11 → 4, #11 → 4, b5 → 5, b13 → 6, 13 → 6,
+//   b7 → 7, Maj7 → 7, b9 → 2.
+// Semitone 6 keeps the chord-type-sensitive split from the parent
+// function: dim / halfdim treat the tritone as b5 → "5"; everything
+// else treats it as #11 → "4".
+function noteToDegreeNumberLabel(semiOffset, chordType) {
+  const s = ((semiOffset % 12) + 12) % 12;
+  switch (s) {
+    case 0:  return '1';
+    case 1:  return '2'; // b9
+    case 2:  return '2'; // 9
+    case 3:  return '3'; // b3 / #9
+    case 4:  return '3'; // 3
+    case 5:  return '4'; // 11
+    case 6:  return (chordType === 'halfdim' || chordType === 'other') ? '5' : '4';
+    case 7:  return '5';
+    case 8:  return '6'; // b13
+    case 9:  return '6'; // 6 / 13
+    case 10: return '7'; // b7
+    case 11: return '7'; // 7 / Maj7
+  }
+  return '';
 }
 
 // Map a semitone offset from the chord root + the chord's quality
@@ -11558,6 +11809,259 @@ function paintNotesOverlayForBar(barIdx) {
 
 }
 
+// Paints the scale-degree number (1..7) inside every notehead in a
+// single bar. Combines Note Name's inside-the-head rendering with
+// Scale Degrees' per-step chord resolution so multi-chord bars
+// label each note against the chord active at its beat.
+function paintDegreeNamesOverlayForBar(barIdx, barsArg, tsArg) {
+  if (barIdx == null || barIdx < 0) return;
+  const info = barElements[barIdx];
+  if (!info || !info.noteEls || !info.noteData) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
+
+  let bars = barsArg, ts = tsArg;
+  if (!bars) {
+    const cs = window.currentSong;
+    if (!cs || !cs.bars) return;
+    bars = cs.bars;
+    ts = cs.timesig;
+  }
+  const baseIdx = ((barIdx % bars.length) + bars.length) % bars.length;
+  const bar = bars[baseIdx];
+  if (!bar) return;
+  let liveChords = (bar.chords || []).filter(c => c && !c.slash && !c.nc);
+  if (!liveChords.length && bar.repeatPrev) {
+    let cursor = baseIdx;
+    while (cursor >= 0) {
+      const b = bars[cursor];
+      const cs2 = (b.chords || []).filter(c => c && !c.slash && !c.nc);
+      if (cs2.length) { liveChords = cs2; break; }
+      if (!b.repeatPrev || cursor - b.repeatPrev < 0) break;
+      cursor -= b.repeatPrev;
+    }
+  }
+  if (!liveChords.length) return;
+
+  let beatsPerBar = 4;
+  if (ts) {
+    if (typeof ts === 'string' && typeof parseTimesig === 'function') {
+      const parsed = parseTimesig(ts);
+      if (parsed && parsed.num) beatsPerBar = parsed.num;
+    } else if (ts.num) {
+      beatsPerBar = ts.num;
+    }
+  }
+  const stepsPerBar = (info.beatToNoteSlot && info.beatToNoteSlot.length)
+    ? info.beatToNoteSlot.length
+    : beatsPerBar * 6;
+  const stepsPerBeat = Math.max(1, Math.round(stepsPerBar / beatsPerBar));
+  const chordRanges = liveChords.map((ch, ci) => {
+    const r = chordBeatRange(liveChords.length, ci, beatsPerBar);
+    return {
+      startStep: r.startBeat * stepsPerBeat,
+      endStep:   r.endBeat   * stepsPerBeat,
+      type: getChordType(chordToCanonical(ch)),
+      root: exParseRoot(chordToCanonical(ch))
+    };
+  });
+  function chordAtStep(stepInBar) {
+    for (const cr of chordRanges) {
+      if (stepInBar >= cr.startStep && stepInBar < cr.endStep) return cr;
+    }
+    return chordRanges[chordRanges.length - 1];
+  }
+
+  const svgRect = svg.getBoundingClientRect();
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const vbOK = vb && vb.width > 0 && vb.height > 0;
+  const vbSX = vbOK ? vb.width / svgRect.width : 1;
+  const vbSY = vbOK ? vb.height / svgRect.height : 1;
+  const vbOX = vbOK ? vb.x : 0;
+  const vbOY = vbOK ? vb.y : 0;
+
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('class', 'degree-name-overlay');
+  g.setAttribute('pointer-events', 'none');
+  svg.appendChild(g);
+
+  for (let i = 0; i < info.noteData.length; i++) {
+    const nd = info.noteData[i];
+    if (!nd) continue;
+    if (nd.pitch == null) continue;
+    const cr = chordAtStep(nd.stepStart != null ? nd.stepStart : 0);
+    if (!cr || !cr.root) continue;
+    const noteEl = info.noteEls[i];
+    if (!noteEl) continue;
+    const rect = noteEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    let headCX = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
+    let headCY = (rect.top  + rect.height / 2 - svgRect.top)  * vbSY + vbOY;
+    const sn = nd.staveNote;
+    if (sn) {
+      try {
+        const absX = sn.getAbsoluteX();
+        const ys = sn.getYs && sn.getYs();
+        const noteheadW = (sn.getGlyphWidth && sn.getGlyphWidth()) || 10;
+        if (isFinite(absX) && ys && ys.length) {
+          headCX = absX + noteheadW / 2;
+          headCY = ys[0];
+        }
+      } catch (e) {}
+    }
+
+    const noteSemi = ((nd.pitch % 12) + 12) % 12;
+    const semiOffset = ((noteSemi - cr.root.pitchClass) % 12 + 12) % 12;
+    const label = noteToDegreeNumberLabel(semiOffset, cr.type);
+    if (!label) continue;
+
+    const isHollow = nd.duration === 'w' || nd.duration === 'h';
+    if (isHollow) {
+      const tilt = nd.duration === 'w' ? -30 : -15;
+      const disc = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+      disc.setAttribute('cx', headCX);
+      disc.setAttribute('cy', headCY);
+      disc.setAttribute('rx', 5);
+      disc.setAttribute('ry', 3.2);
+      disc.setAttribute('transform', `rotate(${tilt} ${headCX} ${headCY})`);
+      disc.setAttribute('fill', '#fff');
+      disc.setAttribute('stroke', 'none');
+      g.appendChild(disc);
+    }
+    const textColor = isHollow ? '#000' : '#fff';
+    appendFingeringLabel(g, headCX, headCY, label, textColor, {
+      inside: true, fontSize: 7
+    });
+  }
+}
+
+// Paints 1 / 3 / 5 / 7 inside chord-tone noteheads in a single bar.
+// Same per-step chord resolution as paintDegreeNamesOverlayForBar
+// (so multi-chord bars label each note against its own chord), but
+// the per-note label comes from chordToneOffsetMap — passing tones
+// and tensions return null and stay blank.
+function paintChordToneNamesOverlayForBar(barIdx, barsArg, tsArg) {
+  if (barIdx == null || barIdx < 0) return;
+  const info = barElements[barIdx];
+  if (!info || !info.noteEls || !info.noteData) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
+
+  let bars = barsArg, ts = tsArg;
+  if (!bars) {
+    const cs = window.currentSong;
+    if (!cs || !cs.bars) return;
+    bars = cs.bars;
+    ts = cs.timesig;
+  }
+  const baseIdx = ((barIdx % bars.length) + bars.length) % bars.length;
+  const bar = bars[baseIdx];
+  if (!bar) return;
+  let liveChords = (bar.chords || []).filter(c => c && !c.slash && !c.nc);
+  if (!liveChords.length && bar.repeatPrev) {
+    let cursor = baseIdx;
+    while (cursor >= 0) {
+      const b = bars[cursor];
+      const cs2 = (b.chords || []).filter(c => c && !c.slash && !c.nc);
+      if (cs2.length) { liveChords = cs2; break; }
+      if (!b.repeatPrev || cursor - b.repeatPrev < 0) break;
+      cursor -= b.repeatPrev;
+    }
+  }
+  if (!liveChords.length) return;
+
+  let beatsPerBar = 4;
+  if (ts) {
+    if (typeof ts === 'string' && typeof parseTimesig === 'function') {
+      const parsed = parseTimesig(ts);
+      if (parsed && parsed.num) beatsPerBar = parsed.num;
+    } else if (ts.num) {
+      beatsPerBar = ts.num;
+    }
+  }
+  const stepsPerBar = (info.beatToNoteSlot && info.beatToNoteSlot.length)
+    ? info.beatToNoteSlot.length
+    : beatsPerBar * 6;
+  const stepsPerBeat = Math.max(1, Math.round(stepsPerBar / beatsPerBar));
+  const chordRanges = liveChords.map((ch, ci) => {
+    const r = chordBeatRange(liveChords.length, ci, beatsPerBar);
+    return {
+      startStep: r.startBeat * stepsPerBeat,
+      endStep:   r.endBeat   * stepsPerBeat,
+      root: exParseRoot(chordToCanonical(ch)),
+      toneMap: chordToneOffsetMap(ch)
+    };
+  });
+  function chordAtStep(stepInBar) {
+    for (const cr of chordRanges) {
+      if (stepInBar >= cr.startStep && stepInBar < cr.endStep) return cr;
+    }
+    return chordRanges[chordRanges.length - 1];
+  }
+
+  const svgRect = svg.getBoundingClientRect();
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const vbOK = vb && vb.width > 0 && vb.height > 0;
+  const vbSX = vbOK ? vb.width / svgRect.width : 1;
+  const vbSY = vbOK ? vb.height / svgRect.height : 1;
+  const vbOX = vbOK ? vb.x : 0;
+  const vbOY = vbOK ? vb.y : 0;
+
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('class', 'chord-tone-name-overlay');
+  g.setAttribute('pointer-events', 'none');
+  svg.appendChild(g);
+
+  for (let i = 0; i < info.noteData.length; i++) {
+    const nd = info.noteData[i];
+    if (!nd) continue;
+    if (nd.pitch == null) continue;
+    const cr = chordAtStep(nd.stepStart != null ? nd.stepStart : 0);
+    if (!cr || !cr.root || !cr.toneMap) continue;
+    const noteSemi = ((nd.pitch % 12) + 12) % 12;
+    const offset = ((noteSemi - cr.root.pitchClass) % 12 + 12) % 12;
+    const label = cr.toneMap[offset];
+    if (!label) continue; // non-chord-tone — leave blank
+
+    const noteEl = info.noteEls[i];
+    if (!noteEl) continue;
+    const rect = noteEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    let headCX = (rect.left + rect.width / 2 - svgRect.left) * vbSX + vbOX;
+    let headCY = (rect.top  + rect.height / 2 - svgRect.top)  * vbSY + vbOY;
+    const sn = nd.staveNote;
+    if (sn) {
+      try {
+        const absX = sn.getAbsoluteX();
+        const ys = sn.getYs && sn.getYs();
+        const noteheadW = (sn.getGlyphWidth && sn.getGlyphWidth()) || 10;
+        if (isFinite(absX) && ys && ys.length) {
+          headCX = absX + noteheadW / 2;
+          headCY = ys[0];
+        }
+      } catch (e) {}
+    }
+
+    const isHollow = nd.duration === 'w' || nd.duration === 'h';
+    if (isHollow) {
+      const tilt = nd.duration === 'w' ? -30 : -15;
+      const disc = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+      disc.setAttribute('cx', headCX);
+      disc.setAttribute('cy', headCY);
+      disc.setAttribute('rx', 5);
+      disc.setAttribute('ry', 3.2);
+      disc.setAttribute('transform', `rotate(${tilt} ${headCX} ${headCY})`);
+      disc.setAttribute('fill', '#fff');
+      disc.setAttribute('stroke', 'none');
+      g.appendChild(disc);
+    }
+    const textColor = isHollow ? '#000' : '#fff';
+    appendFingeringLabel(g, headCX, headCY, label, textColor, {
+      inside: true, fontSize: 7
+    });
+  }
+}
+
 function appendFingeringLabel(parent, x, y, txt, color, opts) {
   const fontSize = (opts && opts.fontSize) || 14;
   const inside = !!(opts && opts.inside);
@@ -11641,10 +12145,47 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
     if (e.key === 'Escape' && !menu.hidden) closeMenu();
   });
 
+  const degreeNames = document.getElementById('overlayDegreeNamesToggle');
+  const chordToneNames = document.getElementById('overlayChordToneNamesToggle');
+  // Note Name, Degree Name, and Chord Tone Names ALL paint inside
+  // the notehead and would visually collide. Whenever one switches
+  // on, the others switch off (and their existing marks are cleared).
+  function turnOffInsideHeadOthers(except) {
+    if (except !== 'notes' && notes && notes.checked) {
+      notes.checked = false;
+      overlayNotesOn = false;
+      clearNotesOverlay();
+    }
+    if (except !== 'degree' && degreeNames && degreeNames.checked) {
+      degreeNames.checked = false;
+      overlayDegreeNamesOn = false;
+      clearDegreeNamesOverlay();
+    }
+    if (except !== 'chordTone' && chordToneNames && chordToneNames.checked) {
+      chordToneNames.checked = false;
+      overlayChordToneNamesOn = false;
+      clearChordToneNamesOverlay();
+    }
+  }
   if (notes) {
     notes.addEventListener('change', (e) => {
       overlayNotesOn = !!e.target.checked;
+      if (overlayNotesOn) turnOffInsideHeadOthers('notes');
       renderAllNotesOverlays();
+    });
+  }
+  if (degreeNames) {
+    degreeNames.addEventListener('change', (e) => {
+      overlayDegreeNamesOn = !!e.target.checked;
+      if (overlayDegreeNamesOn) turnOffInsideHeadOthers('degree');
+      renderAllDegreeNamesOverlays();
+    });
+  }
+  if (chordToneNames) {
+    chordToneNames.addEventListener('change', (e) => {
+      overlayChordToneNamesOn = !!e.target.checked;
+      if (overlayChordToneNamesOn) turnOffInsideHeadOthers('chordTone');
+      renderAllChordToneNamesOverlays();
     });
   }
   const scaleDegrees = document.getElementById('overlayScaleDegreesToggle');
@@ -11688,25 +12229,42 @@ function appendFingeringLabel(parent, x, y, txt, color, opts) {
   // would leave the previous state on screen.
   const chordNotes = document.getElementById('overlayChordNotesToggle');
   const chordNotesSimplified = document.getElementById('overlayChordNotesSimplifiedToggle');
+  const chordTones = document.getElementById('overlayChordTonesToggle');
+  // Chord Notes, Chord Notes — Simplified, and Chord Tones all
+  // paint into the same bottom band and are mutually exclusive.
+  // Switching one on clears the others.
+  function turnOffBottomBandOthers(except) {
+    if (except !== 'notes' && chordNotes && chordNotes.checked) {
+      chordNotes.checked = false;
+      overlayChordNotesOn = false;
+    }
+    if (except !== 'simplified' && chordNotesSimplified && chordNotesSimplified.checked) {
+      chordNotesSimplified.checked = false;
+      overlayChordNotesSimplifiedOn = false;
+    }
+    if (except !== 'tones' && chordTones && chordTones.checked) {
+      chordTones.checked = false;
+      overlayChordTonesOn = false;
+    }
+  }
   if (chordNotes) {
     chordNotes.addEventListener('change', (e) => {
       overlayChordNotesOn = !!e.target.checked;
-      // Mutually exclusive with the simplified variant.
-      if (overlayChordNotesOn && chordNotesSimplified) {
-        chordNotesSimplified.checked = false;
-        overlayChordNotesSimplifiedOn = false;
-      }
+      if (overlayChordNotesOn) turnOffBottomBandOthers('notes');
       if (typeof rerenderCurrent === 'function') rerenderCurrent();
     });
   }
   if (chordNotesSimplified) {
     chordNotesSimplified.addEventListener('change', (e) => {
       overlayChordNotesSimplifiedOn = !!e.target.checked;
-      // Mutually exclusive with the full Chord Notes overlay.
-      if (overlayChordNotesSimplifiedOn && chordNotes) {
-        chordNotes.checked = false;
-        overlayChordNotesOn = false;
-      }
+      if (overlayChordNotesSimplifiedOn) turnOffBottomBandOthers('simplified');
+      if (typeof rerenderCurrent === 'function') rerenderCurrent();
+    });
+  }
+  if (chordTones) {
+    chordTones.addEventListener('change', (e) => {
+      overlayChordTonesOn = !!e.target.checked;
+      if (overlayChordTonesOn) turnOffBottomBandOthers('tones');
       if (typeof rerenderCurrent === 'function') rerenderCurrent();
     });
   }
@@ -13755,31 +14313,45 @@ document.querySelectorAll('#keySeg button').forEach(btn => {
   btn.addEventListener('click', () => applyKeyChange(btn.dataset.key));
 });
 
-// Spacebar = toggle play/pause (desktop convention). Routed through
-// the play button's existing click handler so all the start/pause/
-// resume branching, count-in handling, and disabled-button gating
-// stay in one place. We bail when:
-//   - the user is typing in a field (song filter, etc.) — letting
-//     space insert a character normally
-//   - the play button itself is the focused element (the browser's
-//     default space-activates-button behavior already covers it
-//     and a duplicate click would just no-op back to the same state)
-//   - any modifier key is held (don't hijack Ctrl-Space etc.)
-//   - the play button is disabled (Head mode on a headless song)
+// Spacebar = scroll the score one "almost-page" down (matches the
+// PageDown handler immediately below — same step size, same eased
+// animation). Bail when typing in a field so space can still insert
+// a character, when a button has focus so the browser's native
+// space-activates-button behavior still works, or when any modifier
+// is held (don't hijack Ctrl-Space etc.).
+//
+// Enter = toggle the Chord Tones overlay. Skipped when a button or
+// link has focus so the browser's native enter-activates-control
+// still fires, and when typing in a field.
 document.addEventListener('keydown', e => {
-  if (e.key !== ' ' && e.code !== 'Space') return;
+  const isSpace = e.key === ' ' || e.code === 'Space';
+  const isEnter = e.key === 'Enter';
+  if (!isSpace && !isEnter) return;
   if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
   const t = e.target;
   if (t) {
-    if (t.id === 'playBtn') return;
     const tag = (t.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (tag === 'button' || tag === 'a') return;
     if (t.isContentEditable) return;
   }
-  const playBtn = document.getElementById('playBtn');
-  if (!playBtn || playBtn.disabled) return;
-  e.preventDefault(); // stop the page from scrolling on space
-  playBtn.click();
+  if (isSpace) {
+    const chartEl = document.getElementById('chart');
+    if (!chartEl) return;
+    e.preventDefault();
+    const step = Math.max(40, Math.round(chartEl.clientHeight * 0.75));
+    _animateChartScroll(chartEl, step);
+    return;
+  }
+  // Enter — toggle the Chord Tones overlay. Going through the
+  // checkbox's change event triggers the existing handler, which
+  // already does the bottom-band mutual exclusion AND the chart
+  // re-render — no need to duplicate that logic here.
+  const cb = document.getElementById('overlayChordTonesToggle');
+  if (!cb) return;
+  e.preventDefault();
+  cb.checked = !cb.checked;
+  cb.dispatchEvent(new Event('change'));
 });
 
 // Page Up / Page Down — scroll the score (#chart) regardless of where
@@ -13894,6 +14466,74 @@ document.addEventListener('keydown', e => {
   e.preventDefault();
   const step = Math.max(40, Math.round(chartEl.clientHeight * 0.75));
   _animateChartScroll(chartEl, e.key === 'PageDown' ? step : -step);
+});
+
+// ArrowLeft / ArrowRight at the document level — step the Note Info
+// panel between chords. If the current bar has multiple chords the
+// arrows hop chord-to-chord within it (equivalent to clicking the
+// Prev/Next chord buttons under the fingerboard). When already at
+// the first or last chord of the bar, the next arrow press jumps to
+// the previous or next bar that carries chords and lands on its
+// last or first chord respectively. So a `Dm7 G7 | CMaj7` chart
+// with the first bar selected on Dm7: → goes to G7 (within bar),
+// → goes to bar 2 on CMaj7; ← from CMaj7 goes back to G7, ← from
+// G7 goes back to Dm7.
+//
+// Suppressed while typing in inputs / textareas / contenteditable,
+// while Edit Mode is active (its own ArrowLeft / ArrowRight handler
+// at line 17216-ish claims the keys for note-by-note cursor
+// movement), and while playback is running (the panel auto-updates
+// per beat — arrows would race the playhead).
+document.addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  if (typeof emEnabled !== 'undefined' && emEnabled) return;
+  const t = e.target;
+  if (t) {
+    const tag = (t.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (t.isContentEditable) return;
+  }
+  if (selectedBar == null) return;
+  if (playState === 'playing') return;
+  const dir = (e.key === 'ArrowRight') ? +1 : -1;
+  const starts = chordStartBeatsForBar(selectedBar);
+  const newIdx = selectedChordIdxInBar + dir;
+  if (starts.length && newIdx >= 0 && newIdx < starts.length) {
+    e.preventDefault();
+    selectedChordIdxInBar = newIdx;
+    refreshFingerboardForBar(selectedBar, starts[newIdx]);
+    updateChordNav();
+    return;
+  }
+  // Bar-edge — hop to the next/prev bar that has chord info.
+  const limit = (typeof barElements !== 'undefined') ? barElements.length : 0;
+  if (dir > 0) {
+    for (let bi = selectedBar + 1; bi < limit; bi++) {
+      const s = chordStartBeatsForBar(bi);
+      if (s.length > 0) {
+        e.preventDefault();
+        // selectBar() resets selectedChordIdxInBar to 0 and refreshes
+        // the panel against the bar's first chord — exactly what we
+        // want when advancing forward.
+        selectBar(bi);
+        return;
+      }
+    }
+  } else {
+    for (let bi = selectedBar - 1; bi >= 0; bi--) {
+      const s = chordStartBeatsForBar(bi);
+      if (s.length > 0) {
+        e.preventDefault();
+        selectBar(bi);
+        // Going backwards: land on the bar's LAST chord, not its first.
+        selectedChordIdxInBar = s.length - 1;
+        refreshFingerboardForBar(bi, s[s.length - 1]);
+        updateChordNav();
+        return;
+      }
+    }
+  }
 });
 
 // ===== Event bindings =====
@@ -14091,7 +14731,19 @@ document.addEventListener('pointerdown', function firstTouch() {
 function rerenderCurrent() {
   if (!window.currentSong) return;
   const { song, bars, timesig } = window.currentSong;
+  // renderChart wipes #chart's innerHTML, which natively resets its
+  // scrollTop to 0. For full-song rebuilds triggered by overlay
+  // toggles / exercise changes / size or measures-per-line changes,
+  // the user almost always wants to stay where they were on the
+  // chart — popping back to the top after every checkbox click is
+  // disorienting (most obvious with the Enter → Chord Tones binding).
+  // Save scrollTop before the render and restore it after; the
+  // browser clamps the value automatically if the new chart turns
+  // out shorter than where we were scrolled to.
+  const chartEl = document.getElementById('chart');
+  const savedScroll = chartEl ? chartEl.scrollTop : 0;
   renderChart(song, bars, timesig);
+  if (chartEl) chartEl.scrollTop = savedScroll;
 }
 
 document.querySelectorAll('#mplSeg button').forEach(b => {
@@ -14361,9 +15013,17 @@ async function loadExerciseLick(filename) {
     // doing offset math itself).
     const barNotes = [];
     const barChords = [];
+    // Carry the last-seen <harmony> forward into bars that have none
+    // of their own — Quote charts often omit chord symbols on bars 2
+    // and 4 of a two-bar phrase when the chord is held over, which
+    // would otherwise leave those bars unannotated (stepIdx = null)
+    // and Functional / 3579 projection couldn't place notes there.
+    let lastSourceChord = null;
     for (let b = 0; b < numBars; b++) {
       barNotes.push([]);
-      barChords.push(chordByMeasure.get(b) || null);
+      const ch = chordByMeasure.get(b);
+      if (ch) lastSourceChord = ch;
+      barChords.push(ch || lastSourceChord);
     }
     for (const n of parsed.notes) {
       const b = Math.floor((n.stepStart || 0) / stepsPerBar);
@@ -14855,7 +15515,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordTonesHalf' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -14923,7 +15583,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordTonesHalf' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
