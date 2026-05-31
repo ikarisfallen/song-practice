@@ -13807,6 +13807,84 @@ function expandDCAl2ndEnding(bars) {
   return out;
 }
 
+// Expand a "D.C. al 3rd Ending" chart. Runs AFTER expandIRealRepeats
+// so the N1 / N3 markers survive on the bars that carried them.
+// Canonical use: AABA charts that already have an N1/N2 pair inside
+// the A section (so the first two A passes use first / second
+// endings via the internal repeat), then close the B section with
+// a "D.C. al 3rd ending" comment. The N3 bars are written at the
+// tail of the chart — without this pass they'd play directly after
+// B with no trip back through the form first.
+//
+// Without a Song is the canonical example: the chart shows A (N1),
+// A (N2), B, then "D.C. al 3rd Ending" pointing back to the top of
+// A, finishing with the N3 ending (E♭6 | Cm7 | Fm7 | B♭7).
+//
+// Algorithm:
+//   1. Require a D.C.-al-3rd-ending marker somewhere in `bars`.
+//   2. Find the N1 range to identify the A section's common bars
+//      (0..firstN1-1) AND to derive the N3 length (matches N1's).
+//   3. Find the first N3 bar.
+//   4. SPLICE the A common bars in BEFORE the first N3 bar, so the
+//      play order becomes A(N1) → A(N2) → B → A common → N3.
+//   5. Tag every bar in the N3 range with ending='3' so the renderer
+//      paints the "3rd Ending" bracket across the whole group (the
+//      parser only marks the FIRST N3 bar — same convention as N1
+//      and N2 — and the existing expand passes rely on the run-of-
+//      bars tagging downstream).
+function expandDCAl3rdEnding(bars) {
+  let hasDCAl3rd = false;
+  bars.forEach(b => {
+    (b.markers || []).forEach(m => {
+      if (m.type !== 'comment') return;
+      const lc = (m.text || '').toLowerCase();
+      if (lc.includes('d.c. al 3rd ending') || lc.includes('dc al 3rd ending')) {
+        hasDCAl3rd = true;
+      }
+    });
+  });
+  if (!hasDCAl3rd) return bars;
+
+  // N1 range: first bar tagged ending==1 through the last consecutive
+  // one. Loose equality because the parser stores `ending` as a
+  // string ("1") while callers think in numbers.
+  let firstN1Idx = -1, lastN1Idx = -1;
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].ending == 1) {
+      if (firstN1Idx < 0) firstN1Idx = i;
+      lastN1Idx = i;
+    }
+  }
+  // N3 starts at the first bar tagged ending==3. Length matches N1's
+  // (same convention used by iReal's repeat expander for N2).
+  let firstN3Idx = -1;
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].ending == 3) { firstN3Idx = i; break; }
+  }
+  if (firstN1Idx < 0 || firstN3Idx < 0) return bars;
+
+  const n1Length = lastN1Idx - firstN1Idx + 1;
+  const n3EndIdx = Math.min(firstN3Idx + n1Length - 1, bars.length - 1);
+
+  const out = [];
+  // Everything up to (but not including) the first N3 bar passes through.
+  for (let i = 0; i < firstN3Idx; i++) out.push(bars[i]);
+  // Then the A common bars (0..firstN1-1) — the D.C. trip back.
+  for (let j = 0; j < firstN1Idx; j++) {
+    const b = { ...bars[j], markers: bars[j].markers ? [...bars[j].markers] : [] };
+    out.push(b);
+  }
+  // Then the N3 bars, every one tagged ending='3'.
+  for (let k = firstN3Idx; k <= n3EndIdx; k++) {
+    const b = { ...bars[k], markers: bars[k].markers ? [...bars[k].markers] : [] };
+    b.ending = '3';
+    out.push(b);
+  }
+  // Any trailing bars beyond the N3 range stay where they were.
+  for (let k = n3EndIdx + 1; k < bars.length; k++) out.push(bars[k]);
+  return out;
+}
+
 // Some iRealPro charts use a `}` (repeatEnd) WITHOUT an explicit
 // `{` (repeatStart) — the convention is that the repeat goes back
 // to the start of the current section (`*A`, `*B`, …) or to the
@@ -14164,6 +14242,11 @@ function loadFromURL(url) {
   // Alice in Wonderland end B with this marker and expect the
   // renderer to append the common A bars plus the N2 ending.
   bars = expandDCAl2ndEnding(bars);
+  // And "D.C. al 3rd Ending" — charts whose A section already has
+  // N1/N2 inside an internal repeat (so two A passes happen before
+  // B), then close B with this marker pointing back to a tail N3.
+  // Without a Song is the canonical example.
+  bars = expandDCAl3rdEnding(bars);
   const normalized = normalizeKey(song.key);
   originalKey = normalized.key;
   currentKey = originalKey;
