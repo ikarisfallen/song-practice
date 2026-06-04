@@ -8968,13 +8968,8 @@ function renderChart(song, barsIn, timesigStr) {
   // Either chord-notes overlay (full or simplified) reserves space
   // below the chord-symbol row. Simplified text is often empty for
   // a given chord, but we still need the row height so non-empty
-  // entries have somewhere to land. Game Mode Hidden also reserves
-  // the band so the per-chord chord-tone reveal text always has a
-  // visible slot regardless of which static overlays the user has
-  // on or off — without this, turning Chord Scales off after using
-  // it would clip the reveal text below the (now shorter) SVG.
-  const chordNotesAnyOn = overlayChordNotesOn || overlayChordNotesSimplifiedOn || overlayChordTonesOn
-    || (typeof gameMode !== 'undefined' && gameMode && typeof gameKind !== 'undefined' && gameKind === 'hidden');
+  // entries have somewhere to land.
+  const chordNotesAnyOn = overlayChordNotesOn || overlayChordNotesSimplifiedOn || overlayChordTonesOn;
   const chordNotesY1 = chordNotesAnyOn
     ? (overlayChordScalesOn ? patternLineY + 18 : 148)
     : 0;
@@ -11350,13 +11345,11 @@ let overlayScaleDegreesOn = false;
 // next playback event.
 let overlayCurrentNoteOn = false;
 // Chord-scale lines (the bold key-name + colored underline showing
-// which span of bars belongs to which key). On by default — they're
-// the most useful sight-reading aid the chart offers. When off, the
-// renderer skips the underline pass entirely AND shrinks the SVG
-// height so the saved space actually compresses the score on screen
-// (instead of leaving an empty band under each row). Default reflects
-// the matching `checked` attribute on #overlayChordScalesToggle.
-let overlayChordScalesOn = true;
+// which span of bars belongs to which key). Off by default — when
+// on, the renderer adds an underline band below the staff and the
+// SVG grows to fit it; toggling off reclaims that space. Default
+// reflects the matching unchecked state of #overlayChordScalesToggle.
+let overlayChordScalesOn = false;
 // Chord notes: tiny grey list of the chord-scale tones written under
 // each chord symbol (e.g. CMaj7 → "C D E F G A B"). Off by default;
 // flipping it triggers a chart re-render so the per-chord text gets
@@ -17728,19 +17721,19 @@ function gamePaintChordToneReveal(chordEventIdx) {
   const labelAreaX0 = info.noteStartX;
   const labelAreaW  = info.noteEndX - info.noteStartX;
   const cx = labelAreaX0 + (startBeat / beatsPerBarLabel) * labelAreaW;
-  // Y: paint into the chord-notes band — same SVG-local y the
-  // regular Chord Tones overlay uses. The band is below the staff
-  // (and below ledger-line notes), and renderChart's
-  // chordNotesAnyOn includes Game Mode Hidden so the SVG always
-  // reserves this slot whenever Hidden is active — meaning the
-  // reveal text is visible regardless of which other overlays the
-  // user has turned on or off.
-  //   patternLineY = 156 (under-bar of the Chord Scales label).
-  //   chordNotesY1 = patternLineY + 18 when Chord Scales is on, else 148.
-  const PATTERN_LINE_Y = 156;
-  const labelY = (typeof overlayChordScalesOn !== 'undefined' && overlayChordScalesOn)
-    ? PATTERN_LINE_Y + 18
-    : 148;
+  // Y: paint into the gap BETWEEN the chord symbol (baseline at
+  // staffY - 6 = y=30, descender to ~y=33) and the top staff line
+  // / highest possible note F3 (sits ~y=51 as a 2nd-ledger space
+  // above the staff). Placing baseline at y=44 with a small font
+  // gives ~3 px clearance under the chord symbol and ~2 px
+  // clearance above F3 noteheads — narrow but enough on every
+  // bar except the rare one whose top note IS exactly F3, where
+  // a 1-2 px overlap is acceptable.
+  //
+  // This positioning works regardless of which overlays are on —
+  // the row's SVG always reserves room above the staff for chord
+  // symbols, so the reveal text never gets clipped.
+  const labelY = 44;
   // Remove any prior reveal for this chord (defensive — should be
   // skipped by the gate at the caller, but a no-op re-paint is fine).
   svg.querySelectorAll(
@@ -17753,7 +17746,7 @@ function gamePaintChordToneReveal(chordEventIdx) {
   tn.setAttribute('y', labelY);
   tn.setAttribute('text-anchor', 'start');
   tn.setAttribute('font-family', 'sans-serif');
-  tn.setAttribute('font-size', 14);
+  tn.setAttribute('font-size', 11);
   tn.setAttribute('fill', '#1f8a3a'); // green — matches "completed" feel
   tn.setAttribute('font-weight', 'bold');
   tn.setAttribute('stroke', 'none');
@@ -18758,10 +18751,6 @@ function gameSetMode(on) {
   if (gameMode) {
     if (gamePanel) gamePanel.removeAttribute('hidden');
     if (fbPanel)   fbPanel.setAttribute('hidden', '');
-    // Re-render so the chord-notes band (which now factors in
-    // gameMode + gameKind === 'hidden') reserves room for the
-    // chord-tone reveal labels before any chord is cleared.
-    if (typeof rerenderCurrent === 'function') rerenderCurrent();
     gameBuildSequence();
     gameReset();
     // Eagerly kick off audio sample loading. Without this, a fresh
@@ -18795,10 +18784,6 @@ function gameSetMode(on) {
     // set clears too so re-entering the game starts blank.
     gameRevealedChordEvents.clear();
     gameClearChordToneRevealsDOM();
-    // Re-render so the chord-notes band (which was reserving room
-    // for the Hidden-mode reveals) shrinks back to its non-game
-    // size.
-    if (typeof rerenderCurrent === 'function') rerenderCurrent();
   }
 }
 
@@ -18821,11 +18806,6 @@ function gameSetMode(on) {
         // re-arm its own metronome state on the next user toggle.
         if (typeof gameMetronomeStop === 'function') gameMetronomeStop();
         gameReset();
-        // The chord-notes band's reserved space depends on
-        // gameKind === 'hidden'. Flipping kind needs a re-render
-        // so the chart resizes to add or drop the band slot for
-        // chord-tone reveals.
-        if (typeof rerenderCurrent === 'function') rerenderCurrent();
       }
     });
   }
