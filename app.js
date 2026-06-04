@@ -4261,111 +4261,6 @@ function generateRange3579HalfNotes(bars, ts) {
   return { results, chordEvents, patterns, effective };
 }
 
-// Chord Tones — Half generator: same sawtooth between F1 and F3 as
-// 3579 Range Half, but the walk steps through 1 / 3 / 5 / 7 chord
-// tones instead of 3 / 5 / 7 / 9. One half note every two beats,
-// ascending until the chord's tones run out at the top, then
-// descending, alternating without enclosures. Uses
-// diatonicIndexInScale so altered / HW-dim / WH-dim chords still
-// resolve to their real chord 3 / 5 / 7 (and bb7 on dim7).
-function generateChordTonesHalfNotes(bars, ts) {
-  const beatsPerBar = ts.num;
-  const chordEvents = buildChordEventList(bars);
-  const patterns = detectKeyPatterns(chordEvents);
-  const effective = chordEvents.map((ce, i) => {
-    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
-    return pickEffectiveScale(ce, pat);
-  });
-
-  const results = bars.map(() => new Array(beatsPerBar).fill(null));
-
-  function findChordEventAtBeat(barIdx, beatIdx) {
-    for (let i = 0; i < chordEvents.length; i++) {
-      const ce = chordEvents[i];
-      if (ce.barIdx !== barIdx) continue;
-      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
-      if (beatIdx >= r.startBeat && beatIdx < r.endBeat) return ce;
-    }
-    return null;
-  }
-
-  // All 1 / 3 / 5 / 7 pitches for a chord across F1..F3, sorted
-  // ascending. Same structure as the 3579 variant's helper, just
-  // with the chord-tone diatonic indices.
-  function chordToneOptions(ce) {
-    const chordScale = exGetScale(chordToCanonical(ce.chord));
-    if (!chordScale || chordScale.length === 0) return [];
-    const rootPc = ce.root.pitchClass;
-    const rootTpc = ce.root.tpc;
-    const degIdxs = [0, 2, 4, 6]; // diatonic indices for 1, 3, 5, 7
-    const opts = [];
-    for (const di of degIdxs) {
-      const ridx = diatonicIndexInScale(di, chordScale);
-      const oct = Math.floor(ridx / chordScale.length);
-      const sd  = chordScale[ridx % chordScale.length];
-      const pc  = (((rootPc + sd.s + oct * 12) % 12) + 12) % 12;
-      const tpc = rootTpc + sd.t;
-      for (let p = EX_LOW; p <= EX_HIGH; p++) {
-        if ((((p % 12) + 12) % 12) === pc) opts.push({ pitch: p, tpc });
-      }
-    }
-    opts.sort((a, b) => a.pitch - b.pitch);
-    return opts;
-  }
-
-  let direction = 1;
-  let lastPitch = -1;
-
-  for (let barIdx = 0; barIdx < bars.length; barIdx++) {
-    for (let beatIdx = 0; beatIdx < beatsPerBar; beatIdx += 2) {
-      if (beatIdx + 2 > beatsPerBar) continue;
-      const ce = findChordEventAtBeat(barIdx, beatIdx);
-      if (!ce) continue;
-      const opts = chordToneOptions(ce);
-      if (opts.length === 0) continue;
-
-      let chosen = null;
-      if (lastPitch < 0) {
-        // First note — lowest in-range chord tone, head upward.
-        chosen = opts[0];
-        direction = 1;
-      } else if (direction > 0) {
-        chosen = opts.find(o => o.pitch > lastPitch);
-        if (!chosen) {
-          // Top of the sweep — flip and take the highest pitch below.
-          direction = -1;
-          for (let i = opts.length - 1; i >= 0; i--) {
-            if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
-          }
-        }
-      } else {
-        for (let i = opts.length - 1; i >= 0; i--) {
-          if (opts[i].pitch < lastPitch) { chosen = opts[i]; break; }
-        }
-        if (!chosen) {
-          direction = 1;
-          chosen = opts.find(o => o.pitch > lastPitch);
-        }
-      }
-      if (!chosen) {
-        // Neither direction had a strictly-stepping option — closest
-        // pitch wins so the bar still gets a note.
-        chosen = opts[0];
-        for (let i = 1; i < opts.length; i++) {
-          if (Math.abs(opts[i].pitch - lastPitch) < Math.abs(chosen.pitch - lastPitch)) {
-            chosen = opts[i];
-          }
-        }
-      }
-
-      results[barIdx][beatIdx] = { pitch: chosen.pitch, tpc: chosen.tpc, duration: 'h' };
-      lastPitch = chosen.pitch;
-    }
-  }
-
-  return { results, chordEvents, patterns, effective };
-}
-
 // 3579 Range generator (quarter-note variant): same sawtooth between
 // F1 and F3 as 3579 Range Half, but stepping ONCE PER BEAT instead of
 // every two beats. The chord-tone walk through {3, 5, 7, 9} produces
@@ -5103,8 +4998,61 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
 // fixed set of chord-tone scale degrees (e.g. [0,2,4,6] for 1-3-5-7
 // or [0,2,4] for 1-3-5), zig-zagging up/down the cello range with
 // direction reversals every `N` notes (where N = degCount).
-function makeQuarterNoteArpeggioGenerator(degScaleIdx) {
+function makeArpeggioGenerator(degScaleIdx, mode) {
   const degCount = degScaleIdx.length;
+  mode = mode || 'four';
+  // mode = 'one'  → one note PER CHORD EVENT, sized to that chord's
+  //                 beat span (4 beats → whole, 3 → dotted half,
+  //                 2 → half, 1 → quarter). A chord held across 2
+  //                 bars produces 2 whole notes (one per bar, since
+  //                 each bar carries its own chord event); a 4/4 bar
+  //                 with `Dm7 G7` (2 beats each) produces 2 half
+  //                 notes; a 4/4 bar with 4 chords (1 beat each)
+  //                 produces 4 quarter notes — one chord, one note.
+  // mode = 'two'  → two slots per bar at beats 0 and 2, each a half
+  //                 note (or whatever fits in 3/4). The slot at beat
+  //                 0 plays the chord active there; the slot at beat
+  //                 2 plays the chord active THERE — so a held chord
+  //                 gives 2 half notes on the same chord (walk
+  //                 advances between them), while a 2-chord bar gives
+  //                 one half note from each chord. 4-chord bars
+  //                 voice only the chords at beats 0 and 2.
+  // mode = 'four' → quarter notes, one slot per beat (the original
+  //                 Chord Tones behaviour).
+  // Build the sorted in-range list of CHORD-TONE pitches for one
+  // chord — same shape as buildScaleTones, just filtered down to the
+  // tones at `degScaleIdx` (1/3/5/7 for Chord Tones, 1/3/5 for
+  // Triads). diatonicIndexInScale maps each diatonic index to the
+  // chord's REAL chord tone even for HW-dim (7♭9) and WH-dim (dim7)
+  // scales, so a 7♭9 returns natural 3 and b7 instead of the b3/♯9
+  // passing tone.
+  function buildChordTones(rootPc, rootTpc, chordScale) {
+    if (!chordScale || !chordScale.length) return [];
+    const pcs = [];
+    const seenPc = new Set();
+    for (let d = 0; d < degCount; d++) {
+      const realIdx = diatonicIndexInScale(degScaleIdx[d], chordScale);
+      const sd = chordScale[realIdx % chordScale.length];
+      if (!sd) continue;
+      const pc = ((rootPc + sd.s) % 12 + 12) % 12;
+      if (seenPc.has(pc)) continue;
+      seenPc.add(pc);
+      pcs.push({ pc, tpc: rootTpc + sd.t });
+    }
+    const tones = [];
+    const seenPitch = new Set();
+    for (const { pc, tpc } of pcs) {
+      for (let oct = 0; oct <= 6; oct++) {
+        const pitch = pc + oct * 12;
+        if (pitch < EX_LOW || pitch > EX_HIGH) continue;
+        if (seenPitch.has(pitch)) continue;
+        seenPitch.add(pitch);
+        tones.push({ pitch, tpc });
+      }
+    }
+    tones.sort((a, b) => a.pitch - b.pitch);
+    return tones;
+  }
   return function (bars, ts) {
     const beatsPerBar = ts.num;
     const chordEvents = buildChordEventList(bars);
@@ -5116,187 +5064,142 @@ function makeQuarterNoteArpeggioGenerator(degScaleIdx) {
 
     const results = bars.map(() => new Array(beatsPerBar).fill(null));
 
-    // All MIDI pitches in the cello range that match a given pitch class.
-    function pitchesForPC(pc) {
-      const arr = [];
-      for (let oc = 0; oc <= 7; oc++) {
-        const p = pc + oc * 12;
-        if (p >= EX_LOW && p <= EX_HIGH) arr.push(p);
+    // Per-bar note slots — built either off the bar's chord events
+    // ('one' mode, one slot per chord event sized to that chord) or
+    // off fixed beat positions ('two' / 'four', one slot per N
+    // beats regardless of chord layout).
+    function durForBeats(n) {
+      if (n >= 4) return 'w';
+      if (n === 3) return 'h.';
+      if (n === 2) return 'h';
+      return 'q';
+    }
+    function slotsForBar(barIdx) {
+      const out = [];
+      if (mode === 'one') {
+        for (const ce of chordEvents) {
+          if (ce.barIdx !== barIdx) continue;
+          const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+          out.push({ beat: r.startBeat, dur: durForBeats(r.endBeat - r.startBeat) });
+        }
+      } else if (mode === 'two') {
+        for (let b = 0; b + 2 <= beatsPerBar; b += 2) {
+          out.push({ beat: b, dur: 'h' });
+        }
+      } else {
+        for (let b = 0; b < beatsPerBar; b++) {
+          out.push({ beat: b, dur: 'q' });
+        }
       }
-      return arr;
+      return out;
     }
 
-    // Number of quarter-note slots each chord event gets.
-    const quartersPerEvent = chordEvents.map(ce => {
-      const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
-      return endBeat - startBeat;
-    });
-
-    let descending = true;           // start by descending from top of range
-    let lastWrittenPitch = -1;
-
-    chordEvents.forEach((ce, ci) => {
-      // Chord tones come from the chord's OWN scale and root — NOT
-      // from the parent major-key scale carried by `effective[]`.
-      // That parent-key mapping is appropriate for scale-walking
-      // (where you want every chord in a ii-V-I to share a single
-      // diatonic scale) but wrong for arpeggios: F7 inside B♭ major
-      // must still arpeggiate F-A-C, not B♭-D-F.
-      const chordScale = exGetScale(chordToCanonical(ce.chord));
-      const rootPC = ce.root.pitchClass;
-      const rootTpc = ce.root.tpc;
-
-      // Build the chord-tone degrees specified by this generator.
-      // diatonicIndexInScale maps [0, 2, 4, 6] to the chord's actual
-      // 1/3/5/7 even when the active scale is HW Diminished — without
-      // it, an arpeggio over D7♭9 would land on R, ♭3, ♯11, 13
-      // (HW indices 0, 2, 4, 6) instead of R, 3, 5, ♭7.
-      const degrees = [];
-      for (let d = 0; d < degCount; d++) {
-        const si = diatonicIndexInScale(degScaleIdx[d], chordScale);
-        if (si >= chordScale.length) continue;
-        degrees.push({
-          pc: ((rootPC + chordScale[si].s) % 12 + 12) % 12,
-          tpc: rootTpc + chordScale[si].t
-        });
+    function findChordEventAtBeat(barIdx, beat) {
+      for (const ce of chordEvents) {
+        if (ce.barIdx !== barIdx) continue;
+        const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+        if (beat >= r.startBeat && beat < r.endBeat) return ce;
       }
-      if (degrees.length < degCount) return;
+      return null;
+    }
 
-      const numQuarters = quartersPerEvent[ci];
-      const notes = [];
+    // Mirrors generateQuarterNotes (Scale Notes) exactly — single
+    // running `direction`, a `tones[]` list built from the chord's
+    // CHORD TONES (not its full scale), and toneIdx that walks the
+    // list one step per slot. At a chord change the new tones list
+    // is built and findSmoothContinuation picks the toneIdx + dir
+    // closest to where the previous chord's last note left off,
+    // USING `lastEmittedDirection` (the direction at the most recent
+    // emit) rather than `direction` (which may have been wall-
+    // flipped by the post-emit advance after a chord that ended at
+    // the top or bottom of its tones[] list). That distinction is
+    // what makes D7♭9 → Gm7 land on F3 instead of bouncing off the
+    // wall down to B♭2: the walk was genuinely ascending into the
+    // chord change, even though the speculative advance after D3
+    // had no in-range tone left and flipped `direction` to −1.
+    let direction = 1;
+    let tones = [];
+    let toneIdx = 0;
+    let lastPitch = -1;
+    let lastTpc = -1;
+    let lastSig = null;
+    let lastEmittedDirection = 1;
 
-      // Unified "pick the smoothest next chord tone" loop — no special
-      // cases for 1- or 2-quarter chords. For short chords inside
-      // multi-chord bars this means we use whatever chord tone creates
-      // the smallest voice-leading jump from the previous note. For
-      // long chords it preserves the zig-zag arpeggio with direction
-      // reversals every `degCount` notes.
-      //
-      // Starting pitch / degree for this chord:
-      //   - First chord of the piece: top of the cello range (descending).
-      //   - Subsequent chords: pick the chord tone that is (a) closest
-      //     to the previous note and (b) continues the current direction
-      //     if possible; fall back to plain nearest-tone if neither helps.
-      let startPitch = -1, startDegIdx = 0;
+    for (let barIdx = 0; barIdx < bars.length; barIdx++) {
+      const slots = slotsForBar(barIdx);
+      for (const { beat, dur } of slots) {
+        const ce = findChordEventAtBeat(barIdx, beat);
+        if (!ce) continue;
+        const chordScale = exGetScale(chordToCanonical(ce.chord));
+        if (!chordScale || chordScale.length === 0) continue;
+        const rootPc = ce.root.pitchClass;
+        const rootTpc = ce.root.tpc;
 
-      // Reset every 2 bars: the FIRST chord of any even-indexed bar
-      // (bar 0, 2, 4, …) restarts the line at the lowest available
-      // chord tone and ascends from there. Without this reset, the
-      // line creeps higher with each chord change and eventually has
-      // to bounce off F3, which forces awkward octave-down leaps in
-      // multi-chord bars. Restarting low every 2 bars keeps each
-      // 2-bar group readable as a smooth ascending line.
-      const isResetPoint = (ce.barIdx % 2 === 0) && (ce.chordIdxInBar === 0);
-      if (ci === 0 || isResetPoint) {
-        startPitch = 9999;
-        for (let d = 0; d < degrees.length; d++) {
-          const all = pitchesForPC(degrees[d].pc);
-          for (let k = 0; k < all.length; k++) {
-            if (all[k] < startPitch) { startPitch = all[k]; startDegIdx = d; }
-          }
-        }
-        descending = false;
-      } else {
-        // Linear voice-leading across chord changes: pick the chord
-        // tone CLOSEST to the previous note, with a tie-break
-        // preferring the higher pitch so a transition like Gm7 → C7
-        // continues ascending instead of jumping down an octave to
-        // stay in the prior `descending` direction. The within-chord
-        // walk that follows takes its direction from the choice — if
-        // we picked a pitch above lastWrittenPitch, we ascend through
-        // the rest of this chord's quarters; if below, we descend.
-        // Replaces the older two-pass "nearest in current direction,
-        // fall back to absolute nearest" logic, which kept the line
-        // in one direction even when that meant a big leap.
-        let bestPitch = -1, bestDeg = 0, bestDist = 9999;
-        for (let d = 0; d < degrees.length; d++) {
-          const all = pitchesForPC(degrees[d].pc);
-          for (let k = 0; k < all.length; k++) {
-            if (all[k] === lastWrittenPitch) continue;
-            const dist = Math.abs(all[k] - lastWrittenPitch);
-            if (dist < bestDist
-                || (dist === bestDist && all[k] > bestPitch)) {
-              bestDist = dist; bestPitch = all[k]; bestDeg = d;
-            }
-          }
-        }
-        startPitch = bestPitch;
-        startDegIdx = bestDeg;
-        if (startPitch >= 0 && lastWrittenPitch >= 0) {
-          descending = startPitch < lastWrittenPitch;
-        }
-      }
-      if (startPitch < 0) return;
-
-      notes.push({ pitch: startPitch, tpc: degrees[startDegIdx].tpc });
-      let prev = startPitch;
-      let degIdx = startDegIdx;
-      for (let q = 1; q < numQuarters; q++) {
-        // Keep walking in the current direction — NO periodic reversal.
-        // Direction only flips when the next chord tone in the current
-        // direction would fall outside the cello range, i.e. when the
-        // line has reached the top or the bottom of its travel. This
-        // matches Scale Notes' "walk the full range until you hit a
-        // wall" behavior so triads / 1-3-5-7 also climb all the way
-        // down before coming back up, instead of zig-zagging every
-        // 3-4 notes in the middle of the range.
-        degIdx = descending ? (degIdx - 1 + degCount) % degCount
-                            : (degIdx + 1) % degCount;
-        const pc = degrees[degIdx].pc;
-        const all = pitchesForPC(pc);
-        let next = -1;
-        if (descending) {
-          for (let k = all.length - 1; k >= 0; k--) {
-            if (all[k] < prev) { next = all[k]; break; }
-          }
-        } else {
-          for (let k = 0; k < all.length; k++) {
-            if (all[k] > prev) { next = all[k]; break; }
-          }
-        }
-        if (next < 0) {
-          // Reached the range boundary — flip direction and search the
-          // other way. Also rewind the degree index so the flipped
-          // direction starts at the same degree again (otherwise the
-          // reversal would skip a chord tone).
-          descending = !descending;
-          degIdx = descending ? (degIdx + 1) % degCount
-                              : (degIdx - 1 + degCount) % degCount;
-          const pc2 = degrees[degIdx].pc;
-          const all2 = pitchesForPC(pc2);
-          if (descending) {
-            for (let k = all2.length - 1; k >= 0; k--) {
-              if (all2[k] < prev) { next = all2[k]; break; }
-            }
+        // Signature includes the chord-tone semitone offsets so chord
+        // quality changes (CMaj7 → C7) rebuild tones; a held chord
+        // (same sig across bars / slots) skips the rebuild and keeps
+        // walking from the previous slot's toneIdx + post-advance.
+        const sig = rootPc + '|' + rootTpc + '|' + degScaleIdx.map(d => {
+          const si = diatonicIndexInScale(d, chordScale);
+          const sd = chordScale[si % chordScale.length];
+          return sd ? sd.s : 'x';
+        }).join(',');
+        if (sig !== lastSig) {
+          tones = buildChordTones(rootPc, rootTpc, chordScale);
+          lastSig = sig;
+          if (tones.length === 0) continue;
+          if (lastPitch < 0) {
+            toneIdx = 0;
+            direction = 1;
           } else {
-            for (let k = 0; k < all2.length; k++) {
-              if (all2[k] > prev) { next = all2[k]; break; }
-            }
+            const cont = findSmoothContinuation(tones, lastPitch, lastTpc, lastEmittedDirection);
+            toneIdx = cont.idx;
+            direction = cont.dir;
+          }
+          lastEmittedDirection = direction;
+        }
+        if (tones.length === 0) continue;
+
+        let p = tones[toneIdx].pitch;
+        let t = tones[toneIdx].tpc;
+        if (p === lastPitch && tones.length > 1) {
+          let ti = toneIdx + direction;
+          if (ti < 0) { direction = 1; ti = toneIdx + 1; }
+          else if (ti >= tones.length) { direction = -1; ti = toneIdx - 1; }
+          if (ti >= 0 && ti < tones.length && tones[ti].pitch !== lastPitch) {
+            toneIdx = ti; p = tones[ti].pitch; t = tones[ti].tpc;
           }
         }
-        if (next < 0) break;
-        notes.push({ pitch: next, tpc: degrees[degIdx].tpc });
-        prev = next;
-      }
+        results[barIdx][beat] = { pitch: p, tpc: t, duration: dur };
+        lastPitch = p;
+        lastTpc = t;
+        lastEmittedDirection = direction;
 
-      // Write the generated notes into results[barIdx][beat].
-      const { startBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
-      for (let q = 0; q < notes.length; q++) {
-        const b = startBeat + q;
-        if (b >= beatsPerBar) break;
-        results[ce.barIdx][b] = { pitch: notes[q].pitch, tpc: notes[q].tpc };
-        lastWrittenPitch = notes[q].pitch;
+        // Advance for next slot. The wall may flip `direction`, but
+        // `lastEmittedDirection` (captured above) preserves the
+        // direction at the last emit — that's what survives across
+        // a chord-change rebuild.
+        let ni = toneIdx + direction;
+        if (ni < 0) { direction = 1; ni = toneIdx + 1; }
+        else if (ni >= tones.length) { direction = -1; ni = toneIdx - 1; }
+        if (ni < 0) ni = 0;
+        if (ni >= tones.length) ni = tones.length - 1;
+        toneIdx = ni;
       }
-    });
+    }
 
     return { results, chordEvents, patterns, effective };
   };
 }
 
-// 1-3-5-7 arpeggio (Chord Tones exercise).
-const generate1357QuarterNotes = makeQuarterNoteArpeggioGenerator([0, 2, 4, 6]);
-// 1-3-5 arpeggio (Triads exercise).
-const generateTriadsQuarterNotes = makeQuarterNoteArpeggioGenerator([0, 2, 4]);
+// Three Chord Tones variants — same chord-tone walk, three slot
+// granularities. "One" = one note per chord (chord-sized duration);
+// "Two" = two half notes per bar; "Four" = quarter notes per beat.
+const generate1357OneNotes  = makeArpeggioGenerator([0, 2, 4, 6], 'one');
+const generate1357TwoNotes  = makeArpeggioGenerator([0, 2, 4, 6], 'two');
+const generate1357FourNotes = makeArpeggioGenerator([0, 2, 4, 6], 'four');
+// 1-3-5 arpeggio (Triads exercise) — quarter notes only.
+const generateTriadsQuarterNotes = makeArpeggioGenerator([0, 2, 4], 'four');
 
 // TPC → letter + accidental (e.g. TPC 7 → { letter:'C', acc:'b' }). The
 // awkward enharmonics (Cb/Fb/E#/B#) are collapsed first so VexFlow renders
@@ -7574,6 +7477,116 @@ const generate3579QuarterNotes = makeChordToneGenerator(
   [2, 4, 6, 8], [2, 4, 6], { target: 'upper', subdivisions: 1 }
 );
 
+// 1357 — each chord plays its 1 / 3 / 5 / 7 as a quarter-note
+// ascending arpeggio. The number of degrees played per chord scales
+// with the chord's beat span: a full-bar chord gets all four (1-3-5-7),
+// a half-bar chord gets two (1-3), a quarter-bar chord gets one (1).
+// Multi-chord bars apportion their tones accordingly — a `Dm7 G7`
+// 4/4 bar plays Dm7 (1, 3) | G7 (1, 3).
+//
+// Anchor rule: each chord's 1 starts on the LOWEST root-PC pitch
+// that's ≥ G1 (MIDI 31) and that still leaves the arpeggio's top
+// tone inside F3 (EX_HIGH). So FMaj7 anchors on F2 (=41, since
+// F1=29 is below G1), G7 anchors on G1 (=31, right at the floor),
+// and CMaj7 anchors on C2 (=36). Each chord is independent — no
+// voice leading between chord changes; the 1 just snaps back to
+// its anchor every time.
+//
+// Chord-tone resolution goes through diatonicIndexInScale, so HW-
+// diminished (7♭9) returns the real major-3 / b7 and WH-diminished
+// (dim7) returns the real bb7.
+function generate1357AnchoredQuarterNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  const ANCHOR_MIN = 31; // G1 — floor for the 1 of every chord.
+  const degreeIdx = [0, 2, 4, 6]; // diatonic 1, 3, 5, 7
+
+  chordEvents.forEach((ce) => {
+    const chordScale = exGetScale(chordToCanonical(ce.chord));
+    if (!chordScale || chordScale.length === 0) return;
+    const rootPc = ce.root.pitchClass;
+    const rootTpc = ce.root.tpc;
+
+    const tones = degreeIdx.map(idx => {
+      const realIdx = diatonicIndexInScale(idx, chordScale);
+      const octaveShift = Math.floor(realIdx / chordScale.length);
+      const scaleDeg = chordScale[realIdx % chordScale.length];
+      return {
+        semi: scaleDeg.s + octaveShift * 12,
+        tpc: rootTpc + scaleDeg.t
+      };
+    });
+
+    const { startBeat, endBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+    const numSteps = endBeat - startBeat;
+    const toneCount = Math.min(numSteps, tones.length);
+    if (toneCount === 0) return;
+
+    // Lowest root-PC pitch ≥ G1 that still leaves the arpeggio's
+    // top tone in range. Walk octaves bottom-up so the first
+    // accepted candidate IS the lowest.
+    const actualSpan = tones[toneCount - 1].semi - tones[0].semi;
+    const firstToneMaxMidi = EX_HIGH - actualSpan;
+    let firstPitch = null;
+    for (let oct = 0; oct < 8; oct++) {
+      const p = rootPc + oct * 12;
+      if (p < ANCHOR_MIN) continue;
+      if (p > firstToneMaxMidi) break;
+      firstPitch = p;
+      break;
+    }
+    // Fallback: no candidate ≥ G1 fits the span — relax to the
+    // lowest in-range root. Rare (a 4-octave arpeggio against a
+    // narrow range), but the safety clamp below catches anything
+    // that still spills over.
+    if (firstPitch == null) {
+      for (let oct = 0; oct < 8; oct++) {
+        const p = rootPc + oct * 12;
+        if (p >= EX_LOW && p <= EX_HIGH) { firstPitch = p; break; }
+      }
+    }
+    if (firstPitch == null) return;
+
+    // Walk up the chord tones from firstPitch.
+    const pitches = [firstPitch];
+    const tpcs = [tones[0].tpc];
+    for (let j = 1; j < toneCount; j++) {
+      const targetPc = (rootPc + tones[j].semi + 1200) % 12;
+      let p = pitches[j - 1] + 1;
+      while (p <= EX_HIGH + 12) {
+        if (((p % 12) + 12) % 12 === targetPc) break;
+        p++;
+      }
+      pitches.push(p);
+      tpcs.push(tones[j].tpc);
+    }
+    // Safety clamp — drop the whole arpeggio an octave if it spilled
+    // above F3 (mirrors the same clamp in makeChordToneGenerator).
+    while (pitches[pitches.length - 1] > EX_HIGH && pitches[0] - 12 >= EX_LOW) {
+      for (let j = 0; j < pitches.length; j++) pitches[j] -= 12;
+    }
+
+    for (let j = 0; j < toneCount; j++) {
+      const beat = startBeat + j;
+      if (beat >= endBeat) break;
+      results[ce.barIdx][beat] = {
+        pitch: pitches[j],
+        tpc: tpcs[j],
+        duration: 'q'
+      };
+    }
+  });
+
+  return { results, chordEvents, patterns, effective };
+}
+
 // ===== Cello fingerboard =====
 // 5-string cello tuned F C G D A. Each string has 7 positions (0-6 semitones
 // from the open string). The panel renders an SVG diagram where circles appear
@@ -8842,14 +8855,19 @@ function renderChart(song, barsIn, timesigStr) {
   //   - "3579Eighth"    → eighth-note variant of 3-5-7-9.
   const bars = expandBarsByRepeats(barsIn, songRepeats);
   const gen = exerciseMode === 'head' ? generateHeadFromScore
-            : exerciseMode === 'chord' ? generate1357QuarterNotes
+            : exerciseMode === 'chordOne' ? generate1357OneNotes
+            : exerciseMode === 'chordTwo' ? generate1357TwoNotes
+            : exerciseMode === 'chordFour' ? generate1357FourNotes
+            // Backward-compat: existing 'chord' value (the original
+            // single Chord Tones exercise) keeps working, mapped to
+            // the new Four (quarter-note) variant.
+            : exerciseMode === 'chord' ? generate1357FourNotes
             : exerciseMode === 'triads' ? generateTriadsQuarterNotes
             : exerciseMode === 'broken3' ? generateBroken3rdsQuarterNotes
             : exerciseMode === 'cantus' ? generateCantusFirmusQuarterNotes
             : exerciseMode === 'targetTriad' ? generateTargetTriadQuarterNotes
             : exerciseMode === 'range3579' ? generateRange3579QuarterNotes
             : exerciseMode === 'range3579Half' ? generateRange3579HalfNotes
-            : exerciseMode === 'chordTonesHalf' ? generateChordTonesHalfNotes
             : exerciseMode === 'enclosures' ? generateEnclosuresQuarterNotes
             : exerciseMode === 'longEnclosures' ? generateLongEnclosuresQuarterNotes
             : exerciseMode === 'scaleChromatic' ? generateScaleChromaticQuarterNotes
@@ -8859,6 +8877,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === '1235Eighth' ? generate1235EighthNotes
             : exerciseMode === '3579' ? generate3579QuarterNotes
             : exerciseMode === '3579Eighth' ? generate3579EighthNotes
+            : exerciseMode === '1357' ? generate1357AnchoredQuarterNotes
             : exerciseMode === 'walkTriad' ? generateWalkTriadQuarterNotes
             : exerciseMode === 'mixedTriads' ? generateMixedTriadsQuarterNotes
             : exerciseMode === 'threeSeven' ? generateThreeSevenQuarterNotes
@@ -15598,7 +15617,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordTonesHalf' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -15666,7 +15685,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordTonesHalf' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }

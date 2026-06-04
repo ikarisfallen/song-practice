@@ -394,6 +394,11 @@ body:not(.layout-landscape) #songListPanel.open .song-picker-close {
 
 .drum-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .drum-label { font-size: 11px; color: #9ab; text-transform: uppercase; letter-spacing: 0.5px; }
+/* Bars/Line 8 is desktop-only — too narrow on phone/tablet portrait.
+   Shown when the layout flips to landscape (body.layout-landscape, set
+   by applyLayoutMode() at viewport width ≥ 800 + wider-than-tall). */
+.desktop-only-mpl { display: none; }
+body.layout-landscape .desktop-only-mpl { display: inline-block; }
 .seg {
   display: inline-flex;
   border: 1px solid #334654;
