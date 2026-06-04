@@ -8968,8 +8968,13 @@ function renderChart(song, barsIn, timesigStr) {
   // Either chord-notes overlay (full or simplified) reserves space
   // below the chord-symbol row. Simplified text is often empty for
   // a given chord, but we still need the row height so non-empty
-  // entries have somewhere to land.
-  const chordNotesAnyOn = overlayChordNotesOn || overlayChordNotesSimplifiedOn || overlayChordTonesOn;
+  // entries have somewhere to land. Game Mode Hidden also reserves
+  // the band so the per-chord chord-tone reveal text always has a
+  // visible slot regardless of which static overlays the user has
+  // on or off — without this, turning Chord Scales off after using
+  // it would clip the reveal text below the (now shorter) SVG.
+  const chordNotesAnyOn = overlayChordNotesOn || overlayChordNotesSimplifiedOn || overlayChordTonesOn
+    || (typeof gameMode !== 'undefined' && gameMode && typeof gameKind !== 'undefined' && gameKind === 'hidden');
   const chordNotesY1 = chordNotesAnyOn
     ? (overlayChordScalesOn ? patternLineY + 18 : 148)
     : 0;
@@ -17684,6 +17689,95 @@ let gameFillNoteEls = [];          // DOM elements of placed fill notes (for res
 let gameBeatMap = [];              // one entry per beat in the song (see gameBuildSequence)
 let gameCurrentBeat = -1;          // Follow-mode beat cursor; -1 before the first metronome tick
 let gameFollowFinished = false;    // true once the metronome has walked off the end
+// Chord-tone reveal (Hidden mode): chord events that the user has
+// fully completed get their chord-tone labels painted under their
+// bar, like the regular Chord Tones overlay would — but ONE CHORD
+// AT A TIME as they're cleared, instead of all at once up front.
+const gameRevealedChordEvents = new Set();
+
+// Paint the chord-tone label for ONE chord event (the one just
+// completed in Hidden mode). Uses the same chordToneText() helper
+// the global Chord Tones overlay uses, so altered chords / HW-dim /
+// WH-dim render their real 1/3/5/7. Positioned at the chord's `cx`
+// (computed from the bar's noteStartX/noteEndX) just below the
+// staff, where rendering won't collide with the existing overlay
+// bands (chord-scales / chord-notes / diagram), if any.
+function gamePaintChordToneReveal(chordEventIdx) {
+  if (!Array.isArray(lastChordEvents)) return;
+  const ce = lastChordEvents[chordEventIdx];
+  if (!ce) return;
+  const info = barElements[ce.barIdx];
+  if (!info || !info.rowEl) return;
+  const svg = info.rowEl.querySelector('svg');
+  if (!svg) return;
+  // Next chord for the contextual scale picker (V → minor i vs.
+  // V → major I disambiguates Phrygian-Dominant vs. Mixolydian♭9).
+  let nextCh = null;
+  if (chordEventIdx + 1 < lastChordEvents.length) {
+    nextCh = lastChordEvents[chordEventIdx + 1].chord;
+  }
+  const noteStr = typeof chordToneText === 'function'
+    ? chordToneText(ce.chord, nextCh) : '';
+  if (!noteStr) return;
+  // chord-x: same formula renderChart uses, just driven by the
+  // chord event's chordIdxInBar / chordsInBar instead of the
+  // displayChords iteration index.
+  const beatsPerBarLabel = (typeof lastBarsPerBar === 'number' && lastBarsPerBar > 0)
+    ? lastBarsPerBar : 4;
+  const { startBeat } = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBarLabel);
+  const labelAreaX0 = info.noteStartX;
+  const labelAreaW  = info.noteEndX - info.noteStartX;
+  const cx = labelAreaX0 + (startBeat / beatsPerBarLabel) * labelAreaW;
+  // Y: paint into the chord-notes band — same SVG-local y the
+  // regular Chord Tones overlay uses. The band is below the staff
+  // (and below ledger-line notes), and renderChart's
+  // chordNotesAnyOn includes Game Mode Hidden so the SVG always
+  // reserves this slot whenever Hidden is active — meaning the
+  // reveal text is visible regardless of which other overlays the
+  // user has turned on or off.
+  //   patternLineY = 156 (under-bar of the Chord Scales label).
+  //   chordNotesY1 = patternLineY + 18 when Chord Scales is on, else 148.
+  const PATTERN_LINE_Y = 156;
+  const labelY = (typeof overlayChordScalesOn !== 'undefined' && overlayChordScalesOn)
+    ? PATTERN_LINE_Y + 18
+    : 148;
+  // Remove any prior reveal for this chord (defensive — should be
+  // skipped by the gate at the caller, but a no-op re-paint is fine).
+  svg.querySelectorAll(
+    '.game-chord-reveal[data-chord-idx="' + chordEventIdx + '"]'
+  ).forEach(el => el.remove());
+  const tn = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  tn.setAttribute('class', 'game-chord-reveal');
+  tn.setAttribute('data-chord-idx', String(chordEventIdx));
+  tn.setAttribute('x', cx);
+  tn.setAttribute('y', labelY);
+  tn.setAttribute('text-anchor', 'start');
+  tn.setAttribute('font-family', 'sans-serif');
+  tn.setAttribute('font-size', 14);
+  tn.setAttribute('fill', '#1f8a3a'); // green — matches "completed" feel
+  tn.setAttribute('font-weight', 'bold');
+  tn.setAttribute('stroke', 'none');
+  setSvgTextWithFlatFix(tn, noteStr);
+  svg.appendChild(tn);
+}
+
+// Remove every chord-tone reveal label from the chart (DOM only —
+// gameRevealedChordEvents persists, so a subsequent repaint can
+// recreate them).
+function gameClearChordToneRevealsDOM() {
+  document.querySelectorAll('.game-chord-reveal').forEach(el => el.remove());
+}
+
+// Re-paint every revealed chord's label — called after a chart
+// re-render (renderChart wipes the SVG, so the labels need to be
+// re-added) and when transitioning into Hidden mode.
+function gameRepaintChordToneReveals() {
+  gameClearChordToneRevealsDOM();
+  if (!gameMode || gameKind !== 'hidden') return;
+  for (const ceIdx of gameRevealedChordEvents) {
+    gamePaintChordToneReveal(ceIdx);
+  }
+}
 
 // Build the linear pitch sequence from barElements. Pulled in order
 // of bar → slot, skipping any nulls (rests) or notes without a
@@ -17911,6 +18005,11 @@ function gameReset() {
   gameClearWrongFlash();
   gameClearWrongBars();
   gameClearFillNotes();
+  // Wipe the Hidden-mode chord-tone reveals — a reset puts the
+  // player back at the start of the song, so previously-cleared
+  // chord labels should disappear too.
+  gameRevealedChordEvents.clear();
+  gameClearChordToneRevealsDOM();
   gameUpdateCounters();
   gameApplyVisibility();
 }
@@ -18483,6 +18582,13 @@ function gameHandleKeyPress(pc, playLead, micMidi) {
                             || nextEntry.chordEventIdx !== expected.chordEventIdx;
     if (justCompletedChord) {
       gamePlayNextChord(expected.chordEventIdx);
+      // Hidden-mode reveal: paint the chord-tone label under the
+      // chord we just finished. The next chord stays hidden until
+      // it's also cleared.
+      if (gameKind === 'hidden' && expected.chordEventIdx >= 0) {
+        gameRevealedChordEvents.add(expected.chordEventIdx);
+        gamePaintChordToneReveal(expected.chordEventIdx);
+      }
       if (nextEntry && Array.isArray(lastChordEvents)) {
         const upcomingBar = lastChordEvents[nextEntry.chordEventIdx]
           ? lastChordEvents[nextEntry.chordEventIdx].barIdx : -1;
@@ -18652,6 +18758,10 @@ function gameSetMode(on) {
   if (gameMode) {
     if (gamePanel) gamePanel.removeAttribute('hidden');
     if (fbPanel)   fbPanel.setAttribute('hidden', '');
+    // Re-render so the chord-notes band (which now factors in
+    // gameMode + gameKind === 'hidden') reserves room for the
+    // chord-tone reveal labels before any chord is cleared.
+    if (typeof rerenderCurrent === 'function') rerenderCurrent();
     gameBuildSequence();
     gameReset();
     // Eagerly kick off audio sample loading. Without this, a fresh
@@ -18681,6 +18791,14 @@ function gameSetMode(on) {
     // Tear down any fill notes the user placed during the session.
     gameClearFillNotes();
     gameFilledRests.clear();
+    // Hide the Hidden-mode chord-tone reveals on exit. The persisted
+    // set clears too so re-entering the game starts blank.
+    gameRevealedChordEvents.clear();
+    gameClearChordToneRevealsDOM();
+    // Re-render so the chord-notes band (which was reserving room
+    // for the Hidden-mode reveals) shrinks back to its non-game
+    // size.
+    if (typeof rerenderCurrent === 'function') rerenderCurrent();
   }
 }
 
@@ -18703,6 +18821,11 @@ function gameSetMode(on) {
         // re-arm its own metronome state on the next user toggle.
         if (typeof gameMetronomeStop === 'function') gameMetronomeStop();
         gameReset();
+        // The chord-notes band's reserved space depends on
+        // gameKind === 'hidden'. Flipping kind needs a re-render
+        // so the chart resizes to add or drop the band slot for
+        // chord-tone reveals.
+        if (typeof rerenderCurrent === 'function') rerenderCurrent();
       }
     });
   }
@@ -18765,6 +18888,11 @@ renderChart = function gameWrappedRenderChart() {
     gameClearWrongFlash();
     gameUpdateCounters();
     gameApplyVisibility();
+    // Chord-tone reveals are SVG <text> children of the old (now
+    // wiped) chart's SVGs. Re-paint them from the persisted index
+    // set so a key change / exercise switch keeps already-cleared
+    // chords visible.
+    gameRepaintChordToneReveals();
   }
   return result;
 };
