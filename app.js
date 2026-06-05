@@ -15365,7 +15365,7 @@ async function loadExerciseLick(filename) {
 // the source of truth for the exercise menu).
 let _exerciseDropdownHTML = null;
 let _dropdownMode = 'exercise'; // 'exercise' | 'score' | 'lick'
-let _lastExerciseValue = 'scale';
+let _lastExerciseValue = 'chordTwo';
 let _lastLickValue = null; // remembered across mode toggles
 // Lick projection mode controls how a Quote-style lick re-projects
 // onto the song's chord changes:
@@ -15413,7 +15413,7 @@ function populateExerciseDropdown(selectedValue) {
   if (!sel) return;
   sel.innerHTML = _exerciseDropdownHTML || '';
   sel.disabled = false;
-  const target = selectedValue || _lastExerciseValue || 'scale';
+  const target = selectedValue || _lastExerciseValue || 'chordTwo';
   if (sel.querySelector(`option[value="${target}"]`)) sel.value = target;
   _dropdownMode = 'exercise';
 }
@@ -17666,7 +17666,7 @@ let gameMode = false;
 //             permanent red mark. At the end, bars containing any
 //             red note get a semi-transparent red wash. No chord
 //             stab between chord changes.
-let gameKind     = 'follow';
+let gameKind     = 'hidden';
 let gameSequence = [];         // [{ barIdx, slotIdx, pitch, pc, chordEventIdx }, ...]
 let gameCursor   = 0;          // index of the next-expected note in gameSequence
 let gameCorrect  = 0;
