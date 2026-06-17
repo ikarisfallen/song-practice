@@ -724,6 +724,16 @@ main {
   border-color: #2b8a3e;
   color: #fff;
 }
+/* Game button is only meaningful in Exercise mode — when the user is
+   in Score (or any other) mode the button is disabled. Greys it out
+   and blocks the pointer so a stray click can't enter game mode
+   against the wrong mode. */
+.game-toggle-btn:disabled,
+.game-toggle-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 /* Game panel — replaces the fingerboard panel when game mode is on.
    Shows the 4×3 chromatic keyboard and the running score. */
 .game-panel {

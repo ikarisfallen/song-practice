@@ -15696,6 +15696,18 @@ async function refreshScoreDropdownForCurrentSong() {
       // show it there and hide everywhere else.
       const lps = document.getElementById('lickProjSeg');
       if (lps) lps.hidden = (mode !== 'lick');
+      // Game button is only meaningful in Exercise mode. Outside it,
+      // disable the toggle AND force-exit game mode if it was on — a
+      // chord-tone reveal for a non-exercise chart doesn't make sense.
+      const gameBtn = document.getElementById('gameToggle');
+      if (gameBtn) {
+        const allowGame = (mode === 'exercise');
+        gameBtn.disabled = !allowGame;
+        if (!allowGame && typeof gameMode !== 'undefined' && gameMode
+            && typeof gameSetMode === 'function') {
+          gameSetMode(false);
+        }
+      }
       updateScoreTitle();
       rerenderCurrent();
       // Switching INTO Head on a song without one disables Play;
