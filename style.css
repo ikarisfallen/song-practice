@@ -47,7 +47,14 @@ body.layout-landscape #sidebar {
   padding: 10px;
   gap: 10px;
   min-height: 0;
-  overflow: hidden;
+  /* Scroll the sidebar instead of clipping its content. Without this,
+     adding the Game panel below the fingerboard could squeeze the
+     song list off the bottom on shorter screens (laptops < ~900 px
+     tall). overflow-y: auto lets everything stay reachable; the song
+     list still has its own internal scroll for the inner <ul>, so
+     this scrollbar only shows when the totals actually overflow. */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 body.layout-landscape .main-area header,
 body.layout-landscape .main-area .fingerboard-section {
@@ -918,6 +925,12 @@ main {
    so the whole panel reads as a compact controls bar. */
 .game-panel.kbd-hidden .game-keyboard { display: none; }
 .game-panel.kbd-hidden { justify-content: center; }
+/* Desktop layout: the game panel docks under the note-info panel in
+   the sidebar. The circle-of-fifths keyboard isn't useful there
+   (the keyboard is sized for a phone screen anyway), so the
+   show/hide toggle is hidden too — desktop users drive the game
+   with the mic or external input. */
+body.layout-landscape #gameKeyboardToggle { display: none; }
 /* 4×3 chromatic keyboard. Each cell shows the natural name with
    enharmonic equivalent beneath for sharp/flat keys. */
 /* Circle-of-fifths keyboard, C-shape layout. Each half forms the

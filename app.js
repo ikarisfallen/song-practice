@@ -16138,6 +16138,34 @@ function applyLayoutMode() {
     const fbExp = document.getElementById('fbToggle').getAttribute('aria-expanded') === 'true';
     fbPanel.hidden = !fbExp;
   }
+  // Re-dock the game panel for the new layout if it's currently
+  // visible. Without this, resizing the window from landscape →
+  // portrait (or vice versa) mid-game would leave the panel in the
+  // wrong parent and it could end up off-screen.
+  //
+  // `gameMode` is declared `let` later in the file, so on the very
+  // first applyLayoutMode() call (boot) it's still in the temporal
+  // dead zone — touching it throws ReferenceError, which would
+  // abort layout setup and leave the page blank. try/catch swallows
+  // the boot-time ReferenceError; subsequent resize triggers run
+  // after gameMode is initialized and the body of the try runs
+  // normally.
+  try {
+    if (gameMode && typeof gameDockPanelForCurrentLayout === 'function') {
+      gameDockPanelForCurrentLayout();
+      // Update fingerboard panel visibility to match the new layout:
+      // landscape shows both; portrait hides fingerboard for the game.
+      const gameFbPanel = document.getElementById('fingerboardPanel');
+      if (gameFbPanel) {
+        if (landscape) {
+          const fbExp = document.getElementById('fbToggle').getAttribute('aria-expanded') === 'true';
+          gameFbPanel.hidden = !fbExp;
+        } else {
+          gameFbPanel.hidden = true;
+        }
+      }
+    }
+  } catch (e) { /* gameMode not yet initialized — first applyLayoutMode call */ }
 }
 
 window.addEventListener('resize', applyLayoutMode);
@@ -18754,6 +18782,29 @@ function gamePlayChordStab(chordEventIdx, octaveOffset, duckMs) {
 // Toggle game mode on/off. Swaps the fingerboard panel for the
 // game panel in the bottom section, rebuilds the sequence from the
 // current render, resets counters, and reapplies visibility.
+// Move the game panel to its mode-appropriate parent: in landscape
+// (desktop sidebar layout) the panel docks BELOW the fingerboard /
+// note-info panel so both are visible at once; in portrait it sits
+// in the main .fingerboard-section like before (taking the
+// fingerboard's place since the section's narrow). Idempotent — if
+// the panel is already in the right parent, nothing changes.
+function gameDockPanelForCurrentLayout() {
+  const gamePanel = document.getElementById('gamePanel');
+  if (!gamePanel) return;
+  const landscape = document.body.classList.contains('layout-landscape');
+  if (landscape) {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar && gamePanel.parentNode !== sidebar) {
+      sidebar.appendChild(gamePanel);
+    }
+  } else {
+    const fbSection = document.querySelector('.fingerboard-section');
+    if (fbSection && gamePanel.parentNode !== fbSection) {
+      fbSection.appendChild(gamePanel);
+    }
+  }
+}
+
 function gameSetMode(on) {
   gameMode = !!on;
   const btn = document.getElementById('gameToggle');
@@ -18762,7 +18813,13 @@ function gameSetMode(on) {
   if (btn) btn.setAttribute('aria-pressed', gameMode ? 'true' : 'false');
   if (gameMode) {
     if (gamePanel) gamePanel.removeAttribute('hidden');
-    if (fbPanel)   fbPanel.setAttribute('hidden', '');
+    // In landscape the fingerboard panel stays visible — the game
+    // panel docks UNDER it in the sidebar, so both are readable side
+    // by side. In portrait there's only room for one, so the game
+    // panel takes the fingerboard's slot.
+    const landscape = document.body.classList.contains('layout-landscape');
+    if (!landscape && fbPanel) fbPanel.setAttribute('hidden', '');
+    gameDockPanelForCurrentLayout();
     gameBuildSequence();
     gameReset();
     // Eagerly kick off audio sample loading. Without this, a fresh
