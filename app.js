@@ -8794,6 +8794,12 @@ function renderChart(song, barsIn, timesigStr) {
   // A fresh render invalidates any previous bar selection (song changed, or
   // options toggled the bar count).
   selectedBar = null;
+  // Drone mode shows nothing in the Score view — clear the chart and
+  // bail before any of the staff-drawing work runs.
+  if (exerciseMode === 'drone') {
+    updateScoreTitle(song);
+    return;
+  }
 
   // Song title line at the top of the score: "{song} ({exercise})".
   // The old in-button text label was replaced by a folder icon when
@@ -11228,6 +11234,134 @@ async function initAudio() {
 
   await Tone.loaded();
   document.getElementById('status').textContent = 'Ready';
+}
+
+// ===== Drone (intonation practice) =====
+// Sustained sine root + perfect fifth at the user-selected Key.
+// Activated by the modeSeg's Drone button; started/stopped via the
+// global Play button (same button the Score / Exercise modes use).
+// When the user changes Key while the drone is running, the tones
+// re-tune to the new root.
+let droneSynth = null;
+// Brick-wall limiter between droneSynth and leadOut. Catches the
+// worst-case 6-voice in-phase sum (which can reach +15.5 dB above
+// unity) before it clips the speaker. Transparent at sub-threshold
+// levels, so normal listening is unaffected.
+let droneLimiter = null;
+let droneRunning = false;
+
+function midiToHz(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+async function droneStart() {
+  if (droneRunning) return;
+  if (typeof Tone === 'undefined') return;
+  // Pull in the full audio chain so `leadOut` exists — the drone
+  // routes through it so the Lead volume slider controls drone
+  // level (sharing the slider with the guitar lead cue).
+  if (typeof initAudio === 'function') {
+    try { await initAudio(); } catch (e) {}
+  }
+  if (Tone.context && Tone.context.state !== 'running') {
+    try { await Tone.start(); } catch (e) {}
+  }
+  if (!droneSynth) {
+    droneSynth = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: 'sine' },
+      // Long attack & release so toggling Play doesn't click.
+      envelope: { attack: 0.4, decay: 0.0, sustain: 1, release: 0.6 }
+    });
+    // -18 dB on the synth itself reserves the full 6-voice headroom
+    // (six in-phase sines sum to roughly +15.5 dB above unity, and
+    // the octaves + perfect fifths in our drone *do* phase-realign
+    // periodically). The user-facing volume is then driven by the
+    // Lead slider via leadOut.
+    droneSynth.volume.value = -18;
+    // Brick-wall limiter between the synth and leadOut so even a
+    // worst-case constructive-phase moment can't push the master
+    // past -1 dBFS. Transparent at typical levels — no audible
+    // compression in normal use.
+    if (!droneLimiter && typeof Tone !== 'undefined' && Tone.Limiter) {
+      droneLimiter = new Tone.Limiter(-1);
+      if (typeof leadOut !== 'undefined' && leadOut) {
+        droneLimiter.connect(leadOut);
+      } else {
+        droneLimiter.toDestination();
+      }
+    }
+    if (droneLimiter) {
+      droneSynth.connect(droneLimiter);
+    } else if (typeof leadOut !== 'undefined' && leadOut) {
+      droneSynth.connect(leadOut);
+    } else {
+      droneSynth.toDestination();
+    }
+  }
+  const rootPc = (typeof KEY_TO_PC === 'object' && currentKey in KEY_TO_PC)
+    ? KEY_TO_PC[currentKey] : 0;
+  // Anchor the root in a cello-friendly octave. Default range is
+  // C2..B2 so the 5th sits in C3..F#3 — the natural drone register
+  // for the cello. C / Db / D specifically get an OCTAVE bump up
+  // (to C3 / Db3 / D3 base): their default C2-area drone collides
+  // with the cello's lowest open string and muddies the pitch
+  // reference. Pushing them up keeps the drone clearly above the
+  // bowed notes for those three keys.
+  // C2 = MIDI 36.
+  let rootMidi = 36 + rootPc;
+  if (rootMidi < 36) rootMidi += 12;
+  if (rootMidi > 47) rootMidi -= 12;
+  if (rootPc <= 2) rootMidi += 12;
+  const fifthMidi = rootMidi + 7;
+  // Three octaves of 1 + 5 stacked. Lower pair anchors the
+  // fundamental; middle and upper pairs reinforce the partials your
+  // bowed notes will beat against, so out-of-tune intervals are
+  // easier to hear in any register you happen to be playing.
+  droneSynth.triggerAttack([
+    midiToHz(rootMidi),
+    midiToHz(fifthMidi),
+    midiToHz(rootMidi  + 12),
+    midiToHz(fifthMidi + 12),
+    midiToHz(rootMidi  + 24),
+    midiToHz(fifthMidi + 24)
+  ]);
+  droneRunning = true;
+  updatePlayBtnIconForDrone(true);
+}
+
+function droneStop() {
+  if (!droneRunning || !droneSynth) return;
+  try { droneSynth.releaseAll(); } catch (e) {}
+  droneRunning = false;
+  updatePlayBtnIconForDrone(false);
+}
+
+function droneToggle() {
+  if (droneRunning) droneStop();
+  else droneStart();
+}
+
+// Re-tune the drone to the new Key without an audible gap. Stops
+// the current root + 5th, then plays the new pair.
+function droneRetuneToCurrentKey() {
+  if (!droneRunning) return;
+  droneStop();
+  droneStart();
+}
+
+// Reflect drone running/stopped on the Play button's icon — uses the
+// same glyph swap + `.playing` class the song-playback code does
+// (startPlayback sets ⏸ / .playing; stopPlayback sets ▶ / removes
+// .playing). Sharing the visual treatment means the user reads the
+// button identically whether the drone or song playback is active.
+function updatePlayBtnIconForDrone(running) {
+  const btn = document.getElementById('playBtn');
+  if (!btn) return;
+  const glyph = btn.querySelector('.play-glyph');
+  if (glyph) glyph.textContent = running ? '⏸' : '▶';
+  btn.classList.toggle('playing', !!running);
+  btn.setAttribute('aria-pressed', running ? 'true' : 'false');
+  btn.setAttribute('aria-label', running ? 'Pause' : 'Play');
 }
 
 function stopPlayback() {
@@ -14386,10 +14520,16 @@ function loadFromURL(url) {
 }
 
 async function applyKeyChange(targetKey) {
-  if (!window.currentSong) return;
   if (!(targetKey in KEY_TO_PC)) return;
   currentKey = targetKey;
   syncKeySegActive(targetKey);
+  // Drone mode doesn't need a song — just re-tune the sustained
+  // sine root + 5th to the new Key and return.
+  if (exerciseMode === 'drone') {
+    if (typeof droneRetuneToCurrentKey === 'function') droneRetuneToCurrentKey();
+    return;
+  }
+  if (!window.currentSong) return;
   const offset = (KEY_TO_PC[targetKey] - KEY_TO_PC[originalKey] + 12) % 12;
   // Spelling preference: always flat for Bb/Eb/F. For major songs
   // only, also flat for C#/F#/G# (because those keys display as
@@ -14638,6 +14778,12 @@ document.addEventListener('keydown', e => {
 
 // ===== Event bindings =====
 document.getElementById('playBtn').addEventListener('click', async () => {
+  // Drone mode: the Play button starts and stops the sustained
+  // root + 5th instead of song playback. No song needed.
+  if (exerciseMode === 'drone') {
+    droneToggle();
+    return;
+  }
   if (playState === 'playing') { pausePlayback(); return; }
   if (!window.currentSong) return;
   const hasLoop = loopIn != null && loopOut != null && loopIn <= loopOut;
@@ -15679,6 +15825,12 @@ async function refreshScoreDropdownForCurrentSong() {
           // the user drops a file in licks/.
           exerciseMode = 'blank';
         }
+      } else if (mode === 'drone') {
+        // Drone mode — no song needed. The chart stays blank
+        // (renderChart short-circuits on this mode), the Play
+        // button toggles the drone, the song picker and game
+        // button are disabled until the user leaves this mode.
+        exerciseMode = 'drone';
       } else {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
@@ -15687,6 +15839,19 @@ async function refreshScoreDropdownForCurrentSong() {
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
+      // Leaving Drone mode? Stop the drone if it's still ringing
+      // out so it doesn't sustain into another mode.
+      if (mode !== 'drone' && typeof droneStop === 'function') droneStop();
+      // Disable / re-enable the song picker button. Drone mode has
+      // no song concept; locking the picker keeps the user from
+      // accidentally changing songs and getting a confused state.
+      const songPickerBtn = document.getElementById('songPickerBtn');
+      if (songPickerBtn) songPickerBtn.disabled = (mode === 'drone');
+      // Same for the exercise/score dropdown — there's no exercise to
+      // pick in Drone mode, and showing "Head"/"(Blank)" while we're
+      // playing a drone is just misleading.
+      const exerciseSelEl = document.getElementById('exerciseSelect');
+      if (exerciseSelEl) exerciseSelEl.disabled = (mode === 'drone');
       // Repeats lock to 1 in Head mode; restored from the user's
       // last choice when switching out. _updateRepeatsSegLock also
       // updates the live `songRepeats` global so the rerender picks
