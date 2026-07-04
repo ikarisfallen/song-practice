@@ -931,6 +931,30 @@ main {
    show/hide toggle is hidden too — desktop users drive the game
    with the mic or external input. */
 body.layout-landscape #gameKeyboardToggle { display: none; }
+
+/* Tuner panel — replaces the score chart in Drone mode. The SVG
+   itself defines the dial, needle, and labels; this just sizes the
+   wrapping container so the dial centers in the available chart
+   width without overflowing. */
+.tuner-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 20px;
+  box-sizing: border-box;
+}
+.tuner-svg {
+  width: 100%;
+  max-width: 720px;
+  height: auto;
+}
+/* Needle transitions briefly between frames so the cents reading
+   reads as a smooth sweep rather than a per-frame snap. Short
+   enough to keep the response feeling live. */
+#tunerNeedle {
+  transition: transform 0.08s linear;
+}
 /* 4×3 chromatic keyboard. Each cell shows the natural name with
    enharmonic equivalent beneath for sharp/flat keys. */
 /* Circle-of-fifths keyboard, C-shape layout. Each half forms the

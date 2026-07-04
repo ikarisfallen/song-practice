@@ -8794,10 +8794,16 @@ function renderChart(song, barsIn, timesigStr) {
   // A fresh render invalidates any previous bar selection (song changed, or
   // options toggled the bar count).
   selectedBar = null;
-  // Drone mode shows nothing in the Score view — clear the chart and
-  // bail before any of the staff-drawing work runs.
+  // Drone mode replaces the score with a big chromatic tuner so the
+  // user can work on intonation against the sustained drone. Build
+  // the tuner UI (and start the mic) only if it isn't already
+  // running — otherwise repeated renderChart calls would re-create
+  // the SVG and re-open the mic on every overlay toggle.
   if (exerciseMode === 'drone') {
     updateScoreTitle(song);
+    if (typeof tunerStart === 'function' && !_tunerState) {
+      tunerStart();
+    }
     return;
   }
 
@@ -11362,6 +11368,140 @@ function updatePlayBtnIconForDrone(running) {
   btn.classList.toggle('playing', !!running);
   btn.setAttribute('aria-pressed', running ? 'true' : 'false');
   btn.setAttribute('aria-label', running ? 'Pause' : 'Play');
+}
+
+// ===== Tuner (drone-mode intonation display) =====
+// Big chromatic tuner that takes over the chart area in Drone mode.
+// Uses its own mic stream + AudioContext (separate from the game
+// mode mic), shares only `gameYinPitch` for the YIN pitch detection
+// kernel. Updates a needle dial in real time so the user can see
+// how flat/sharp their bowed note is against the drone.
+const _TUNER_NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+let _tunerState = null; // { ctx, stream, analyser, buf, rafId, lastHz }
+
+function tunerBuildUI() {
+  const chartEl = document.getElementById('chart');
+  if (!chartEl) return;
+  chartEl.innerHTML = '' +
+    '<div class="tuner-wrap">' +
+      '<svg class="tuner-svg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet">' +
+        // Two arcs (left = flat half, right = sharp half), separated
+        // by a thin gap at the top.
+        '<path d="M 70 360 A 230 230 0 0 1 296 130" stroke="#5d8db8" stroke-width="60" fill="none"/>' +
+        '<path d="M 304 130 A 230 230 0 0 1 530 360" stroke="#5d8db8" stroke-width="60" fill="none"/>' +
+        // Needle — rotates around (300, 360). 0deg = straight up (in
+        // tune). negative = flat (rotates left), positive = sharp.
+        '<line id="tunerNeedle" x1="300" y1="360" x2="300" y2="150" stroke="#c52e2e" stroke-width="7" stroke-linecap="round" transform="rotate(0 300 360)"/>' +
+        // Center disc that hides the bottom of the needle and frames
+        // the big note text.
+        '<circle cx="300" cy="360" r="115" fill="#1f3a5f" stroke="#0e1e2c" stroke-width="3"/>' +
+        // Big note name + small frequency line below it.
+        '<text id="tunerNote" x="300" y="375" text-anchor="middle" fill="#fff" font-size="86" font-weight="500" font-family="Georgia, serif">—</text>' +
+        '<text id="tunerHz" x="300" y="412" text-anchor="middle" fill="#bcd0e3" font-size="18" font-family="sans-serif">— Hz</text>' +
+        // Adjacent-note labels at the bottom corners.
+        '<text id="tunerLeft"  x="60"  y="395" text-anchor="start" fill="#cde" font-size="38" font-family="Georgia, serif"></text>' +
+        '<text id="tunerRight" x="540" y="395" text-anchor="end"   fill="#cde" font-size="38" font-family="Georgia, serif"></text>' +
+      '</svg>' +
+    '</div>';
+}
+
+function tunerSetDisplay(hz) {
+  const noteEl  = document.getElementById('tunerNote');
+  const hzEl    = document.getElementById('tunerHz');
+  const leftEl  = document.getElementById('tunerLeft');
+  const rightEl = document.getElementById('tunerRight');
+  const needle  = document.getElementById('tunerNeedle');
+  if (!noteEl || !hzEl || !needle) return;
+  if (!hz || hz < 30 || hz > 2000 || !isFinite(hz)) {
+    noteEl.textContent  = '—';
+    hzEl.textContent    = '— Hz';
+    if (leftEl)  leftEl.textContent  = '';
+    if (rightEl) rightEl.textContent = '';
+    needle.setAttribute('transform', 'rotate(0 300 360)');
+    return;
+  }
+  const midi    = 69 + 12 * Math.log2(hz / 440);
+  const nearest = Math.round(midi);
+  const cents   = (midi - nearest) * 100;
+  const pc      = ((nearest % 12) + 12) % 12;
+  noteEl.textContent = _TUNER_NOTE_NAMES[pc];
+  hzEl.textContent   = hz.toFixed(1) + ' Hz';
+  if (leftEl)  leftEl.textContent  = _TUNER_NOTE_NAMES[((pc - 1) % 12 + 12) % 12];
+  if (rightEl) rightEl.textContent = _TUNER_NOTE_NAMES[(pc + 1) % 12];
+  // Needle rotation: ±50 cents maps to roughly ±85 degrees (so the
+  // far edge of each cents-region sits just before the gap at the
+  // top of the dial). Linear: deg = cents × 1.7.
+  const deg = Math.max(-85, Math.min(85, cents * 1.7));
+  needle.setAttribute('transform', 'rotate(' + deg + ' 300 360)');
+}
+
+async function tunerStart() {
+  if (_tunerState) return;
+  tunerBuildUI();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    tunerSetDisplay(null);
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    // Same buffer size the game mode mic uses — ~93 ms of audio at
+    // 44.1 kHz, enough for YIN to lock onto cello-low fundamentals.
+    analyser.fftSize = (typeof GAME_MIC_BUFFER_SIZE !== 'undefined')
+      ? GAME_MIC_BUFFER_SIZE : 4096;
+    src.connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    _tunerState = { ctx, stream, analyser, buf, rafId: null, lastHz: 0 };
+    const tick = () => {
+      if (!_tunerState) return;
+      _tunerState.analyser.getFloatTimeDomainData(_tunerState.buf);
+      // Quick RMS gate so silence doesn't constantly knock the
+      // display back to "—". Below threshold → hold previous reading.
+      let sumSq = 0;
+      const b = _tunerState.buf;
+      for (let i = 0; i < b.length; i++) sumSq += b[i] * b[i];
+      const rms = Math.sqrt(sumSq / b.length);
+      if (rms > 0.005) {
+        const hz = gameYinPitch(b, _tunerState.ctx.sampleRate);
+        if (hz > 0) {
+          // Light smoothing (one-pole EMA, alpha 0.35) so the needle
+          // doesn't twitch on every frame's pitch wobble.
+          const prev = _tunerState.lastHz;
+          const smoothed = prev > 0 ? prev * 0.65 + hz * 0.35 : hz;
+          _tunerState.lastHz = smoothed;
+          tunerSetDisplay(smoothed);
+        }
+      }
+      _tunerState.rafId = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch (e) {
+    // Mic blocked / unavailable — leave the dial visible but with
+    // a placeholder reading; user can refresh permissions and retry.
+    tunerSetDisplay(null);
+  }
+}
+
+function tunerStop() {
+  if (!_tunerState) return;
+  const { ctx, stream, rafId } = _tunerState;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  if (ctx) try { ctx.close(); } catch (e) {}
+  _tunerState = null;
+  // Drop the SVG from the chart so the next renderChart pass starts
+  // from a clean slate.
+  const chartEl = document.getElementById('chart');
+  if (chartEl) chartEl.innerHTML = '';
 }
 
 function stopPlayback() {
@@ -15840,8 +15980,10 @@ async function refreshScoreDropdownForCurrentSong() {
         _lastExerciseValue = exerciseMode;
       }
       // Leaving Drone mode? Stop the drone if it's still ringing
-      // out so it doesn't sustain into another mode.
+      // out so it doesn't sustain into another mode, and tear down
+      // the tuner (releasing the mic stream).
       if (mode !== 'drone' && typeof droneStop === 'function') droneStop();
+      if (mode !== 'drone' && typeof tunerStop === 'function') tunerStop();
       // Disable / re-enable the song picker button. Drone mode has
       // no song concept; locking the picker keeps the user from
       // accidentally changing songs and getting a confused state.
