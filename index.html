@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=125" />
+<link rel="stylesheet" href="style.css?v=127" />
 </head>
 <body>
 <div id="app">
@@ -129,16 +129,6 @@
           <option value="walkBass" hidden>Walking Bassline</option>
           <option value="walkBassPC" hidden>Walking Bassline (Chambers)</option>
         </select>
-        <button type="button" id="gameToggle" class="game-toggle-btn" aria-label="Game mode" aria-pressed="false" title="Game mode (Exercise mode only)" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="2" y="7" width="20" height="12" rx="3" ry="3"
-                  stroke="currentColor" stroke-width="1.8" fill="none"/>
-            <line x1="7"  y1="11" x2="7"  y2="15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-            <line x1="5"  y1="13" x2="9"  y2="13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-            <circle cx="15.5" cy="11.5" r="1.3" fill="currentColor"/>
-            <circle cx="18"   cy="14"   r="1.3" fill="currentColor"/>
-          </svg>
-        </button>
       </div>
       <div class="drum-row">
         <span class="drum-label">Tempo</span>
@@ -246,6 +236,18 @@
             <span>Diagram</span>
           </label>
         </div>
+      </div>
+      <div class="drum-row">
+        <label class="wake-label">
+          <input type="checkbox" id="darkModeToggle" class="switch-input" />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Dark mode</span>
+        </label>
+        <label class="wake-label">
+          <input type="checkbox" id="gameToggle" class="switch-input" disabled />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Game Mode</span>
+        </label>
       </div>
     </div>
     <div id="instrumentsPanel" class="options-panel" hidden>
@@ -383,7 +385,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v4.74</span>
+      <span class="app-version" id="appVersion">v4.76</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -391,7 +393,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=579"></script>
+<script src="app.js?v=581"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

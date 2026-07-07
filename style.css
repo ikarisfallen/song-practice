@@ -573,6 +573,10 @@ body.layout-landscape .desktop-only-mpl { display: inline-block; }
 .switch-input:checked + .switch { background: #3da9fc; }
 .switch-input:checked + .switch::before { transform: translateX(18px); }
 .switch-input:focus-visible + .switch { outline: 2px solid #3da9fc; outline-offset: 2px; }
+/* Disabled switch — used by the Game Mode toggle when the user
+   isn't in Exercise mode (Game Mode is only meaningful there). */
+.switch-input:disabled + .switch { opacity: 0.35; cursor: not-allowed; }
+.wake-label:has(.switch-input:disabled) { opacity: 0.5; cursor: not-allowed; }
 
 .file { font-size: 12px; }
 .fileBtn {
@@ -1576,3 +1580,82 @@ body.overlay-beats-on .beat-marker {
     margin: 0.5in;
   }
 }
+
+/* ============================================================
+   Dark mode
+   ============================================================
+   Applies only to the "content" panels — score chart, note-info
+   fingerboard, game keyboard — leaving the app's outer chrome
+   (sidebar, top bar, options panel) mostly untouched.
+
+   Trick for the score: rather than hunt down the ~75 hardcoded
+   fill/stroke calls in the SVG rendering code, we apply
+   `filter: invert(1) hue-rotate(180deg)` to the whole score SVG.
+   Black text becomes white, white background becomes black, and
+   colored overlays keep their approximate hue (green stays green,
+   red stays red, etc.). The Tuner in Drone mode has its OWN
+   deliberate color palette, so it opts out via a specific
+   selector below. */
+
+body.dark-mode { background: #0a1218; }
+
+/* Score chart: dark background + inverted SVG. */
+body.dark-mode #chart { background: #0f1720; }
+body.dark-mode #chart svg { filter: invert(1) hue-rotate(180deg); }
+/* Tuner (Drone mode) is designed for a dark aesthetic already —
+   keep its own colors, no invert. */
+body.dark-mode #chart .tuner-svg { filter: none; }
+/* Score title text sitting above the chart. */
+body.dark-mode #scoreTitle { color: #cde; }
+
+/* Note-info / fingerboard panel. */
+body.dark-mode .fingerboard-panel {
+  background: #0f1720;
+  color: #e6eef7;
+}
+body.dark-mode .fingerboard-panel svg { filter: invert(1) hue-rotate(180deg); }
+body.dark-mode .fb-chord-name,
+body.dark-mode .fb-chord-notes,
+body.dark-mode .fb-scale-name,
+body.dark-mode .fb-notes-measure { color: #e6eef7; }
+body.dark-mode .fb-chord-nav-btn {
+  background: #1e2a36;
+  color: #e6eef7;
+  border-color: #334654;
+}
+
+/* Game panel + score column. */
+body.dark-mode .game-panel {
+  background: #0f1720;
+  color: #e6eef7;
+}
+body.dark-mode .game-key {
+  background: #1e2a36;
+  color: #e6eef7;
+  border-color: #334654;
+}
+body.dark-mode .game-key.flash-correct { background: #2a5a34; }
+body.dark-mode .game-key.flash-wrong   { background: #6a2828; }
+body.dark-mode .game-kbd-toggle {
+  background: #1e2a36;
+  color: #e6eef7;
+  border-color: #334654;
+}
+body.dark-mode .game-kbd-toggle[aria-pressed="false"] {
+  background: #14202a;
+}
+body.dark-mode .game-kind-select {
+  background: #1e2a36;
+  color: #e6eef7;
+  border-color: #334654;
+}
+body.dark-mode .game-correct,
+body.dark-mode .game-mistakes,
+body.dark-mode .game-detected { color: #e6eef7; }
+
+/* Wrong-note flash overlay clone stays red; explicit background
+   override so it doesn't inherit the dark card style. */
+body.dark-mode .game-wrong-flash { background: transparent; }
+
+/* Song-title strip above the chart (if it has its own bar). */
+body.dark-mode .score-title { color: #cde; }

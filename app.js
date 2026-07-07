@@ -15094,6 +15094,27 @@ document.getElementById('wakeLock').addEventListener('change', async e => {
     await releaseWakeLock();
   }
 });
+
+// Dark mode — toggles `body.dark-mode`, which flips the score chart
+// background + applies `filter: invert(1) hue-rotate(180deg)` to the
+// score SVG (see style.css). Persisted via localStorage so it sticks
+// across reloads.
+(function bindDarkMode() {
+  const cb = document.getElementById('darkModeToggle');
+  if (!cb) return;
+  const KEY = 'darkMode';
+  const initial = (() => {
+    try { return localStorage.getItem(KEY) === 'true'; }
+    catch (_) { return false; }
+  })();
+  cb.checked = initial;
+  document.body.classList.toggle('dark-mode', initial);
+  cb.addEventListener('change', () => {
+    const on = !!cb.checked;
+    document.body.classList.toggle('dark-mode', on);
+    try { localStorage.setItem(KEY, on ? 'true' : 'false'); } catch (_) {}
+  });
+})();
 // Re-acquire after tab/screen visibility changes — the browser auto-releases
 // the lock when the page is hidden.
 document.addEventListener('visibilitychange', () => {
@@ -19117,7 +19138,11 @@ function gameSetMode(on) {
   const btn = document.getElementById('gameToggle');
   const gamePanel = document.getElementById('gamePanel');
   const fbPanel   = document.getElementById('fingerboardPanel');
-  if (btn) btn.setAttribute('aria-pressed', gameMode ? 'true' : 'false');
+  // #gameToggle is now a checkbox-style switch (was a pressable
+  // button previously). Reflect the game-mode state on `.checked`
+  // so an external caller — e.g. force-off when leaving Exercise
+  // mode — visually syncs the switch too.
+  if (btn) btn.checked = gameMode;
   if (gameMode) {
     if (gamePanel) gamePanel.removeAttribute('hidden');
     // In landscape the fingerboard panel stays visible — the game
@@ -19167,7 +19192,9 @@ function gameSetMode(on) {
 (function bindGameControls() {
   const btn = document.getElementById('gameToggle');
   if (btn) {
-    btn.addEventListener('click', () => gameSetMode(!gameMode));
+    // Switch (checkbox), not a button — listen for the checkbox's
+    // change event and read `.checked` for the target state.
+    btn.addEventListener('change', () => gameSetMode(!!btn.checked));
   }
   // Game-kind selector — switch between Follow and Hidden.
   // Changing the kind resets the play-through so the previous run's
