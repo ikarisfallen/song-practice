@@ -1,3 +1,6 @@
+// SW version: 2026-07-05.1 — bump this comment to force Chrome to
+// fetch the new SW on the next page load. Any byte-level change
+// works; the timestamped comment is just easy to remember.
 // Minimal service worker. Chrome/Android require at least a registered
 // SW with a fetch handler before they'll offer "Install app" on the
 // home screen. We don't cache anything ourselves — every request goes
