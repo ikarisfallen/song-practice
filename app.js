@@ -292,6 +292,15 @@ function expandForPlayback(bars) {
 const EX_LOW = 29;   // F1
 const EX_HIGH = 53;  // F3
 
+// Head-mode / lick-file time-grid resolution. 12 steps per quarter
+// gives an integer step count for both 16ths (3 steps) and 8th
+// triplets (4 steps) — the LCM of 4 and 3 is 12. The previous
+// 6-per-quarter grid only handled 8th triplets and forced 16ths to
+// 1.5 steps, which meant 16th notes silently collapsed into 8ths in
+// the score view. See parseMusicXML, generateHeadFromScore, and
+// generateExerciseLickQuarterNotes — all three read this constant.
+const HEAD_STEPS_PER_QUARTER = 12;
+
 // Scale definitions: s = semitone offset, t = TPC offset from root
 const SCALE_DORIAN =           [{s:0,t:0},{s:2,t:2},{s:3,t:-3},{s:5,t:-1},{s:7,t:1},{s:9,t:3},{s:10,t:-2}];
 const SCALE_IONIAN =           [{s:0,t:0},{s:2,t:2},{s:4,t:4},{s:5,t:-1},{s:7,t:1},{s:9,t:3},{s:11,t:5}];
@@ -2523,10 +2532,10 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
   stave.setEndBarType(VF.Barline.type.DOUBLE);
   stave.setContext(context).draw();
 
-  // Build a per-step array (24th-note resolution, matching the head
-  // generator) covering the pickup span. Notes go in their stepStart
-  // slots; empty slots will become rests.
-  const pickupSteps = leadInBeats * 6;
+  // Build a per-step array (HEAD_STEPS_PER_QUARTER = 48th-note grid,
+  // matching the head generator) covering the pickup span. Notes go
+  // in their stepStart slots; empty slots will become rests.
+  const pickupSteps = leadInBeats * HEAD_STEPS_PER_QUARTER;
   const beatPitches = new Array(pickupSteps).fill(null);
   if (isHeadMode && Array.isArray(pickupNotes)) {
     for (const n of pickupNotes) {
@@ -2534,13 +2543,16 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
       if (slot < 0 || slot >= pickupSteps) continue;
       // Map durationSteps → standard duration token. Picks the
       // largest token that fits; falls back to 8th for fragments.
-      const ds = Math.round(n.durationSteps || 6);
-      const dur = ds >= 24 ? 'w'
-                : ds >= 18 ? 'h.'
-                : ds >= 12 ? 'h'
-                : ds >= 9  ? 'q.'
-                : ds >= 6  ? 'q'
-                : '8';
+      // Threshold list runs whole → 16th at 48-grid values.
+      const ds = Math.round(n.durationSteps || 12);
+      const dur = ds >= 48 ? 'w'
+                : ds >= 36 ? 'h.'
+                : ds >= 24 ? 'h'
+                : ds >= 18 ? 'q.'
+                : ds >= 12 ? 'q'
+                : ds >= 9  ? '8.'
+                : ds >= 6  ? '8'
+                : '16';
       beatPitches[slot] = { pitch: n.midi, tpc: n.tpc, duration: dur };
     }
   }
@@ -2548,12 +2560,13 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
   // Walk the slot array, building VF.StaveNote tickables. Pitched
   // notes use midiTpcToVexKey + an Accidental modifier when needed;
   // empty runs are coalesced into the largest standard rest that fits.
-  const DUR_TO_STEPS = { 'w': 24, 'h.': 18, 'h': 12, 'q.': 9, 'q': 6, '8': 3 };
+  const DUR_TO_STEPS = { 'w': 48, 'h.': 36, 'h': 24, 'q.': 18, 'q': 12, '8.': 9, '8': 6, '16': 3 };
   const ACC_GLYPH = { '-2': 'bb', '-1': 'b', '0': 'n', '1': '#', '2': '##' };
   const restOpts = [
-    { dur: 'h', steps: 12 },
-    { dur: 'q', steps: 6 },
-    { dur: '8', steps: 3 }
+    { dur: 'h', steps: 24 },
+    { dur: 'q', steps: 12 },
+    { dur: '8', steps: 6 },
+    { dur: '16', steps: 3 }
   ];
   const notes = [];
   let b = 0;
@@ -2607,14 +2620,15 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
   // would be beamed.
   const pickupBeams = [];
   {
-    // group span in 24th-note steps: 4/4 → 12 steps (half-bar / 4
-    // eighths), 3/4 → 9 steps (3 eighths). Anything else falls back
-    // to a half-bar group based on the time signature's numerator.
-    const groupSteps = ts.num === 3 ? 9 : 12;
+    // group span in 48th-note steps (HEAD_STEPS_PER_QUARTER = 12):
+    // 4/4 → 24 steps (half-bar / 4 eighths), 3/4 → 18 steps (3
+    // eighths). Anything else falls back to a half-bar group based on
+    // the time signature's numerator.
+    const groupSteps = ts.num === 3 ? 18 : 24;
     // Offset from the imaginary preceding bar's start to the pickup's
     // first step. The pickup occupies the LAST `leadInBeats` of that
-    // bar, so the offset is (beatsPerBar - leadInBeats) * 6 steps.
-    const barStartOffsetSteps = Math.round((ts.num - leadInBeats) * 6);
+    // bar, so the offset is (beatsPerBar - leadInBeats) * 12 steps.
+    const barStartOffsetSteps = Math.round((ts.num - leadInBeats) * HEAD_STEPS_PER_QUARTER);
     let pending = [];
     let pendingGroup = -1;
     let stepCursor = 0;
@@ -2628,9 +2642,9 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
     while (bb < pickupSteps) {
       const bp = beatPitches[bb];
       if (bp) {
-        const consume = DUR_TO_STEPS[bp.duration] || 6;
+        const consume = DUR_TO_STEPS[bp.duration] || 12;
         const note = notes[i++];
-        if (bp.duration === '8' && note && !(note.isRest && note.isRest())) {
+        if ((bp.duration === '8' || bp.duration === '16') && note && !(note.isRest && note.isRest())) {
           const absStart = stepCursor + barStartOffsetSteps;
           const groupAtStart = Math.floor(absStart / groupSteps);
           const groupAtEnd   = Math.floor((absStart + consume - 1) / groupSteps);
@@ -2645,12 +2659,14 @@ function renderPickupStave(context, x, staffY, totalWidth, leadInBeats, ts, isHe
         stepCursor += consume;
       } else {
         // Rest run: walk and skip the rest tickables we generated.
+        // Matches restOpts above (48-grid): h=24, q=12, 8=6, 16=3.
         let run = 0;
         while (bb + run < pickupSteps && !beatPitches[bb + run]) run++;
         flush();
         while (run > 0) {
           let chosenSteps = 3;
-          if (12 <= run) chosenSteps = 12;
+          if (24 <= run) chosenSteps = 24;
+          else if (12 <= run) chosenSteps = 12;
           else if (6 <= run) chosenSteps = 6;
           i++; // skip the rest tickable
           bb += chosenSteps;
@@ -5569,10 +5585,10 @@ function parseMusicXML(doc) {
     const d = el.querySelector('duration');
     if (!d) return 0;
     const ticks = parseInt(d.textContent, 10) || 0;
-    // 24th-note resolution: 6 steps per quarter. This accommodates
-    // triplets (quarter triplet = 4 steps, 8th triplet = 2 steps) as
-    // whole integers alongside standard durations (quarter = 6, 8th = 3).
-    return divisions > 0 ? (ticks * 6 / divisions) : 0;
+    // Time resolution: HEAD_STEPS_PER_QUARTER (12 = 48th-note grid).
+    // Handles 16ths (3 steps), 8th triplets (4 steps), quarter
+    // triplets (8 steps), plus every standard duration as an integer.
+    return divisions > 0 ? (ticks * HEAD_STEPS_PER_QUARTER / divisions) : 0;
   }
 
   function readPitch(pitchEl) {
@@ -5675,6 +5691,20 @@ function parseMusicXML(doc) {
               if (type === 'start') tieStart = true;
               else if (type === 'stop') tieStop = true;
             });
+            // Same-pitch slurs are ties in disguise. MuseScore will
+            // export a curve as a <slur> when the user drew it with
+            // the slur tool AND the tool wasn't smart enough to
+            // detect "same-pitch = tie". We capture slur endpoints
+            // here and promote them to ties in the post-pass below
+            // when they connect two same-pitch notes.
+            const slurStartNums = [];
+            const slurStopNums  = [];
+            el.querySelectorAll('slur').forEach(s => {
+              const type = s.getAttribute('type');
+              const num  = parseInt(s.getAttribute('number') || '1', 10);
+              if (type === 'start') slurStartNums.push(num);
+              else if (type === 'stop') slurStopNums.push(num);
+            });
             // Tuplet bracket markers (start/stop) from <notations><tuplet>.
             // Middle members of a tuplet carry neither flag.
             let tupletStart = false, tupletStop = false;
@@ -5713,7 +5743,9 @@ function parseMusicXML(doc) {
               tupletStop,
               tupletActual,
               tupletNormal,
-              displayType
+              displayType,
+              slurStartNums,
+              slurStopNums
             });
           }
           cursor += dSteps;
@@ -5730,6 +5762,36 @@ function parseMusicXML(doc) {
     absStep = measureEnd;
   }
 
+  // Slur → tie promotion. Walk pending slur starts by (slur number)
+  // and promote to ties when the matching slur stop lands on a
+  // same-pitch note. Rescues MuseScore exports where the user drew a
+  // "curve connecting two identical notes across a barline" with the
+  // slur tool instead of the tie tool — musically it's a tie and
+  // that's what the app should render.
+  {
+    const pending = new Map(); // slurNum → note index that started it
+    for (let i = 0; i < notes.length; i++) {
+      const n = notes[i];
+      if (n.rest) continue;
+      const stops = n.slurStopNums || [];
+      for (const num of stops) {
+        const startIdx = pending.get(num);
+        if (startIdx == null) continue;
+        const startNote = notes[startIdx];
+        if (startNote && !startNote.rest && startNote.midi === n.midi) {
+          startNote.tieStart = true;
+          n.tieStop = true;
+        }
+        pending.delete(num);
+      }
+      const starts = n.slurStartNums || [];
+      for (const num of starts) pending.set(num, i);
+    }
+    // Strip the transient slur bookkeeping from the persistent note
+    // objects — downstream code doesn't need it.
+    for (const n of notes) { delete n.slurStartNums; delete n.slurStopNums; }
+  }
+
   // Pickup detection: if the first measure is a lead-in, partition
   // the notes so the head's MAIN array starts cleanly at bar-1
   // downbeat (stepStart = 0), and stash the pickup notes separately
@@ -5739,7 +5801,7 @@ function parseMusicXML(doc) {
   // mapped to bars[0] by `Math.floor(stepStart / stepsPerBar)`,
   // overlapping each other and rendering as a mess.
   const leadInBeats = detectLeadIn(doc);
-  const leadInSteps = Math.round(leadInBeats * 6); // 24th-note grid
+  const leadInSteps = Math.round(leadInBeats * HEAD_STEPS_PER_QUARTER);
   const pickupNotes = [];
   let mainNotes = notes;
   if (leadInSteps > 0) {
@@ -5873,15 +5935,15 @@ function parseHarmonyEvents(doc) {
         if (voice !== 1) continue;
         const dEl = el.querySelector('duration');
         const ticks = dEl ? (parseInt(dEl.textContent, 10) || 0) : 0;
-        if (divisions > 0) stepInMeasure += ticks * 6 / divisions;
+        if (divisions > 0) stepInMeasure += ticks * HEAD_STEPS_PER_QUARTER / divisions;
       } else if (tag === 'backup') {
         const dEl = el.querySelector('duration');
         const ticks = dEl ? (parseInt(dEl.textContent, 10) || 0) : 0;
-        if (divisions > 0) stepInMeasure -= ticks * 6 / divisions;
+        if (divisions > 0) stepInMeasure -= ticks * HEAD_STEPS_PER_QUARTER / divisions;
       } else if (tag === 'forward') {
         const dEl = el.querySelector('duration');
         const ticks = dEl ? (parseInt(dEl.textContent, 10) || 0) : 0;
-        if (divisions > 0) stepInMeasure += ticks * 6 / divisions;
+        if (divisions > 0) stepInMeasure += ticks * HEAD_STEPS_PER_QUARTER / divisions;
       }
     }
   }
@@ -5974,9 +6036,9 @@ function midiToHeadNotes(midi) {
   }
   const seq = Array.from(topByTick.values()).sort((a, b) => a.ticks - b.ticks);
   const ppq = (midi.header && midi.header.ppq) || 480;
-  // 24th-note resolution matches the MusicXML head parser so both
-  // pipelines feed the same downstream rendering/scheduling path.
-  const ticksPerStep = ppq / 6;
+  // Match the MusicXML head parser's HEAD_STEPS_PER_QUARTER grid so
+  // both pipelines feed the same downstream rendering/scheduling path.
+  const ticksPerStep = ppq / HEAD_STEPS_PER_QUARTER;
   // Key-based enharmonic guess (MIDI has no spelling info).
   const SHARP_TPCS = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19];
   const FLAT_TPCS  = [14,  9, 16, 11, 18, 13,  8, 15, 10, 17, 12, 19];
@@ -6025,11 +6087,12 @@ async function loadSongMidi(title) {
 // score is available for this song.
 function generateHeadFromScore(bars, ts) {
   const beatsPerBar = ts.num;
-  // 24th-note resolution (6 steps per quarter). Fine enough to express
-  // triplets (quarter triplet = 4 steps, 8th triplet = 2 steps) as
-  // integers alongside standard durations (quarter = 6, 8th = 3). The
-  // renderer and scheduler detect subdiv=6 from stepsPerBar / beatsPerBar.
-  const stepsPerBar = beatsPerBar * 6;
+  // 48th-note resolution (12 steps per quarter — HEAD_STEPS_PER_QUARTER).
+  // Accommodates 16ths (3 steps) as well as 8th triplets (4 steps),
+  // quarter triplets (8 steps), and every standard duration as an
+  // integer. The renderer/scheduler read subdiv=12 from
+  // stepsPerBar / beatsPerBar (see buildBeatInfo).
+  const stepsPerBar = beatsPerBar * HEAD_STEPS_PER_QUARTER;
   const chordEvents = buildChordEventList(bars);
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
@@ -6040,7 +6103,7 @@ function generateHeadFromScore(bars, ts) {
   const results = bars.map(() => new Array(stepsPerBar).fill(null));
   const head = window.currentSong && window.currentSong.head;
   if (!head || !head.notes || !head.notes.length) {
-    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+    return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
   }
 
   // Apply the current Key-seg transposition to the loaded melody.
@@ -6143,17 +6206,19 @@ function generateHeadFromScore(bars, ts) {
   //   `chunkTiesForward`: this chunk ties to the next chunk of the
   //     same note (more-bars-to-come), OR — on the very last chunk
   //     of the note — this note had an explicit XML tieStart.
-  // Standard durations at 24th-note resolution: whole = 24, dotted-
-  // half = 18, half = 12, dotted-quarter = 9, quarter = 6, eighth = 3.
-  // (16ths would be 1.5 — non-integer at this resolution — but the Head
-  // path doesn't currently emit them.)
+  // Standard durations at 48th-note resolution (HEAD_STEPS_PER_QUARTER
+  // = 12): whole=48, dotted-half=36, half=24, dotted-quarter=18,
+  // quarter=12, dotted-eighth=9, eighth=6, dotted-sixteenth=4.5 (skip),
+  // sixteenth=3.
   const DUR_FITS = [
-    { dur: 'w',  steps: 24 },
-    { dur: 'h.', steps: 18 },
-    { dur: 'h',  steps: 12 },
-    { dur: 'q.', steps: 9 },
-    { dur: 'q',  steps: 6 },
-    { dur: '8',  steps: 3 }
+    { dur: 'w',  steps: 48 },
+    { dur: 'h.', steps: 36 },
+    { dur: 'h',  steps: 24 },
+    { dur: 'q.', steps: 18 },
+    { dur: 'q',  steps: 12 },
+    { dur: '8.', steps: 9 },
+    { dur: '8',  steps: 6 },
+    { dur: '16', steps: 3 }
   ];
   function emitChunk(barIdx, startStep, stepsInBar, pitch, tpc, tieFromPrevChunk, chunkTiesForward) {
     if (barIdx < 0 || barIdx >= bars.length) return;
@@ -6249,7 +6314,7 @@ function generateHeadFromScore(bars, ts) {
     }
   });
 
-  return { results, chordEvents, patterns, effective, subdivisions: 6 };
+  return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
 }
 
 // Exercise-lick generator. Each bar of the song plays the cached
@@ -6271,7 +6336,7 @@ function generateHeadFromScore(bars, ts) {
 // chords across the cello range has each bar's lick well-placed.
 function generateExerciseLickQuarterNotes(bars, ts) {
   const beatsPerBar = ts.num;
-  const stepsPerBar = beatsPerBar * 6; // 24th-note grid, like Head mode
+  const stepsPerBar = beatsPerBar * HEAD_STEPS_PER_QUARTER; // 48th-note grid
   const chordEvents = buildChordEventList(bars);
   const patterns = detectKeyPatterns(chordEvents);
   const effective = chordEvents.map((ce, i) => {
@@ -6290,16 +6355,18 @@ function generateExerciseLickQuarterNotes(bars, ts) {
     ? exerciseMode.slice(5) : '';
   const lick = lickFilename ? _exerciseLickCache.get(lickFilename) : null;
   if (!lick) {
-    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+    return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
   }
 
   const DUR_FITS = [
-    { dur: 'w',  steps: 24 },
-    { dur: 'h.', steps: 18 },
-    { dur: 'h',  steps: 12 },
-    { dur: 'q.', steps: 9 },
-    { dur: 'q',  steps: 6 },
-    { dur: '8',  steps: 3 }
+    { dur: 'w',  steps: 48 },
+    { dur: 'h.', steps: 36 },
+    { dur: 'h',  steps: 24 },
+    { dur: 'q.', steps: 18 },
+    { dur: 'q',  steps: 12 },
+    { dur: '8.', steps: 9 },
+    { dur: '8',  steps: 6 },
+    { dur: '16', steps: 3 }
   ];
   // MusicXML <type> → VexFlow duration token. Used for tuplet members
   // whose raw <duration> ticks don't equal a standard note value.
@@ -6335,7 +6402,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
       };
       return;
     }
-    const totalSteps = Math.max(1, Math.round(n.durationSteps || 6));
+    const totalSteps = Math.max(1, Math.round(n.durationSteps || HEAD_STEPS_PER_QUARTER));
     let remaining = Math.min(totalSteps, stepsPerBar - stepInBar);
     let cur = stepInBar;
     let first = true;
@@ -6559,7 +6626,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
               }
             }
           } else {
-            const beat = Math.floor(n.stepStart / 6);
+            const beat = Math.floor(n.stepStart / HEAD_STEPS_PER_QUARTER);
             ce = findChordEventAtBeat(songBarIdx, beat);
           }
           const placed = ce ? pitchByCe.get(ce) : null;
@@ -6573,7 +6640,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
         }
         for (const tn of transposed) emitNoteIntoBar(songBarIdx, tn);
       }
-      return { results, chordEvents, patterns, effective, subdivisions: 6 };
+      return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
     }
 
     // === Scale projection ===
@@ -6588,9 +6655,10 @@ function generateExerciseLickQuarterNotes(bars, ts) {
     //
     // Once the per-bar slot table is built, the lick's rhythm masks
     // it: each source note's stepStart picks an eighth-note slot of
-    // its bar (slot = floor(stepStart / 3) on the 24th-note grid),
-    // and we emit either the slot's scale pitch (for pitched events)
-    // or a rest (for rest events), preserving the source's duration.
+    // its bar (slot = floor(stepStart / (HEAD_STEPS_PER_QUARTER / 2))
+    // on the 48th-note grid — 12/2 = 6 steps per eighth), and we emit
+    // either the slot's scale pitch (for pitched events) or a rest
+    // (for rest events), preserving the source's duration.
     if (_lickProjectionMode === 'scale') {
       const numSlotsPerBar = beatsPerBar * 2;
       const barSlots = bars.map(() => new Array(numSlotsPerBar).fill(null));
@@ -6668,7 +6736,8 @@ function generateExerciseLickQuarterNotes(bars, ts) {
             transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
             continue;
           }
-          const slotIdx = Math.floor(n.stepStart / 3);
+          // eighth-note slot index. 48-grid: 6 steps per eighth.
+          const slotIdx = Math.floor(n.stepStart / (HEAD_STEPS_PER_QUARTER / 2));
           const sc = slots[Math.max(0, Math.min(numSlotsPerBar - 1, slotIdx))];
           if (!sc) {
             transposed.push(Object.assign({}, n, { midi: null, tpc: null }));
@@ -6678,7 +6747,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
         }
         for (const tn of transposed) emitNoteIntoBar(songBarIdx, tn);
       }
-      return { results, chordEvents, patterns, effective, subdivisions: 6 };
+      return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
     }
 
     for (let startBar = 0; startBar < bars.length; startBar += numQuoteBars) {
@@ -6900,7 +6969,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
         for (const tn of transposed) emitNoteIntoBar(songBarIdx, tn);
       }
     }
-    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+    return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
   }
 
   // ---- Multi-bar 251 lick path ----
@@ -7114,7 +7183,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
         for (const tn of arr) emitNoteIntoBar(targetBarIdx, tn);
       });
     }
-    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+    return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
   }
 
   // ---- Single-bar lick path ----
@@ -7122,7 +7191,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
   // one-bar phrase via per-chord scale-degree mapping (modal) with
   // a chromatic-fallback collision check.
   if (!lick.notes || !lick.notes.length || !lick.sourceScale) {
-    return { results, chordEvents, patterns, effective, subdivisions: 6 };
+    return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
   }
 
   for (let barIdx = 0; barIdx < bars.length; barIdx++) {
@@ -7219,7 +7288,7 @@ function generateExerciseLickQuarterNotes(bars, ts) {
     for (const n of transposed) emitNoteIntoBar(barIdx, n);
   }
 
-  return { results, chordEvents, patterns, effective, subdivisions: 6 };
+  return { results, chordEvents, patterns, effective, subdivisions: HEAD_STEPS_PER_QUARTER };
 }
 
 // ===== Chord-tone eighth-note arpeggio factory =====
@@ -9525,16 +9594,17 @@ function renderChart(song, barsIn, timesigStr) {
       // Detect subdivision from the generator's output. Quarter-note
       // generators return one slot per beat (length == ts.num); the
       // 1235 generator returns eighth notes (length == 2 * ts.num);
-      // the Head generator uses 24ths (length == 6 * ts.num) so
-      // triplets fit as integer step counts.
+      // the Head generator uses 48ths (length == 12 * ts.num) so
+      // 16ths AND triplets both fit as integer step counts.
       const stepsPerBar = beatPitches.length || ts.num;
       const subdiv      = Math.max(1, Math.round(stepsPerBar / ts.num));
       const defaultDur  = subdiv >= 2 ? '8' : 'q';
       const restDur     = subdiv >= 2 ? '8r' : 'qr';
-      // Steps-per-duration for each resolution. A quarter = 2 steps
-      // at 8th resolution, 6 steps at 24th resolution, 1 step at
-      // quarter resolution.
-      const DUR_TO_STEPS = subdiv === 6
+      // Steps-per-duration for each resolution. A quarter = 1 step at
+      // quarter resolution, 2 at 8th, 6 at 24th, 12 at 48th.
+      const DUR_TO_STEPS = subdiv === 12
+        ? { 'w': 48, 'h.': 36, 'h': 24, 'q.': 18, 'q': 12, '8.': 9, '8': 6, '16': 3 }
+        : subdiv === 6
         ? { 'w': 24, 'h.': 18, 'h': 12, 'q.': 9, 'q': 6, '8': 3 }
         : subdiv === 2
         ? { 'w': 8,  'h.': 6,  'h': 4,  'q.': 3, 'q': 2, '8': 1 }
@@ -9785,7 +9855,9 @@ function renderChart(song, barsIn, timesigStr) {
           // Rests, largest first, measured in steps at the active
           // subdivision. Half-bar alignment prevents a half-rest
           // spanning beats 2-3 across the middle of the bar.
-          const restOptions = subdiv === 6
+          const restOptions = subdiv === 12
+            ? [ { dur: 'h', steps: 24 }, { dur: 'q', steps: 12 }, { dur: '8', steps: 6 }, { dur: '16', steps: 3 } ]
+            : subdiv === 6
             ? [ { dur: 'h', steps: 12 }, { dur: 'q', steps: 6 }, { dur: '8', steps: 3 } ]
             : subdiv === 2
             ? [ { dur: 'h', steps: 4  }, { dur: 'q', steps: 2 }, { dur: '8', steps: 1 } ]
@@ -13163,8 +13235,10 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
     const rawOffset = (KEY_TO_PC[currentKey] - KEY_TO_PC[originalKey] + 12) % 12;
     for (const n of pickupHead.pickupNotes) {
       if (n.rest || typeof n.midi !== 'number') continue;
-      // 24-step grid → beats. stepStart is 0-indexed inside the pickup.
-      const beatInPickup = (n.stepStart || 0) / 6;
+      // stepStart is on the HEAD_STEPS_PER_QUARTER grid. Divide by that
+      // constant to get beats (float). stepStart is 0-indexed inside
+      // the pickup.
+      const beatInPickup = (n.stepStart || 0) / HEAD_STEPS_PER_QUARTER;
       const beatPos = beatsPerBar - leadInBeats + beatInPickup;
       const beatInt = Math.floor(beatPos);
       const sub16 = Math.round((beatPos - beatInt) * 4);
@@ -13175,7 +13249,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       // so we shift up an octave to hit the actual played pitch on
       // the guitar sampler.
       const noteName = midiToName(transposedMidi + 12);
-      const durSec = ((n.durationSteps || 6) / 6) * (60 / currentTempo);
+      const durSec = ((n.durationSteps || HEAD_STEPS_PER_QUARTER) / HEAD_STEPS_PER_QUARTER) * (60 / currentTempo);
       Tone.Transport.scheduleOnce(t => {
         if (playScoreOn && guitar && guitar.loaded) {
           try { guitar.triggerAttackRelease(noteName, durSec, t, 0.7); } catch (e) {}
@@ -13200,7 +13274,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
     const rawOffsetH = (KEY_TO_PC[currentKey] - KEY_TO_PC[originalKey] + 12) % 12;
     for (const n of pickupHead.notes) {
       if (n.rest || typeof n.midi !== 'number') continue;
-      const beatInHead = (n.stepStart || 0) / 6;
+      const beatInHead = (n.stepStart || 0) / HEAD_STEPS_PER_QUARTER;
       const headBar = Math.floor(beatInHead / beatsPerBar);
       const beatInBar = beatInHead - headBar * beatsPerBar;
       // Store ALL head events, including bars before startBarIdx —
@@ -13222,7 +13296,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       const time = `${headBar}:${beatInt}:${sub16}`;
       const transposedMidi = n.midi + rawOffsetH;
       const noteName = midiToName(transposedMidi + 12);
-      const durSec = ((n.durationSteps || 6) / 6) * (60 / currentTempo);
+      const durSec = ((n.durationSteps || HEAD_STEPS_PER_QUARTER) / HEAD_STEPS_PER_QUARTER) * (60 / currentTempo);
       _headEvents.push({ time, noteName, durSec });
     }
   }
@@ -15203,7 +15277,7 @@ function _computeScoreRepeats() {
   }
   if (!cs.bars || !cs.bars.length) return 1;
   const beatsPerBar = (cs.timesig && cs.timesig.num) || 4;
-  const stepsPerBar = beatsPerBar * 6; // 24th-note grid
+  const stepsPerBar = beatsPerBar * HEAD_STEPS_PER_QUARTER;
   let maxStep = 0;
   for (const n of cs.head.notes) {
     const end = (n.stepStart || 0) + (n.durationSteps || 0);
@@ -15401,7 +15475,7 @@ async function loadExerciseLick(filename) {
   if (dom && /^quote\s/i.test(filename)) {
     const events = parseHarmonyEvents(dom);
     const ts = parseTimeSignatureFromMusicXML(dom);
-    const stepsPerBar = ts.num * 6;
+    const stepsPerBar = ts.num * HEAD_STEPS_PER_QUARTER;
     // Per-bar chord lookup. If a measure has multiple harmonies the
     // first one wins (Quote convention is one chord per source bar).
     const chordByMeasure = new Map();
@@ -15411,7 +15485,7 @@ async function loadExerciseLick(filename) {
     // Number of source bars: covers every measure that carries notes.
     let maxStep = 0;
     for (const n of parsed.notes) {
-      const end = (n.stepStart || 0) + (n.durationSteps || 6);
+      const end = (n.stepStart || 0) + (n.durationSteps || HEAD_STEPS_PER_QUARTER);
       if (end > maxStep) maxStep = end;
     }
     const numBars = Math.max(1, Math.ceil(maxStep / stepsPerBar));
@@ -15533,7 +15607,7 @@ async function loadExerciseLick(filename) {
   if (dom) {
     const events = parseHarmonyEvents(dom);
     const ts = parseTimeSignatureFromMusicXML(dom);
-    const stepsPerBar = ts.num * 6; // 24th-note grid
+    const stepsPerBar = ts.num * HEAD_STEPS_PER_QUARTER;
     const isP4Up = (a, b) => b === (a + 5) % 12;
     let pattern251 = null;
     let numBars = 0;
