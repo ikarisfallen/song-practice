@@ -8659,19 +8659,43 @@ function updateScoreTitle(songArg) {
   el.textContent = parts.join(' ');
 }
 
-// Split the input bars at the first coda (Q) marker and, when the
+// Locate the split between the head form and the coda section.
+// iRealPro charts often carry TWO coda (Q) markers: a "To Coda"
+// symbol part-way through the form (jump-from point) and the coda
+// symbol at the start of the coda section itself. The split we want
+// is the START of the coda section — i.e. the bar right after a
+// form-ending barline whose bar carries the coda marker (or whose
+// bar precedes a bracketed coda block). Falling back on "first coda
+// marker + 1" would misclassify the intermediate "To Coda" bar as
+// the section start (Humpty Dumpty's bar 16 is the classic case).
+// Returns the coda section's start-index in `bars`, or -1 if none.
+function findCodaSectionStart(bars) {
+  // Preferred rule: coda marker on a bar that ENDS the form
+  // (rightBar === 'final' or 'double'). The coda content begins on
+  // the next bar.
+  for (let i = 0; i < bars.length - 1; i++) {
+    const b = bars[i];
+    if (!b.markers || !b.markers.some(m => m.type === 'coda')) continue;
+    if (b.rightBar === 'final' || b.rightBar === 'double') return i + 1;
+  }
+  // Fallback: the LAST coda marker in the chart. If a chart only
+  // marks the coda symbol (no explicit "To Coda"), the last (only)
+  // marker is the section start; if it marks both, the LAST one is
+  // still the section start.
+  let last = -1;
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].markers && bars[i].markers.some(m => m.type === 'coda')) last = i;
+  }
+  return last > 0 && last < bars.length - 1 ? last + 1 : -1;
+}
+
+// Split the input bars at the coda section boundary and, when the
 // song is set to repeat, emit body*N then coda*1 (not body+coda*N).
 // iRealPro charts show the coda section once at the very bottom of
 // the sheet — it's played only once even when the main body loops
 // several times — so our expanded bar list should reflect that.
 function expandBarsByRepeats(bars, n) {
-  let codaStart = -1;
-  for (let i = 0; i < bars.length - 1; i++) {
-    if (bars[i].markers && bars[i].markers.some(m => m.type === 'coda')) {
-      codaStart = i + 1;
-      break;
-    }
-  }
+  const codaStart = findCodaSectionStart(bars);
   const hasCoda = codaStart >= 0;
   if (n <= 1 && !hasCoda) return bars.slice();
   const body = hasCoda ? bars.slice(0, codaStart) : bars;
@@ -9184,18 +9208,25 @@ function renderChart(song, barsIn, timesigStr) {
     );
   }
 
-  const formSize = barsIn.length; // length of one pass of the form
-  // Coda break-points: bar indices that should start a fresh row
-  // because the previous bar carried a coda (Q) marker. iRealPro
-  // renders the coda section on its own line at the bottom of the
-  // chart; matching that layout here means the reader can see the
-  // repeat body and the coda tail as visually distinct sections.
+  // Coda section split in the RAW bars (before expansion). Charts
+  // often have an intermediate "To Coda" symbol part-way through the
+  // form; we ignore those and use only the true section start (the
+  // bar right after a form-ending barline that carries the Q marker).
+  const codaStartRaw = findCodaSectionStart(barsIn);
+  // Length of one form pass (body only when a coda is present). Used
+  // by the pass-boundary logic so body iterations each land in their
+  // own row and the coda tail becomes its own final "pass."
+  const formSize = codaStartRaw > 0 ? codaStartRaw : barsIn.length;
+  // Index in the EXPANDED bars where the coda tail begins. Since
+  // expandBarsByRepeats emits body*N then coda*1, the coda always
+  // starts at (bars.length − coda_length) = body*N. -1 means "no coda".
+  const codaLen = codaStartRaw > 0 ? (barsIn.length - codaStartRaw) : 0;
+  const codaStartExpanded = codaStartRaw > 0 ? (bars.length - codaLen) : -1;
+  // Single row-break at the start of the coda section — no more per-
+  // marker breaks (those would fire on the intermediate "To Coda"
+  // symbol and orphan the tail of the form on its own short row).
   const codaBreaks = new Set();
-  bars.forEach((b, i) => {
-    if (b.markers && b.markers.some(m => m.type === 'coda') && i + 1 < bars.length) {
-      codaBreaks.add(i + 1);
-    }
-  });
+  if (codaStartExpanded > 0) codaBreaks.add(codaStartExpanded);
   // Cross-ROW tie state. When a row finishes with an unmatched
   // outgoing tie (its last tied note had tieToNext and nothing in
   // that row consumed it), we stash the note + its row's drawing
@@ -9557,6 +9588,39 @@ function renderChart(song, barsIn, timesigStr) {
         st.setAttribute('stroke', 'none');
         st.textContent = bar.section;
         svgForSection.appendChild(st);
+      }
+
+      // Draw a coda glyph above the first bar of the coda section.
+      // The glyph is the traditional 𝄌 mark: a circle with a
+      // horizontal + vertical cross through it. Drawn as SVG shapes
+      // rather than the Unicode codepoint so it renders identically
+      // across systems that don't ship a music font.
+      if (codaStartExpanded >= 0 && barIdx === codaStartExpanded) {
+        const svgForCoda = rowEl.querySelector('svg');
+        const cx = stave.getX() + 16;
+        const cy = 10;
+        const rad = 7;
+        const arm = rad + 3;
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', 'coda-mark');
+        const circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circ.setAttribute('cx', cx); circ.setAttribute('cy', cy);
+        circ.setAttribute('r', rad);
+        circ.setAttribute('fill', 'none');
+        circ.setAttribute('stroke', '#000');
+        circ.setAttribute('stroke-width', 1.5);
+        g.appendChild(circ);
+        const hLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        hLine.setAttribute('x1', cx - arm); hLine.setAttribute('y1', cy);
+        hLine.setAttribute('x2', cx + arm); hLine.setAttribute('y2', cy);
+        hLine.setAttribute('stroke', '#000'); hLine.setAttribute('stroke-width', 1.5);
+        g.appendChild(hLine);
+        const vLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        vLine.setAttribute('x1', cx); vLine.setAttribute('y1', cy - arm);
+        vLine.setAttribute('x2', cx); vLine.setAttribute('y2', cy + arm);
+        vLine.setAttribute('stroke', '#000'); vLine.setAttribute('stroke-width', 1.5);
+        g.appendChild(vLine);
+        svgForCoda.appendChild(g);
       }
 
       // Quarter notes per beat (generated from chord scales).
@@ -10847,11 +10911,19 @@ function renderChart(song, barsIn, timesigStr) {
     // line that introduces the second pass) so the CSS can render
     // the text inline at the left edge. The first pass gets no
     // label — it's just the song body.
+    // Special-case the boundary that precedes the coda tail: label it
+    // "Coda" instead of "Repeat N" so the reader knows the loop is
+    // over and this last block plays once.
     if (rowEnd === passBoundary && passBoundary < bars.length) {
-      const nextPassNumber = passIdx + 2;
       const sep = document.createElement('div');
       sep.className = 'form-separator';
-      sep.dataset.repeatLabel = 'Repeat ' + nextPassNumber;
+      if (codaStartExpanded > 0 && passBoundary === codaStartExpanded) {
+        sep.dataset.repeatLabel = 'Coda';
+        sep.classList.add('coda-separator');
+      } else {
+        const nextPassNumber = passIdx + 2;
+        sep.dataset.repeatLabel = 'Repeat ' + nextPassNumber;
+      }
       chartEl.appendChild(sep);
     }
     rowStart = rowEnd;

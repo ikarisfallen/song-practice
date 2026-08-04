@@ -694,6 +694,15 @@ main {
 .form-separator[data-repeat-label]::before {
   content: attr(data-repeat-label);
 }
+/* Coda separator — same layout as the repeat separator, but the
+   label reads "Coda" and gets bumped visually so the reader clocks
+   the section change instantly. */
+.form-separator.coda-separator {
+  margin-top: 16px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
 .fingerboard-section {
   flex-shrink: 0;
   padding: 10px;
