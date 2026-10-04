@@ -5219,6 +5219,89 @@ const generate1357FourNotes = makeArpeggioGenerator([0, 2, 4, 6], 'four');
 // chord's 3rd is picked at the octave that smoothly follows the
 // previous chord's 3rd across the staff.
 const generateThirdOneNotes = makeArpeggioGenerator([2], 'one');
+
+// "Third Root" — per chord event, split the chord's span in half:
+// 3rd on the first half, root on the second. A chord spanning only
+// one beat (e.g. 4 chords in a 4/4 bar) is too short to split, so
+// it degrades to just the 3rd. Octave of each note is picked
+// nearest to the previous note, so the 3rd → root drop lands as a
+// natural minor-third fall (same octave) rather than a leap up a
+// 6th.
+function generateThirdRootNotes(bars, ts) {
+  const beatsPerBar = ts.num;
+  const chordEvents = buildChordEventList(bars);
+  const patterns = detectKeyPatterns(chordEvents);
+  const effective = chordEvents.map((ce, i) => {
+    const pat = patterns.find(p => i >= p.firstIdx && i <= p.lastIdx);
+    return pickEffectiveScale(ce, pat);
+  });
+  const results = bars.map(() => new Array(beatsPerBar).fill(null));
+  function durForBeats(n) {
+    if (n >= 4) return 'w';
+    if (n === 3) return 'h.';
+    if (n === 2) return 'h';
+    return 'q';
+  }
+  // In-range tones for ONE scale degree of a chord, sorted low→high.
+  function tonesAtDegree(rootPc, rootTpc, chordScale, degIdx) {
+    const realIdx = diatonicIndexInScale(degIdx, chordScale);
+    const sd = chordScale[((realIdx % chordScale.length) + chordScale.length) % chordScale.length];
+    if (!sd) return [];
+    const pc = ((rootPc + sd.s) % 12 + 12) % 12;
+    const tpc = rootTpc + sd.t;
+    const out = [];
+    for (let oct = 0; oct <= 6; oct++) {
+      const pitch = pc + oct * 12;
+      if (pitch < EX_LOW || pitch > EX_HIGH) continue;
+      out.push({ pitch, tpc });
+    }
+    out.sort((a, b) => a.pitch - b.pitch);
+    return out;
+  }
+  function pickNearest(tones, lastPitch) {
+    if (!tones.length) return null;
+    if (lastPitch < 0) return tones[Math.floor(tones.length / 2)];
+    let best = tones[0];
+    let bestD = Math.abs(best.pitch - lastPitch);
+    for (const t of tones) {
+      const d = Math.abs(t.pitch - lastPitch);
+      if (d < bestD) { best = t; bestD = d; }
+    }
+    return best;
+  }
+  let lastPitch = -1;
+  for (let barIdx = 0; barIdx < bars.length; barIdx++) {
+    for (const ce of chordEvents) {
+      if (ce.barIdx !== barIdx) continue;
+      const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+      const span = r.endBeat - r.startBeat;
+      const chordScale = exGetScale(chordToCanonical(ce.chord));
+      if (!chordScale || !chordScale.length) continue;
+      const rootPc = ce.root.pitchClass;
+      const rootTpc = ce.root.tpc;
+      // Slot plan. span≥2 → 3rd then root, each sized to half the
+      // span (span=4 → h+h, span=3 → q+h, span=2 → q+q). span<2
+      // → only the 3rd (quick chord changes drop the root).
+      const slots = [];
+      if (span >= 2) {
+        const firstLen = Math.floor(span / 2);
+        slots.push({ beat: r.startBeat, dur: durForBeats(firstLen), deg: 2 });
+        slots.push({ beat: r.startBeat + firstLen, dur: durForBeats(span - firstLen), deg: 0 });
+      } else {
+        slots.push({ beat: r.startBeat, dur: durForBeats(span), deg: 2 });
+      }
+      for (const s of slots) {
+        const tones = tonesAtDegree(rootPc, rootTpc, chordScale, s.deg);
+        const picked = pickNearest(tones, lastPitch);
+        if (!picked) continue;
+        results[barIdx][s.beat] = { pitch: picked.pitch, tpc: picked.tpc, duration: s.dur };
+        lastPitch = picked.pitch;
+      }
+    }
+  }
+  return { results, chordEvents, patterns, effective };
+}
+
 // 1-3-5 arpeggio (Triads exercise) — quarter notes only.
 const generateTriadsQuarterNotes = makeArpeggioGenerator([0, 2, 4], 'four');
 
@@ -9008,6 +9091,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === 'chordTwo' ? generate1357TwoNotes
             : exerciseMode === 'chordFour' ? generate1357FourNotes
             : exerciseMode === 'third' ? generateThirdOneNotes
+            : exerciseMode === 'thirdRoot' ? generateThirdRootNotes
             // Backward-compat: existing 'chord' value (the original
             // single Chord Tones exercise) keeps working, mapped to
             // the new Four (quarter-note) variant.
@@ -16113,7 +16197,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'third' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'third' || ex === 'thirdRoot' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -16187,7 +16271,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'third' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'third' || ex === 'thirdRoot' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
@@ -18313,7 +18397,7 @@ function gamePaintChordToneReveal(chordEventIdx) {
   // order, so token index 1 is always the 3rd. Paint it red while
   // the root / 5th / 7th stay in the base green so the player's
   // eye lands on the note they're asked to voice next.
-  if (exerciseMode === 'third') {
+  if (exerciseMode === 'third' || exerciseMode === 'thirdRoot') {
     setSvgTextWithTokenColors(tn, noteStr, { 1: '#c92a2a' });
   } else {
     setSvgTextWithFlatFix(tn, noteStr);
@@ -18535,11 +18619,12 @@ function gameClearWrongBars() {
 }
 
 // Starting cursor for Hidden mode. Normally 1 so note 0 is revealed
-// as a free anchor. In the Thirds exercise every note is the 3rd of
-// its own chord — a freebie first note gives nothing useful, so we
-// start at 0 and keep every note hidden until the player earns it.
+// as a free anchor. In the Thirds / Third Root exercises the first
+// note is always the 3rd of the first chord — a freebie here just
+// hands the player the answer, so we start at 0 and keep every
+// note hidden until they play it.
 function gameHiddenInitialCursor() {
-  return exerciseMode === 'third' ? 0 : 1;
+  return (exerciseMode === 'third' || exerciseMode === 'thirdRoot') ? 0 : 1;
 }
 
 // Reset all game state to the start of the current song (cursor at
