@@ -8313,6 +8313,45 @@ function setSvgTextWithFlatFix(textEl, str) {
     }
   }
 }
+// setSvgTextWithFlatFix variant that paints individual space-
+// separated tokens with per-token colors. `colorsByIdx` is a map
+// { 0: '#aa0', 1: '#c92a2a', … } — tokens with no entry inherit
+// the parent text element's fill. Used by the Thirds reveal to
+// highlight the 3rd (index 1) in red while the root / 5th / 7th
+// stay in the base color.
+function setSvgTextWithTokenColors(textEl, str, colorsByIdx) {
+  while (textEl.firstChild) textEl.removeChild(textEl.firstChild);
+  const tokens = String(str || '').split(' ');
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (!token) continue;
+    if (i > 0) {
+      const sep = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+      sep.textContent = ' ';
+      textEl.appendChild(sep);
+    }
+    const color = colorsByIdx && colorsByIdx[i];
+    const parts = token.split(/(♭)/);
+    for (const part of parts) {
+      if (!part) continue;
+      const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+      if (part === '♭') {
+        tspan.setAttribute('font-family',
+          'Arial, Helvetica, "Segoe UI", Roboto, sans-serif');
+        if (IS_ANDROID) tspan.setAttribute('dx', '-2');
+      }
+      if (color) tspan.setAttribute('fill', color);
+      tspan.textContent = part;
+      textEl.appendChild(tspan);
+      if (part === '♭' && IS_ANDROID) {
+        const reset = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+        reset.setAttribute('dx', '-2');
+        reset.textContent = '';
+        textEl.appendChild(reset);
+      }
+    }
+  }
+}
 // Back-compat alias for the chord label call site.
 const appendChordLabelTspans = setSvgTextWithFlatFix;
 
@@ -18270,7 +18309,15 @@ function gamePaintChordToneReveal(chordEventIdx) {
   tn.setAttribute('fill', '#1f8a3a'); // green — matches "completed" feel
   tn.setAttribute('font-weight', 'bold');
   tn.setAttribute('stroke', 'none');
-  setSvgTextWithFlatFix(tn, noteStr);
+  // Thirds-only highlight: chordToneText emits tokens in 1-3-5-7
+  // order, so token index 1 is always the 3rd. Paint it red while
+  // the root / 5th / 7th stay in the base green so the player's
+  // eye lands on the note they're asked to voice next.
+  if (exerciseMode === 'third') {
+    setSvgTextWithTokenColors(tn, noteStr, { 1: '#c92a2a' });
+  } else {
+    setSvgTextWithFlatFix(tn, noteStr);
+  }
   svg.appendChild(tn);
 }
 
