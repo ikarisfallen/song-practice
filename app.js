@@ -18487,6 +18487,14 @@ function gameClearWrongBars() {
   document.querySelectorAll('.game-wrong-bar-overlay').forEach(el => el.remove());
 }
 
+// Starting cursor for Hidden mode. Normally 1 so note 0 is revealed
+// as a free anchor. In the Thirds exercise every note is the 3rd of
+// its own chord — a freebie first note gives nothing useful, so we
+// start at 0 and keep every note hidden until the player earns it.
+function gameHiddenInitialCursor() {
+  return exerciseMode === 'third' ? 0 : 1;
+}
+
 // Reset all game state to the start of the current song (cursor at
 // the first hidden note; counters back to zero).
 function gameReset() {
@@ -18496,7 +18504,11 @@ function gameReset() {
   // metronome tick advances it to 0 (the user's first expected
   // note), instead of immediately consuming note 0 before they've
   // had a chance to play it.
-  gameCursor = (gameKind === 'follow') ? -1 : 1;
+  // Thirds exception: every note is just the chord's 3rd, so there
+  // is no "anchor" the freebie usefully provides — the player
+  // should figure out the first chord's 3rd themselves. Start the
+  // Hidden-mode cursor at 0 so note 0 stays hidden until played.
+  gameCursor = (gameKind === 'follow') ? -1 : gameHiddenInitialCursor();
   gameCurrentBeat = -1; // pre-start; first metronome tick advances to 0
   gameCorrect = 0;
   gameMistakes = 0;
@@ -19112,9 +19124,10 @@ function gameHandleKeyPress(pc, playLead, micMidi) {
     gameMistakes++;
     gameShowWrongFlash(pc);
     // Punish a wrong note by REWINDING to the start of the current
-    // chord. The very first note of the song is exempt — it's
-    // always given for free (gameCursor starts at 1), so we floor
-    // the rewind target at 1.
+    // chord. The very first note of the song is normally exempt —
+    // it's given for free (gameCursor starts at 1), so we floor
+    // the rewind target at 1. In Thirds there's no freebie, so the
+    // floor is 0 and the player can be rewound onto note 0 itself.
     if (expected.chordEventIdx >= 0) {
       let chordStart = -1;
       for (let i = 0; i < gameSequence.length; i++) {
@@ -19124,7 +19137,8 @@ function gameHandleKeyPress(pc, playLead, micMidi) {
         }
       }
       if (chordStart >= 0) {
-        if (chordStart < 1) chordStart = 1;
+        const _floor = gameHiddenInitialCursor();
+        if (chordStart < _floor) chordStart = _floor;
         if (chordStart < gameCursor) {
           gameCursor = chordStart;
           gameApplyVisibility();
@@ -19409,7 +19423,8 @@ renderChart = function gameWrappedRenderChart() {
     // Clamp cursors in case the new sequence is shorter than where
     // we were (e.g. user switched to a shorter song mid-game).
     if (gameCursor > gameSequence.length) gameCursor = gameSequence.length;
-    if (gameCursor < 1) gameCursor = 1;
+    const _minCursor = gameHiddenInitialCursor();
+    if (gameCursor < _minCursor) gameCursor = _minCursor;
     if (gameCurrentBeat >= gameBeatMap.length) gameCurrentBeat = gameBeatMap.length - 1;
     // Re-render wipes the previous chart's SVG, so any fill-note
     // <g> elements we appended live as detached DOM in the
