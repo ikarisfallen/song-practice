@@ -5214,6 +5214,11 @@ function makeArpeggioGenerator(degScaleIdx, mode) {
 const generate1357OneNotes  = makeArpeggioGenerator([0, 2, 4, 6], 'one');
 const generate1357TwoNotes  = makeArpeggioGenerator([0, 2, 4, 6], 'two');
 const generate1357FourNotes = makeArpeggioGenerator([0, 2, 4, 6], 'four');
+// "Third" — one note per chord event (chord-sized duration) that is
+// just the 3rd of the chord. Shares the chord-tone walk so each
+// chord's 3rd is picked at the octave that smoothly follows the
+// previous chord's 3rd across the staff.
+const generateThirdOneNotes = makeArpeggioGenerator([2], 'one');
 // 1-3-5 arpeggio (Triads exercise) — quarter notes only.
 const generateTriadsQuarterNotes = makeArpeggioGenerator([0, 2, 4], 'four');
 
@@ -8963,6 +8968,7 @@ function renderChart(song, barsIn, timesigStr) {
             : exerciseMode === 'chordOne' ? generate1357OneNotes
             : exerciseMode === 'chordTwo' ? generate1357TwoNotes
             : exerciseMode === 'chordFour' ? generate1357FourNotes
+            : exerciseMode === 'third' ? generateThirdOneNotes
             // Backward-compat: existing 'chord' value (the original
             // single Chord Tones exercise) keeps working, mapped to
             // the new Four (quarter-note) variant.
@@ -16068,7 +16074,7 @@ async function refreshScoreDropdownForCurrentSong() {
     }
     // Exercise-mode dropdown: the value is an exercise key.
     const ex = value;
-    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+    exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'third' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
       ? ex : 'scale';
     _lastExerciseValue = exerciseMode;
     // Auto-flip the mode seg to "Exercise" — picking from the
@@ -16142,7 +16148,7 @@ async function refreshScoreDropdownForCurrentSong() {
         if (_dropdownMode !== 'exercise') populateExerciseDropdown();
         const sel = document.getElementById('exerciseSelect');
         const ex = sel ? sel.value : 'scale';
-        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
+        exerciseMode = (ex === 'chord' || ex === 'triads' || ex === 'broken3' || ex === 'cantus' || ex === 'targetTriad' || ex === 'range3579' || ex === 'range3579Half' || ex === 'chordOne' || ex === 'chordTwo' || ex === 'chordFour' || ex === 'third' || ex === 'enclosures' || ex === 'longEnclosures' || ex === 'scaleChromatic' || ex === 'descending' || ex === '1235' || ex === '1235Eighth' || ex === '3579' || ex === '3579Eighth' || ex === '1357' || ex === 'walkTriad' || ex === 'mixedTriads' || ex === 'threeSeven' || ex === 'landmarks' || ex === 'landmarks13' || ex === 'walkBass' || ex === 'walkBassPC')
           ? ex : 'scale';
         _lastExerciseValue = exerciseMode;
       }
