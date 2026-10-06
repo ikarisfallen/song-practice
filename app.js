@@ -5220,13 +5220,18 @@ const generate1357FourNotes = makeArpeggioGenerator([0, 2, 4, 6], 'four');
 // previous chord's 3rd across the staff.
 const generateThirdOneNotes = makeArpeggioGenerator([2], 'one');
 
-// "Third Root" — per chord event, split the chord's span in half:
-// 3rd on the first half, root on the second. A chord spanning only
-// one beat (e.g. 4 chords in a 4/4 bar) is too short to split, so
-// it degrades to just the 3rd. Octave of each note is picked
-// nearest to the previous note, so the 3rd → root drop lands as a
-// natural minor-third fall (same octave) rather than a leap up a
-// 6th.
+// "Third Root" — a 3rd-focused exercise whose per-bar shape is
+// gated on how many chords live in that bar.
+//   1 chord  → 3rd then root (two half notes).
+//   2 chords → 3rd of chord 1, 3rd of chord 2 (two half notes),
+//              no root — a 2-chord bar is busy enough.
+//   3 chords → 3rds only, each sized to its chord's beat span
+//              (half + qtr + qtr in a 4/4 bar with 2+1+1 chords,
+//              etc.).
+//   4 chords → 3rds only, one quarter note per chord.
+// Octave of each note is picked nearest to the previous note, so
+// the 3rd → root drop in a 1-chord bar lands as a natural minor-
+// third fall (same octave) rather than a leap up a 6th.
 function generateThirdRootNotes(bars, ts) {
   const beatsPerBar = ts.num;
   const chordEvents = buildChordEventList(bars);
@@ -5271,32 +5276,39 @@ function generateThirdRootNotes(bars, ts) {
   }
   let lastPitch = -1;
   for (let barIdx = 0; barIdx < bars.length; barIdx++) {
-    for (const ce of chordEvents) {
-      if (ce.barIdx !== barIdx) continue;
+    // Chord events in this bar, in beat order.
+    const inBar = chordEvents.filter(ce => ce.barIdx === barIdx);
+    if (!inBar.length) continue;
+    // Build the slot plan for this bar. A single-chord bar splits
+    // the bar in half (3rd + root); any multi-chord bar plays just
+    // the 3rd of each chord, sized to that chord's span.
+    const slots = [];
+    if (inBar.length === 1) {
+      const ce = inBar[0];
       const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
       const span = r.endBeat - r.startBeat;
-      const chordScale = exGetScale(chordToCanonical(ce.chord));
-      if (!chordScale || !chordScale.length) continue;
-      const rootPc = ce.root.pitchClass;
-      const rootTpc = ce.root.tpc;
-      // Slot plan. span≥2 → 3rd then root, each sized to half the
-      // span (span=4 → h+h, span=3 → q+h, span=2 → q+q). span<2
-      // → only the 3rd (quick chord changes drop the root).
-      const slots = [];
       if (span >= 2) {
         const firstLen = Math.floor(span / 2);
-        slots.push({ beat: r.startBeat, dur: durForBeats(firstLen), deg: 2 });
-        slots.push({ beat: r.startBeat + firstLen, dur: durForBeats(span - firstLen), deg: 0 });
+        slots.push({ ce, beat: r.startBeat, dur: durForBeats(firstLen), deg: 2 });
+        slots.push({ ce, beat: r.startBeat + firstLen, dur: durForBeats(span - firstLen), deg: 0 });
       } else {
-        slots.push({ beat: r.startBeat, dur: durForBeats(span), deg: 2 });
+        slots.push({ ce, beat: r.startBeat, dur: durForBeats(span), deg: 2 });
       }
-      for (const s of slots) {
-        const tones = tonesAtDegree(rootPc, rootTpc, chordScale, s.deg);
-        const picked = pickNearest(tones, lastPitch);
-        if (!picked) continue;
-        results[barIdx][s.beat] = { pitch: picked.pitch, tpc: picked.tpc, duration: s.dur };
-        lastPitch = picked.pitch;
+    } else {
+      for (const ce of inBar) {
+        const r = chordBeatRange(ce.chordsInBar, ce.chordIdxInBar, beatsPerBar);
+        const span = r.endBeat - r.startBeat;
+        slots.push({ ce, beat: r.startBeat, dur: durForBeats(span), deg: 2 });
       }
+    }
+    for (const s of slots) {
+      const chordScale = exGetScale(chordToCanonical(s.ce.chord));
+      if (!chordScale || !chordScale.length) continue;
+      const tones = tonesAtDegree(s.ce.root.pitchClass, s.ce.root.tpc, chordScale, s.deg);
+      const picked = pickNearest(tones, lastPitch);
+      if (!picked) continue;
+      results[barIdx][s.beat] = { pitch: picked.pitch, tpc: picked.tpc, duration: s.dur };
+      lastPitch = picked.pitch;
     }
   }
   return { results, chordEvents, patterns, effective };
