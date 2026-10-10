@@ -5014,9 +5014,28 @@ function generateBroken3rdsQuarterNotes(bars, ts) {
 // fixed set of chord-tone scale degrees (e.g. [0,2,4,6] for 1-3-5-7
 // or [0,2,4] for 1-3-5), zig-zagging up/down the cello range with
 // direction reversals every `N` notes (where N = degCount).
-function makeArpeggioGenerator(degScaleIdx, mode) {
+// Semitone / TPC offset from the root for an explicitly-altered 5th
+// in the chord text (the quality portion, i.e. everything after the
+// root letter + accidental). Returns null when the chord carries no
+// explicit 5-altering marker — the caller should then use whatever
+// 5th the chord's scale yields. Only #5 / b5 / alt / aug / + are
+// treated as 5-alterations here; b9 / b13 / #11 / etc. are
+// deliberately ignored so the Triads exercise doesn't drift onto a
+// b13 (enharmonic #5) when the user wrote "7b13" meaning the color
+// tone, not a replacement for the 5th.
+function alteredTriadFifthOffset(quality) {
+  if (!quality) return null;
+  if (/[#♯]5/.test(quality))    return { s: 8, t: 8 };   // #5 → G# over C
+  if (/[b♭]5/.test(quality))    return { s: 6, t: -6 };  // b5 → Gb over C
+  if (/alt/i.test(quality))     return { s: 8, t: 8 };   // altered dominant → #5
+  if (/aug|\+/i.test(quality))  return { s: 8, t: 8 };   // aug / + → #5
+  return null;
+}
+
+function makeArpeggioGenerator(degScaleIdx, mode, opts) {
   const degCount = degScaleIdx.length;
   mode = mode || 'four';
+  const isTriad = !!(opts && opts.isTriad);
   // mode = 'one'  → one note PER CHORD EVENT, sized to that chord's
   //                 beat span (4 beats → whole, 3 → dotted half,
   //                 2 → half, 1 → quarter). A chord held across 2
@@ -5042,13 +5061,22 @@ function makeArpeggioGenerator(degScaleIdx, mode) {
   // chord's REAL chord tone even for HW-dim (7♭9) and WH-dim (dim7)
   // scales, so a 7♭9 returns natural 3 and b7 instead of the b3/♯9
   // passing tone.
-  function buildChordTones(rootPc, rootTpc, chordScale) {
+  function buildChordTones(rootPc, rootTpc, chordScale, chordQuality) {
     if (!chordScale || !chordScale.length) return [];
+    const fifthOverride = isTriad ? alteredTriadFifthOffset(chordQuality) : null;
     const pcs = [];
     const seenPc = new Set();
     for (let d = 0; d < degCount; d++) {
-      const realIdx = diatonicIndexInScale(degScaleIdx[d], chordScale);
-      const sd = chordScale[realIdx % chordScale.length];
+      let sd;
+      // When degree index 4 is requested (the 5th) and the chord
+      // carries an explicit 5-altering marker, bypass the scale and
+      // use the chord-text-derived semitone/tpc offset instead.
+      if (fifthOverride && degScaleIdx[d] === 4) {
+        sd = { s: fifthOverride.s, t: fifthOverride.t };
+      } else {
+        const realIdx = diatonicIndexInScale(degScaleIdx[d], chordScale);
+        sd = chordScale[realIdx % chordScale.length];
+      }
       if (!sd) continue;
       const pc = ((rootPc + sd.s) % 12 + 12) % 12;
       if (seenPc.has(pc)) continue;
@@ -5146,7 +5174,9 @@ function makeArpeggioGenerator(degScaleIdx, mode) {
       for (const { beat, dur } of slots) {
         const ce = findChordEventAtBeat(barIdx, beat);
         if (!ce) continue;
-        const chordScale = exGetScale(chordToCanonical(ce.chord));
+        const canonical = chordToCanonical(ce.chord);
+        const quality = canonical.replace(/^[A-Ga-g][#♯b♭]?/, '');
+        const chordScale = exGetScale(canonical);
         if (!chordScale || chordScale.length === 0) continue;
         const rootPc = ce.root.pitchClass;
         const rootTpc = ce.root.tpc;
@@ -5155,13 +5185,15 @@ function makeArpeggioGenerator(degScaleIdx, mode) {
         // quality changes (CMaj7 → C7) rebuild tones; a held chord
         // (same sig across bars / slots) skips the rebuild and keeps
         // walking from the previous slot's toneIdx + post-advance.
+        // Triad mode also hashes the chord quality so a C7 → C7#5
+        // switch rebuilds even though the SCALE didn't change.
         const sig = rootPc + '|' + rootTpc + '|' + degScaleIdx.map(d => {
           const si = diatonicIndexInScale(d, chordScale);
           const sd = chordScale[si % chordScale.length];
           return sd ? sd.s : 'x';
-        }).join(',');
+        }).join(',') + (isTriad ? '|' + quality : '');
         if (sig !== lastSig) {
-          tones = buildChordTones(rootPc, rootTpc, chordScale);
+          tones = buildChordTones(rootPc, rootTpc, chordScale, quality);
           lastSig = sig;
           if (tones.length === 0) continue;
           if (lastPitch < 0) {
@@ -5208,12 +5240,15 @@ function makeArpeggioGenerator(degScaleIdx, mode) {
   };
 }
 
-// Three Chord Tones variants — same chord-tone walk, three slot
-// granularities. "One" = one note per chord (chord-sized duration);
-// "Two" = two half notes per bar; "Four" = quarter notes per beat.
-const generate1357OneNotes  = makeArpeggioGenerator([0, 2, 4, 6], 'one');
-const generate1357TwoNotes  = makeArpeggioGenerator([0, 2, 4, 6], 'two');
-const generate1357FourNotes = makeArpeggioGenerator([0, 2, 4, 6], 'four');
+// Three Triads variants — same chord-tone walk restricted to the
+// 1-3-5 triad, with three slot granularities. "One" = one note per
+// chord (chord-sized duration); "Two" = two half notes per bar;
+// "Four" = quarter notes per beat. isTriad flips on the chord-text-
+// aware 5th override, so Caug / C7#5 / C7alt voice the altered 5
+// while b9 / b13 extensions keep the natural 5.
+const generate1357OneNotes  = makeArpeggioGenerator([0, 2, 4], 'one',  { isTriad: true });
+const generate1357TwoNotes  = makeArpeggioGenerator([0, 2, 4], 'two',  { isTriad: true });
+const generate1357FourNotes = makeArpeggioGenerator([0, 2, 4], 'four', { isTriad: true });
 // "Third" — one note per chord event (chord-sized duration) that is
 // just the 3rd of the chord. Shares the chord-tone walk so each
 // chord's 3rd is picked at the octave that smoothly follows the
