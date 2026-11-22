@@ -19700,8 +19700,22 @@ let gameMic = {
   // the PC quorum is derived from these (`m % 12`).
   recentMidis: [],
   smoothedRms: 0,
-  lastOnsetAt: 0
+  lastOnsetAt: 0,
+  meterLevel: 0
 };
+
+// Input level meter in the Mic Input row: -60..0 dBFS across the bar,
+// green once the level clears the note-detection gate. Falls back
+// gradually so short peaks stay readable.
+function gameMicSetMeter(rms) {
+  const el = document.getElementById('gameMicMeterFill');
+  if (!el) return;
+  const db = rms > 0 ? 20 * Math.log10(rms) : -60;
+  const level = Math.max(0, Math.min(1, (db + 60) / 60));
+  gameMic.meterLevel = Math.max(level, gameMic.meterLevel * 0.85);
+  el.style.width = (gameMic.meterLevel * 100).toFixed(1) + '%';
+  el.classList.toggle('hot', rms >= GAME_MIC_RMS_HIGH);
+}
 
 // YIN pitch detection. Returns Hz, or -1 if no confident pitch found.
 function gameYinPitch(buffer, sampleRate) {
@@ -19787,6 +19801,7 @@ function gameMicProcessFrame() {
   let sumSq = 0;
   for (let i = 0; i < buf.length; i++) sumSq += buf[i] * buf[i];
   const rms = Math.sqrt(sumSq / buf.length);
+  gameMicSetMeter(rms);
 
   // Smoothed RMS — exponential moving average of the recent
   // energy floor. Used by onset detection: a real attack spikes
@@ -20049,6 +20064,11 @@ async function gameMicRefreshDeviceList() {
   if (rescan) {
     rescan.addEventListener('click', () => { gameMicRefreshDeviceList(); });
   }
+  // Plugging in a USB interface while the app is open adds it to the
+  // list without needing the rescan button.
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', gameMicRefreshDeviceList);
+  }
   // Initial fill — labels will be empty until mic permission is granted,
   // but a saved device is still shown so the user knows one is in effect.
   gameMicRefreshDeviceList();
@@ -20079,4 +20099,6 @@ function gameMicStop() {
   gameMic.buffer = null;
   gameMicSetButton(false);
   gameSetDetectedNote(null);
+  gameMic.meterLevel = 0;
+  gameMicSetMeter(0);
 }

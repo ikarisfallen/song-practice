@@ -490,6 +490,21 @@ body.layout-landscape .desktop-only-mpl { display: inline-block; }
   cursor: pointer;
 }
 .mic-device-rescan:hover { background: #253643; }
+.mic-meter {
+  flex: 0 0 46px;
+  height: 7px;
+  background: #0f1923;
+  border: 1px solid #334654;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.mic-meter-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: #5a7386;
+}
+.mic-meter-fill.hot { background: #40c463; }
 .mic-detected {
   min-width: 34px;
   text-align: center;
