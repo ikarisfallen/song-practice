@@ -11976,7 +11976,7 @@ async function resumePlayback() {
     window.currentSong.song,
     expanded,
     currentPlayingBar,
-    { prerollCountIn: countInBars > 0 }
+    { prerollCountIn: countInBars > 0, continueGame: true }
   );
 }
 
@@ -14375,6 +14375,8 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
   }
   if (gameMode) {
     gameRunBegin({
+      startTime: _audioStartTime,
+      continueGame: !!options.continueGame,
       startBarIdx, offset, beatsPerBar, playlist, hasLoop,
       loopStartBar: hasLoop ? loopIn : 0,
       loopOutBar: hasLoop ? loopOut : playlist.length - 1,
@@ -19074,7 +19076,7 @@ const GAME_RUN_EARLY_SEC = 0.08;
 const GAME_RUN_LATE_SEC  = 0.15;
 const GAME_MISS_COLOR    = '#c92a2a';
 
-// { offset, bpb, playlist, hasLoop, loopStartBar, loopOutBar,
+// { startTime, offset, bpb, playlist, hasLoop, loopStartBar, loopOutBar,
 //   loopEndBar, windows, lastBeat, cursorEl, rafId } while a run is
 // live; null otherwise.
 let gameRun = null;
@@ -19085,9 +19087,13 @@ let gameRun = null;
 function gameRunBegin(cfg) {
   gameRunStop();
   gameBuildSequence();
-  gameReset();
+  // Resuming from pause keeps what's been scored so far; anything else
+  // (Play, back-to-start, a seek, a tempo rebuild) starts fresh.
+  const keep = cfg.continueGame && gameTimedResults;
+  if (!keep) gameReset();
   gameTimedResults = true;
   gameRun = {
+    startTime: cfg.startTime,
     offset: cfg.offset,
     bpb: cfg.beatsPerBar,
     playlist: cfg.playlist,
@@ -19101,6 +19107,14 @@ function gameRunBegin(cfg) {
     rafId: null
   };
   gameRunBuildWindows(cfg.startBarIdx);
+  // Resume restarts at the top of the paused bar; notes in it that were
+  // already scored stay scored.
+  if (keep) {
+    for (const w of gameRun.windows) {
+      if (gameGreenNotes.has(w.key)) w.status = 'hit';
+      else if (gameRedNotes.has(w.key)) w.status = 'missed';
+    }
+  }
   gameApplyVisibility();
   gameRunTick();
 }
@@ -19144,9 +19158,15 @@ function gameRunBuildWindows(fromBar) {
 // Song position in beats at the audio clock's current time. Tone's
 // own "now" runs ahead by its scheduling look-ahead, which would put
 // the cursor and the judging window early relative to what's heard.
+// Never read earlier than this playback's start: a stop + restart
+// records the transport's reset at Tone's look-ahead time, so a read
+// at the current time in that gap returns where the PREVIOUS run left
+// off — past the end after a full playthrough, which instantly ended
+// every later run.
 function gameRunPositionBeat() {
   const r = gameRun;
-  const ticks = Tone.Transport.getTicksAtTime(Tone.context.currentTime);
+  const t = Math.max(Tone.context.currentTime, r.startTime);
+  const ticks = Tone.Transport.getTicksAtTime(t);
   let beat = ticks / Tone.Transport.PPQ - r.offset * r.bpb;
   if (r.hasLoop) {
     const ls = r.loopStartBar * r.bpb;
@@ -19243,11 +19263,12 @@ function gameRunFinish() {
   for (const w of r.windows) {
     if (w.status === 'pending') gameRunResolve(w, false);
   }
-  const total = r.windows.length;
+  const hits = gameGreenNotes.size;
+  const total = hits + gameRedNotes.size;
   gameMarkWrongBars();
   stopPlayback();
   document.getElementById('status').textContent =
-    `Game over · ${gameCorrect} of ${total} notes in time`;
+    `Game over · ${hits} of ${total} notes in time`;
 }
 
 // Vertical line across the staff at the current position. Parks at
