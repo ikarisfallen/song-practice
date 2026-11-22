@@ -15399,6 +15399,12 @@ document.getElementById('rewindBtn').addEventListener('click', async () => {
     }
   } else {
     stopPlayback();
+    // Game mode: back-to-start also clears the game (while playing,
+    // the rebuild above starts a fresh timed run instead).
+    if (gameMode) {
+      gameBuildSequence();
+      gameReset();
+    }
     selectedBar = target;
     highlightBar(target);
     refreshFingerboardForBar(target);
@@ -19351,10 +19357,94 @@ function gameRepaintMissMarks() {
 }
 
 function gameFlashKey(pc, ok) {
-  const cell = document.querySelector('.game-key[data-pc="' + pc + '"]');
+  const cell = document.querySelector('#gameCof .nkey[data-pc="' + pc + '"]');
   if (!cell) return;
   cell.classList.add(ok ? 'flash-correct' : 'flash-wrong');
   setTimeout(() => cell.classList.remove('flash-correct', 'flash-wrong'), 220);
+}
+
+// Note input: 'sound' listens to the mic / chosen audio input,
+// 'keyboard' shows the on-screen note ring. Remembered across visits.
+const GAME_INPUT_KEY = 'songPractice.gameInput';
+let gameInputMode = (() => {
+  try { return localStorage.getItem(GAME_INPUT_KEY) === 'keyboard' ? 'keyboard' : 'sound'; }
+  catch (e) { return 'sound'; }
+})();
+
+function gameSetInputMode(mode) {
+  gameInputMode = mode === 'keyboard' ? 'keyboard' : 'sound';
+  try { localStorage.setItem(GAME_INPUT_KEY, gameInputMode); } catch (e) {}
+  const panel = document.getElementById('gamePanel');
+  if (panel) panel.classList.toggle('input-sound', gameInputMode === 'sound');
+  document.querySelectorAll('#gameInputSeg button').forEach(b => {
+    const on = b.dataset.input === gameInputMode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  if (!gameMode) return;
+  if (gameInputMode === 'sound') gameMicStart();
+  else gameMicStop();
+}
+
+// Note ring from the chord-practice app: twelve wedges clockwise by
+// fifths from C at the top, F♯/G♭ at the bottom. Naturals are light;
+// accidentals are dark and show the flat above the sharp.
+const GAME_COF_KEYS = [
+  { pc: 0, label: 'C' }, { pc: 7, label: 'G' }, { pc: 2, label: 'D' },
+  { pc: 9, label: 'A' }, { pc: 4, label: 'E' }, { pc: 11, label: 'B' },
+  { pc: 6, flat: 'G♭', sharp: 'F♯' }, { pc: 1, flat: 'D♭', sharp: 'C♯' },
+  { pc: 8, flat: 'A♭', sharp: 'G♯' }, { pc: 3, flat: 'E♭', sharp: 'D♯' },
+  { pc: 10, flat: 'B♭', sharp: 'A♯' }, { pc: 5, label: 'F' }
+];
+function gameBuildNoteRing(container) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const cx = 100, cy = 100, rIn = 47, rOut = 97, rMid = (rIn + rOut) / 2;
+  // Point at `deg` clock-degrees (0 = 12 o'clock, increasing clockwise).
+  const pt = (r, deg) => {
+    const t = deg * Math.PI / 180;
+    return [cx + r * Math.sin(t), cy - r * Math.cos(t)];
+  };
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 200 200');
+  svg.setAttribute('role', 'group');
+  svg.setAttribute('aria-label', 'Note keys');
+  GAME_COF_KEYS.forEach((k, i) => {
+    const mid = i * 30;
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'nkey ' + (k.label ? 'nat' : 'acc'));
+    g.dataset.pc = k.pc;
+    const [x0o, y0o] = pt(rOut, mid - 15), [x1o, y1o] = pt(rOut, mid + 15);
+    const [x1i, y1i] = pt(rIn, mid + 15),  [x0i, y0i] = pt(rIn, mid - 15);
+    const wedge = document.createElementNS(NS, 'path');
+    wedge.setAttribute('class', 'wedge');
+    wedge.setAttribute('d', `M ${x0o} ${y0o} A ${rOut} ${rOut} 0 0 1 ${x1o} ${y1o}`
+      + ` L ${x1i} ${y1i} A ${rIn} ${rIn} 0 0 0 ${x0i} ${y0i} Z`);
+    g.appendChild(wedge);
+    const [lx, ly] = pt(rMid, mid);
+    const text = document.createElementNS(NS, 'text');
+    text.setAttribute('class', 'lbl');
+    text.setAttribute('x', lx);
+    text.setAttribute('y', ly);
+    text.setAttribute('text-anchor', 'middle');
+    if (k.label) {
+      text.setAttribute('dominant-baseline', 'central');
+      text.textContent = k.label;
+    } else {
+      const flat = document.createElementNS(NS, 'tspan');
+      flat.setAttribute('x', lx);
+      flat.setAttribute('dy', '-0.15em');
+      flat.textContent = k.flat;
+      const sharp = document.createElementNS(NS, 'tspan');
+      sharp.setAttribute('x', lx);
+      sharp.setAttribute('dy', '1.15em');
+      sharp.setAttribute('class', 'enh');
+      sharp.textContent = k.sharp;
+      text.append(flat, sharp);
+    }
+    g.appendChild(text);
+    svg.appendChild(g);
+  });
+  container.appendChild(svg);
 }
 
 // Toggle game mode on/off. Swaps the fingerboard panel for the
@@ -19404,6 +19494,7 @@ function gameSetMode(on) {
     gameDockPanelForCurrentLayout();
     gameBuildSequence();
     gameReset();
+    if (gameInputMode === 'sound') gameMicStart();
     // Eagerly kick off audio sample loading. Without this, a fresh
     // page-load → game-mode-on flow leaves the Tone.js samplers
     // uninitialized (piano + guitar). The correct-note guitar cue
@@ -19466,39 +19557,24 @@ function gameSetMode(on) {
       }
     });
   }
-  // Two keyboard halves now: left (C..F) and right (G♭..B), with the
-  // score column between them. Both bind the same click handler.
-  const gamePanel = document.getElementById('gamePanel');
-  if (gamePanel) {
-    gamePanel.addEventListener('click', (e) => {
-      const t = e.target.closest('.game-key');
-      if (!t) return;
-      const pc = parseInt(t.dataset.pc, 10);
-      if (!isFinite(pc)) return;
-      gameHandleKeyPress(pc);
+  // Circle-of-fifths note ring (Keyboard input mode).
+  const cof = document.getElementById('gameCof');
+  if (cof) {
+    gameBuildNoteRing(cof);
+    cof.addEventListener('click', (e) => {
+      const key = e.target.closest('.nkey');
+      if (key) gameHandleKeyPress(Number(key.dataset.pc));
     });
   }
-  const resetBtn = document.getElementById('gameResetBtn');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', () => {
-      if (!gameMode) return;
-      if (gameRun) stopPlayback();
-      gameBuildSequence();
-      gameReset();
+  // Sound | Keyboard input switch.
+  const inputSeg = document.getElementById('gameInputSeg');
+  if (inputSeg) {
+    inputSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-input]');
+      if (b) gameSetInputMode(b.dataset.input);
     });
   }
-  // Keyboard show/hide toggle. Adds/removes the `.kbd-hidden` class
-  // on the game panel — the CSS collapses both keyboard halves and
-  // centers the score column when that class is present.
-  const kbdToggle = document.getElementById('gameKeyboardToggle');
-  if (kbdToggle) {
-    kbdToggle.addEventListener('click', () => {
-      const panel = document.getElementById('gamePanel');
-      if (!panel) return;
-      const isHidden = panel.classList.toggle('kbd-hidden');
-      kbdToggle.setAttribute('aria-pressed', isHidden ? 'false' : 'true');
-    });
-  }
+  gameSetInputMode(gameInputMode);
 })();
 
 // Reapply game state after every renderChart — picks up new
@@ -19676,8 +19752,8 @@ function gameYinPitch(buffer, sampleRate) {
 }
 
 function gameMicSetButton(active) {
-  const btn = document.getElementById('gameMicBtn');
-  if (btn) btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  const btn = document.querySelector('#gameInputSeg button[data-input="sound"]');
+  if (btn) btn.classList.toggle('mic-live', active);
 }
 
 // Update the live detected-note readout in the score column. Pass
@@ -19794,8 +19870,8 @@ function gameMicProcessFrame() {
     // playLead=false: the user just produced this note themselves,
     // so layering the guitar sampler on top would be redundant.
     gameHandleKeyPress(winnerPc, false);
-    // Pulse the mic button to confirm a detection registered.
-    const btn = document.getElementById('gameMicBtn');
+    // Pulse the Sound button to confirm a detection registered.
+    const btn = document.querySelector('#gameInputSeg button[data-input="sound"]');
     if (btn) {
       btn.classList.remove('active-pulse');
       // Force reflow so the animation restarts on rapid retriggers.
@@ -19998,16 +20074,3 @@ function gameMicStop() {
   gameMicSetButton(false);
   gameSetDetectedNote(null);
 }
-
-(function bindGameMicButton() {
-  const btn = document.getElementById('gameMicBtn');
-  if (!btn) return;
-  btn.addEventListener('click', () => {
-    if (gameMic.running) {
-      gameMicStop();
-    } else {
-      gameMicStart();
-    }
-  });
-})();
-

@@ -775,29 +775,25 @@ main {
   pointer-events: none;
 }
 /* Game panel — replaces the fingerboard panel when game mode is on.
-   Shows the 4×3 chromatic keyboard and the running score. */
+   Score column, plus the circle-of-fifths note ring in Keyboard input
+   mode. Wraps so the ring drops below the score in a narrow sidebar. */
 .game-panel {
   background: #fff;
   color: #000;
   padding: 10px;
   border-radius: 6px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  /* The score column sits inside the implied circle, centered
-     between the two half-rings. A small gutter on each side keeps
-     the score visually separate from the keys. */
-  gap: 4px;
+  gap: 12px;
 }
 .game-panel[hidden] { display: none; }
-/* Score area — fixed-width column that sits between the two C-shape
-   keyboard halves. Wider than before so the previously-stacked
-   controls can fan out into a tighter, more visible grid instead
-   of an over-tall vertical stack with a lot of empty space below.
-   Layout:
-     [ Follow / Hidden dropdown          ]  full width
-     [ correct count   |   mistake count ]  2-col, large serif numerals
-     [ ↺  |  🎤  |  ▶                    ]  3-button row
+/* Score column:
+     [ Follow / Hidden dropdown          ]
+     [ correct count   |   mistake count ]
+     [ detected note                     ]
+     [ Sound | Keyboard                  ]
 */
 .game-score {
   flex-shrink: 0;
@@ -832,94 +828,80 @@ main {
   min-height: 17px;
   line-height: 1;
 }
-.game-score-buttons {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
-  justify-items: center;
-}
-.game-reset-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+/* Sound | Keyboard input switch. */
+.game-input-seg {
+  display: flex;
   border: 1px solid #888;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.game-input-seg button {
+  flex: 1;
+  padding: 5px 0;
+  border: 0;
   background: #fff;
   color: #333;
-  font-size: 16px;
-  line-height: 1;
+  font-family: serif;
+  font-size: 12px;
+  font-weight: bold;
   cursor: pointer;
 }
-.game-reset-btn:hover { background: #f0f0f0; }
-/* Mic toggle — turns red+filled when the mic is actively listening
-   so the user has a glance-check of whether sung/played notes are
-   being detected. */
-.game-mic-btn {
-  width: 30px;
-  height: 30px;
+.game-input-seg button + button { border-left: 1px solid #888; }
+.game-input-seg button.active { background: #1e6fd4; color: #fff; }
+/* Red dot on "Sound" while the input is actually being listened to,
+   so a denied / unplugged input is obvious at a glance. */
+.game-input-seg button.mic-live::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 4px;
   border-radius: 50%;
-  border: 1px solid #888;
-  background: #fff;
-  color: #555;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
+  background: #ff5a5a;
+  vertical-align: 1px;
 }
-.game-mic-btn svg { width: 18px; height: 18px; }
-.game-mic-btn:hover { background: #f0f0f0; }
-.game-mic-btn[aria-pressed="true"] {
-  background: #c92a2a;
-  border-color: #c92a2a;
-  color: #fff;
-}
-.game-mic-btn[aria-pressed="true"]:hover { background: #b02323; }
-/* Subtle pulse while actively detecting a note (energy above the
-   gate). Provides a "yes, I hear you" cue. */
 @keyframes gameMicPulse {
-  0%   { box-shadow: 0 0 0 0   rgba(201, 42, 42, 0.6); }
-  100% { box-shadow: 0 0 0 8px rgba(201, 42, 42, 0.0); }
+  0%   { box-shadow: inset 0 0 0 0   rgba(255, 90, 90, 0.7); }
+  100% { box-shadow: inset 0 0 0 12px rgba(255, 90, 90, 0.0); }
 }
-.game-mic-btn.active-pulse {
-  animation: gameMicPulse 0.6s ease-out;
+.game-input-seg button.active-pulse { animation: gameMicPulse 0.6s ease-out; }
+/* Circle-of-fifths note ring (same design as the chord-practice app):
+   naturals light, accidentals dark with flat over sharp. Only shown in
+   Keyboard input mode. */
+.game-panel.input-sound .game-cof { display: none; }
+.game-cof { flex: 0 0 auto; }
+.game-cof svg {
+  display: block;
+  width: min(230px, 56vw);
+  height: auto;
+  aspect-ratio: 1 / 1;
 }
-/* Keyboard show/hide toggle. Press to collapse the two C-shape
-   halves; the score column (dropdown, counters, action buttons,
-   and this toggle) stays in place so the panel compresses to a
-   narrow strip. aria-pressed=true means the keyboard is CURRENTLY
-   SHOWN (the default). */
-.game-kbd-toggle {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: 1px solid #888;
-  background: #fff;
-  color: #555;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.game-cof text {
+  pointer-events: none;
+  user-select: none;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-weight: 700;
+}
+.game-cof .wedge {
+  stroke: #8b96a6;
+  stroke-width: 2;
   cursor: pointer;
+  transition: fill .08s ease;
+  -webkit-tap-highlight-color: transparent;
 }
-.game-kbd-toggle svg { width: 20px; height: 20px; }
-.game-kbd-toggle:hover { background: #f0f0f0; }
-.game-kbd-toggle[aria-pressed="false"] {
-  /* Keyboard hidden — show the button "off" (greyed-out look). */
-  background: #ddd;
-  color: #555;
-}
-/* When the kbd-hidden class is on the game-panel, collapse both
-   keyboard halves. The score column shrinks to its content width
-   so the whole panel reads as a compact controls bar. */
-.game-panel.kbd-hidden .game-keyboard { display: none; }
-.game-panel.kbd-hidden { justify-content: center; }
-/* Desktop layout: the game panel docks under the note-info panel in
-   the sidebar. The circle-of-fifths keyboard isn't useful there
-   (the keyboard is sized for a phone screen anyway), so the
-   show/hide toggle is hidden too — desktop users drive the game
-   with the mic or external input. */
-body.layout-landscape #gameKeyboardToggle { display: none; }
-
+.game-cof .nat .wedge { fill: #f4f5f8; }
+.game-cof .acc .wedge { fill: #263041; }
+.game-cof .nat:hover .wedge { fill: #e7ebf5; }
+.game-cof .acc:hover .wedge { fill: #33415a; }
+.game-cof .nat .lbl { fill: #1c2530; font-size: 13px; }
+.game-cof .acc .lbl { fill: #eef2f8; font-size: 11px; }
+.game-cof .acc .lbl .enh { font-size: 8.5px; fill: #aab6c6; }
+.game-cof .nkey.flash-correct .wedge { fill: #2b8a3e; }
+.game-cof .nkey.flash-wrong .wedge   { fill: #c92a2a; }
+.game-cof .nkey.flash-correct .lbl,
+.game-cof .nkey.flash-wrong .lbl,
+.game-cof .nkey.flash-correct .lbl .enh,
+.game-cof .nkey.flash-wrong .lbl .enh { fill: #fff; }
 /* Tuner panel — replaces the score chart in Drone mode. The SVG
    itself defines the dial, needle, and labels; this just sizes the
    wrapping container so the dial centers in the available chart
@@ -943,84 +925,6 @@ body.layout-landscape #gameKeyboardToggle { display: none; }
 #tunerNeedle {
   transition: transform 0.08s linear;
 }
-/* 4×3 chromatic keyboard. Each cell shows the natural name with
-   enharmonic equivalent beneath for sharp/flat keys. */
-/* Circle-of-fifths keyboard, C-shape layout. Each half forms the
-   letter C (left) or its horizontal mirror (right). 6 keys per
-   half arranged in a 2-column × 4-row grid where the inner column
-   only has cells at the top and bottom — leaving the score column
-   visible through the C's opening.
-   Left side (C-shape, opening to the right toward the score):
-     F (top-left)       C (top-right, inner)
-     B♭/A♯              .
-     E♭/D♯              .
-     A♭/G♯ (bot-left)   D♭/C♯ (bot-right, inner)
-   Right side (mirrored C, opening to the left):
-     G (top-left, inner)   D (top-right)
-     .                     A
-     .                     E
-     G♭/F♯ (bot-left, in)  B (bot-right) */
-/* Each half is a CSS Grid of 2 fr-columns × 4 fr-rows. flex:1 1 0
-   with min-width:0 lets both halves shrink to fit narrow phone
-   screens (Pixel ~360px wide) — the keys stretch horizontally to
-   share whatever width is left after the score column claims 70px.
-   max-width caps the keyboards on desktop so they don't balloon on
-   wide windows. Height stays fixed so the cell aspect ratio sits
-   between square (small phones) and ~3:2 (desktop). */
-.game-keyboard {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: repeat(4, 1fr);
-  gap: 6px;
-  flex: 1 1 0;
-  min-width: 0;
-  max-width: 220px;
-  height: 274px;
-}
-.game-key {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  border: 1px solid #888;
-  background: #f5f5f5;
-  color: #000;
-  border-radius: 8px;
-  font-family: serif;
-  font-size: 17px;
-  font-weight: bold;
-  white-space: nowrap;
-  cursor: pointer;
-  user-select: none;
-  -webkit-tap-highlight-color: transparent;
-}
-.game-key:hover { background: #e0e0e0; }
-.game-key:active,
-.game-key.pressed { background: #cfe6f5; border-color: #3da9fc; }
-.game-key.flash-correct { background: #b8e6b8; border-color: #2b8a3e; }
-.game-key.flash-wrong   { background: #f5b5b5; border-color: #c92a2a; }
-/* C-shape grid placement. Inner column = col 2 on the LEFT keyboard
-   (next to the score on its right), col 1 on the RIGHT keyboard
-   (next to the score on its left). The 4 "spine" keys take the
-   outer column rows 1-4; the two corner keys facing the score
-   share the inner column at rows 1 and 4. */
-/* LEFT C-shape */
-.game-keyboard-left .game-key.pos-0 { grid-column: 2; grid-row: 1; } /* C       */
-.game-keyboard-left .game-key.pos-1 { grid-column: 1; grid-row: 1; } /* F       */
-.game-keyboard-left .game-key.pos-2 { grid-column: 1; grid-row: 2; } /* B♭/A♯  */
-.game-keyboard-left .game-key.pos-3 { grid-column: 1; grid-row: 3; } /* E♭/D♯  */
-.game-keyboard-left .game-key.pos-4 { grid-column: 1; grid-row: 4; } /* A♭/G♯  */
-.game-keyboard-left .game-key.pos-5 { grid-column: 2; grid-row: 4; } /* D♭/C♯  */
-/* RIGHT mirrored-C */
-.game-keyboard-right .game-key.pos-0 { grid-column: 1; grid-row: 1; } /* G       */
-.game-keyboard-right .game-key.pos-1 { grid-column: 2; grid-row: 1; } /* D       */
-.game-keyboard-right .game-key.pos-2 { grid-column: 2; grid-row: 2; } /* A       */
-.game-keyboard-right .game-key.pos-3 { grid-column: 2; grid-row: 3; } /* E       */
-.game-keyboard-right .game-key.pos-4 { grid-column: 2; grid-row: 4; } /* B       */
-.game-keyboard-right .game-key.pos-5 { grid-column: 1; grid-row: 4; } /* G♭/F♯  */
 /* Hide a note in the score (used by game mode to obscure
    not-yet-guessed notes). visibility:hidden keeps layout intact so
    barlines and beats stay positioned correctly. */
@@ -1607,21 +1511,10 @@ body.dark-mode .game-panel {
   background: #0f1720;
   color: #e6eef7;
 }
-body.dark-mode .game-key {
-  background: #1e2a36;
-  color: #e6eef7;
-  border-color: #334654;
-}
-body.dark-mode .game-key.flash-correct { background: #2a5a34; }
-body.dark-mode .game-key.flash-wrong   { background: #6a2828; }
-body.dark-mode .game-kbd-toggle {
-  background: #1e2a36;
-  color: #e6eef7;
-  border-color: #334654;
-}
-body.dark-mode .game-kbd-toggle[aria-pressed="false"] {
-  background: #14202a;
-}
+body.dark-mode .game-input-seg { border-color: #334654; }
+body.dark-mode .game-input-seg button { background: #1e2a36; color: #e6eef7; }
+body.dark-mode .game-input-seg button + button { border-left-color: #334654; }
+body.dark-mode .game-input-seg button.active { background: #1e6fd4; color: #fff; }
 body.dark-mode .game-kind-select {
   background: #1e2a36;
   color: #e6eef7;

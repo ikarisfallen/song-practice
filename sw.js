@@ -1,4 +1,4 @@
-// SW version: 2026-11-22.2 — bump this comment to force Chrome to
+// SW version: 2026-11-22.3 — bump this comment to force Chrome to
 // fetch the new SW on the next page load. Any byte-level change
 // works; the timestamped comment is just easy to remember.
 // Minimal service worker. Chrome/Android require at least a registered
