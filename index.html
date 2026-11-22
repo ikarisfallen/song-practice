@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=131" />
+<link rel="stylesheet" href="style.css?v=132" />
 </head>
 <body>
 <div id="app">
@@ -306,6 +306,7 @@
           <option value="">System default</option>
         </select>
         <button type="button" id="gameMicDeviceRescan" class="mic-device-rescan" title="Rescan audio inputs">⟳</button>
+        <span class="mic-detected" id="gameDetectedNote" title="Note detected from the input">—</span>
       </div>
     </div>
   </header>
@@ -331,29 +332,44 @@
       <div class="fb-grid" id="fbGrid"></div>
     </div>
     <div id="gamePanel" class="game-panel input-sound" hidden>
-      <div class="game-score">
-        <select id="gameKindSelect" class="game-kind-select" aria-label="Game kind">
-          <option value="follow">Follow</option>
-          <option value="hidden" selected>Hidden</option>
-        </select>
+      <div class="game-stage">
+        <div class="game-cof" id="gameCof"></div>
         <div class="game-score-counters">
-          <span class="game-correct" id="gameCorrectCount" title="Correct notes">0</span>
-          <span class="game-mistakes" id="gameMistakeCount" title="Mistakes">0</span>
+          <span class="game-count game-correct" title="Notes hit">
+            <svg viewBox="0 0 12 12" aria-hidden="true"><polyline points="2,6.5 5,9.5 10,2.5"/></svg>
+            <span id="gameCorrectCount">0</span>
+          </span>
+          <span class="game-count game-mistakes" title="Missed or wrong notes">
+            <svg viewBox="0 0 12 12" aria-hidden="true"><line x1="2.5" y1="2.5" x2="9.5" y2="9.5"/><line x1="2.5" y1="9.5" x2="9.5" y2="2.5"/></svg>
+            <span id="gameMistakeCount">0</span>
+          </span>
         </div>
-        <div class="game-detected" id="gameDetectedNote" title="Note detected from the input">—</div>
-        <div class="game-input-seg" id="gameInputSeg" role="radiogroup" aria-label="Note input">
-          <button type="button" data-input="sound" role="radio" aria-checked="true" class="active">Sound</button>
-          <button type="button" data-input="keyboard" role="radio" aria-checked="false">Keyboard</button>
+        <div class="game-controls">
+          <div class="game-seg" id="gameKindSeg" role="radiogroup" aria-label="Game kind">
+            <button type="button" data-kind="follow" role="radio" aria-checked="false" title="Follow — notes shown" aria-label="Follow">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12C5 6.5 8.5 4.5 12 4.5S19 6.5 22 12C19 17.5 15.5 19.5 12 19.5S5 17.5 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <button type="button" data-kind="hidden" role="radio" aria-checked="true" class="active" title="Hidden — notes hidden" aria-label="Hidden">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12C5 6.5 8.5 4.5 12 4.5S19 6.5 22 12C19 17.5 15.5 19.5 12 19.5S5 17.5 2 12Z"/><circle cx="12" cy="12" r="3"/><line x1="3.5" y1="3.5" x2="20.5" y2="20.5"/></svg>
+            </button>
+          </div>
+          <div class="game-seg" id="gameInputSeg" role="radiogroup" aria-label="Note input">
+            <button type="button" data-input="sound" role="radio" aria-checked="true" class="active" title="Sound — listen to the mic input" aria-label="Sound">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="21"/></svg>
+            </button>
+            <button type="button" data-input="keyboard" role="radio" aria-checked="false" title="Touch — tap the note ring" aria-label="Touch">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 14.5V4.5a1.5 1.5 0 0 1 3 0V11M11 10a1.5 1.5 0 0 1 3 0v1M14 10.5a1.5 1.5 0 0 1 3 0V12M17 11.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-1.5a5 5 0 0 1-4-2l-3.2-4.2a1.5 1.5 0 0 1 2.4-1.8L8 14.5"/></svg>
+            </button>
+          </div>
         </div>
       </div>
-      <div class="game-cof" id="gameCof"></div>
     </div>
   </div>
 
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v4.88</span>
+      <span class="app-version" id="appVersion">v4.89</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -361,7 +377,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=593"></script>
+<script src="app.js?v=594"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

@@ -19541,14 +19541,20 @@ function gameSetMode(on) {
       if (playState === 'playing') restartPlaybackInPlaceWithCountIn();
     });
   }
-  // Game-kind selector — switch between Follow and Hidden.
-  // Changing the kind resets the play-through so the previous run's
-  // red marks / cursor state don't leak into the new mode.
-  const kindSel = document.getElementById('gameKindSelect');
-  if (kindSel) {
-    gameKind = kindSel.value || 'follow';
-    kindSel.addEventListener('change', () => {
-      gameKind = kindSel.value || 'follow';
+  // Follow (eye) / Hidden (slashed eye) switch. Changing the kind
+  // resets the play-through so the previous run's marks don't leak
+  // into the new mode.
+  const kindSeg = document.getElementById('gameKindSeg');
+  if (kindSeg) {
+    kindSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-kind]');
+      if (!b || b.dataset.kind === gameKind) return;
+      gameKind = b.dataset.kind;
+      kindSeg.querySelectorAll('button').forEach(x => {
+        const on = x === b;
+        x.classList.toggle('active', on);
+        x.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
       if (gameMode) {
         // A run in progress was judged under the old kind's rules —
         // stop it rather than mixing results.
