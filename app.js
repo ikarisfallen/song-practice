@@ -15695,6 +15695,7 @@ document.getElementById('leadVol').addEventListener('input', e => {
       const opening = optPanel.hasAttribute('hidden');
       setOpen(optPanel, optToggle, opening);
       if (opening) setOpen(instPanel, instToggle, false);
+      gameMicSync();
     });
   }
   if (instToggle && instPanel) {
@@ -15702,6 +15703,7 @@ document.getElementById('leadVol').addEventListener('input', e => {
       const opening = instPanel.hasAttribute('hidden');
       setOpen(instPanel, instToggle, opening);
       if (opening) setOpen(optPanel, optToggle, false);
+      gameMicSync();
     });
   }
 })();
@@ -19381,9 +19383,6 @@ function gameSetInputMode(mode) {
     b.classList.toggle('active', on);
     b.setAttribute('aria-checked', on ? 'true' : 'false');
   });
-  if (!gameMode) return;
-  if (gameInputMode === 'sound') gameMicStart();
-  else gameMicStop();
 }
 
 // Note ring from the chord-practice app: twelve wedges clockwise by
@@ -19494,7 +19493,7 @@ function gameSetMode(on) {
     gameDockPanelForCurrentLayout();
     gameBuildSequence();
     gameReset();
-    if (gameInputMode === 'sound') gameMicStart();
+    gameMicSync();
     // Eagerly kick off audio sample loading. Without this, a fresh
     // page-load → game-mode-on flow leaves the Tone.js samplers
     // uninitialized (piano + guitar). The correct-note guitar cue
@@ -19515,7 +19514,7 @@ function gameSetMode(on) {
     // Stop the mic listener if it was running — it's only meaningful
     // while the game keyboard is visible (no notes to match against
     // outside game mode).
-    if (typeof gameMicStop === 'function') gameMicStop();
+    gameMicSync();
     // Playback keeps going as ordinary practice playback; only the
     // game's cursor, judging, and result marks go away.
     gameRunStop();
@@ -19577,7 +19576,9 @@ function gameSetMode(on) {
   if (inputSeg) {
     inputSeg.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-input]');
-      if (b) gameSetInputMode(b.dataset.input);
+      if (!b) return;
+      gameSetInputMode(b.dataset.input);
+      gameMicSync();
     });
   }
   gameSetInputMode(gameInputMode);
@@ -19890,7 +19891,7 @@ function gameMicProcessFrame() {
     gameMic.acceptedThisAttack = true;
     // playLead=false: the user just produced this note themselves,
     // so layering the guitar sampler on top would be redundant.
-    gameHandleKeyPress(winnerPc, false);
+    if (gameInputMode === 'sound') gameHandleKeyPress(winnerPc, false);
     // Pulse the Sound button to confirm a detection registered.
     const btn = document.querySelector('#gameInputSeg button[data-input="sound"]');
     if (btn) {
@@ -19932,6 +19933,20 @@ function gameMicSaveDevice(id, label) {
   } catch (e) { /* storage disabled — the dropdown still works for this session */ }
 }
 
+// The input is open while the game listens (Game Mode on, mic icon
+// selected) and while the Instruments panel is open on a phone, so the
+// level meter can confirm a device before playing. In the desktop
+// layout that panel is always on screen, so it doesn't count there.
+function gameMicWanted() {
+  if (gameMode && gameInputMode === 'sound') return true;
+  const panel = document.getElementById('instrumentsPanel');
+  return !!panel && !panel.hidden && !document.body.classList.contains('layout-landscape');
+}
+function gameMicSync() {
+  if (gameMicWanted()) gameMicStart();
+  else gameMicStop();
+}
+
 async function gameMicStart() {
   if (gameMic.running) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -19953,6 +19968,7 @@ async function gameMicStart() {
     const savedDevice = gameMicGetSavedDevice();
     if (savedDevice.id) audioConstraints.deviceId = { exact: savedDevice.id };
     let stream;
+    let fellBack = false;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
     } catch (err) {
@@ -19965,6 +19981,7 @@ async function gameMicStart() {
         if (s) s.textContent = `Can't find ${savedDevice.label || 'the chosen mic input'} — using system default.`;
         delete audioConstraints.deviceId;
         stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        fellBack = true;
       } else {
         throw err;
       }
@@ -19973,6 +19990,25 @@ async function gameMicStart() {
     if (!AC) throw new Error('No AudioContext');
     const ac = new AC();
     if (ac.state === 'suspended') await ac.resume().catch(() => {});
+    // Chrome can leave a context paused when it's created after the
+    // permission prompt has eaten the tap; the analyser then reads pure
+    // silence. Resume it on the next tap anywhere.
+    if (ac.state !== 'running') {
+      document.addEventListener('pointerdown', () => {
+        if (gameMic.audioContext === ac) ac.resume().catch(() => {});
+      }, { once: true });
+    }
+    // Say which input actually opened (label, rate, channels) so a
+    // silent meter can be traced to the right device.
+    const track = stream.getAudioTracks()[0];
+    const ts = (track && track.getSettings) ? track.getSettings() : {};
+    const statusEl = document.getElementById('status');
+    if (statusEl && track && !fellBack) {
+      statusEl.textContent = 'Listening: ' + (track.label || 'input')
+        + (ts.sampleRate ? ' · ' + (ts.sampleRate / 1000) + ' kHz' : '')
+        + (ts.channelCount ? ' · ' + ts.channelCount + ' ch' : '')
+        + (ac.state !== 'running' ? ' — tap the screen to start audio' : '');
+    }
     const source = ac.createMediaStreamSource(stream);
     const analyser = ac.createAnalyser();
     analyser.fftSize = GAME_MIC_BUFFER_SIZE;
