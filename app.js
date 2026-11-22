@@ -14635,6 +14635,10 @@ function expandIRealRepeats(bars) {
         // And an N2 bar just after the repeatEnd — the second-ending.
         let n2Start = -1, n2End = -1;
         for (let k = j + 1; k < bars.length; k++) {
+          // A second ending never lies past the next repeat block. Without
+          // this stop, a chart with several {…} blocks (Minor Swing) used
+          // a LATER block's N2 and skipped every bar in between.
+          if (bars[k].leftBar === 'repeatStart') break;
           if (endingMatches(bars[k], 2)) {
             n2Start = k;
             // N2 runs for the same number of bars as N1 (standard iReal
@@ -20020,6 +20024,34 @@ function gameMicProcessFrame() {
   }
 }
 
+// Persistent choice of audio input for Game mode. Empty string means
+// "whatever the system default is right now" — the common case, and
+// what we fall back to on OverconstrainedError. A specific id is
+// sent as `deviceId: { exact: id }` so if that device is unplugged
+// we FAIL (and the user sees a clear status) instead of silently
+// recording some other input. Mirrors the rhythm-practice pattern.
+const GAME_MIC_DEVICE_KEY = 'songPractice.gameMicDevice';
+const GAME_MIC_DEVICE_LABEL_KEY = 'songPractice.gameMicDeviceLabel';
+function gameMicGetSavedDevice() {
+  try {
+    return {
+      id: localStorage.getItem(GAME_MIC_DEVICE_KEY) || '',
+      label: localStorage.getItem(GAME_MIC_DEVICE_LABEL_KEY) || ''
+    };
+  } catch (e) { return { id: '', label: '' }; }
+}
+function gameMicSaveDevice(id, label) {
+  try {
+    if (id) {
+      localStorage.setItem(GAME_MIC_DEVICE_KEY, id);
+      localStorage.setItem(GAME_MIC_DEVICE_LABEL_KEY, label || '');
+    } else {
+      localStorage.removeItem(GAME_MIC_DEVICE_KEY);
+      localStorage.removeItem(GAME_MIC_DEVICE_LABEL_KEY);
+    }
+  } catch (e) { /* storage disabled — the dropdown still works for this session */ }
+}
+
 async function gameMicStart() {
   if (gameMic.running) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -20033,13 +20065,30 @@ async function gameMicStart() {
     //   - noiseSuppression: aggressive suppressor can mistake bowed
     //     cello for noise
     //   - autoGainControl: ramps gain mid-note, throws off energy gate
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
+    const audioConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
+    };
+    const savedDevice = gameMicGetSavedDevice();
+    if (savedDevice.id) audioConstraints.deviceId = { exact: savedDevice.id };
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    } catch (err) {
+      // Chosen input disappeared (unplugged, system reassigned, etc.) —
+      // fall back to system default so the mic still opens, but keep
+      // the saved id so the user can plug it back in later. Status
+      // bar tells them what happened.
+      if (savedDevice.id && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError')) {
+        const s = document.getElementById('status');
+        if (s) s.textContent = `Can't find ${savedDevice.label || 'the chosen mic input'} — using system default.`;
+        delete audioConstraints.deviceId;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      } else {
+        throw err;
       }
-    });
+    }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) throw new Error('No AudioContext');
     const ac = new AC();
@@ -20062,6 +20111,10 @@ async function gameMicStart() {
     gameMic.smoothedRms = 0;
     gameMic.lastOnsetAt = 0;
     gameMicSetButton(true);
+    // Device labels are empty until mic permission is granted. Now
+    // that we have it, repopulate the picker so the user sees the
+    // real device names ("Fender Mustang Plus", etc.).
+    gameMicRefreshDeviceList();
 
     function tick() {
       if (!gameMic.running) return;
@@ -20075,6 +20128,66 @@ async function gameMicStart() {
     gameMicSetButton(false);
   }
 }
+
+// Enumerate every audioinput Chrome will serve us and (re)populate
+// the Mic Input dropdown. Filter out the "default" / "communications"
+// aliases Windows/Chrome inject — they just mirror real devices.
+// Labels are empty until mic permission has been granted; once the
+// user allows access, re-call this to get the real names.
+async function gameMicRefreshDeviceList() {
+  const sel = document.getElementById('gameMicDeviceSelect');
+  if (!sel) return;
+  let inputs = [];
+  try {
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      inputs = devices
+        .filter(d => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications')
+        .map(d => ({ id: d.deviceId, label: d.label }));
+    }
+  } catch (e) { inputs = []; }
+  const saved = gameMicGetSavedDevice();
+  sel.innerHTML = '';
+  const add = (value, text) => {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = text;
+    sel.appendChild(o);
+  };
+  add('', 'System default');
+  // Only list named devices — unnamed entries are the pre-permission
+  // placeholders and would all read as "Audio input 1 / 2 / …".
+  const named = inputs.filter(d => d.label);
+  for (const d of named) add(d.id, d.label);
+  // A saved device that's no longer plugged in stays in the list so
+  // the user sees which one it was, marked (not connected).
+  if (saved.id && !named.some(d => d.id === saved.id)) {
+    add(saved.id, `${saved.label || 'Chosen input'} (not connected)`);
+  }
+  sel.value = saved.id;
+}
+(function bindGameMicDevicePicker() {
+  const sel = document.getElementById('gameMicDeviceSelect');
+  const rescan = document.getElementById('gameMicDeviceRescan');
+  if (sel) {
+    sel.addEventListener('change', async () => {
+      const id = sel.value;
+      const opt = sel.options[sel.selectedIndex];
+      const label = opt ? opt.textContent.replace(/ \(not connected\)$/, '') : '';
+      gameMicSaveDevice(id, label);
+      // Restart the mic with the new device if it's currently running.
+      if (gameMic.running) {
+        gameMicStop();
+        await gameMicStart();
+      }
+    });
+  }
+  if (rescan) {
+    rescan.addEventListener('click', () => { gameMicRefreshDeviceList(); });
+  }
+  // Initial fill — labels will be empty until mic permission is granted,
+  // but a saved device is still shown so the user knows one is in effect.
+  gameMicRefreshDeviceList();
+})();
 
 function gameMicStop() {
   if (!gameMic.running && !gameMic.audioContext) {
