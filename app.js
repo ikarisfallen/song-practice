@@ -14056,7 +14056,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
       // for the same beat slot.
       // In game mode the player IS the lead — the sampler would just
       // play the answers.
-      if (playScoreOn && !playHeadOverride && !gameMode && guitar && guitar.loaded
+      if (playScoreOn && !playHeadOverride && !(gameMode && !gameIsIntervalMode()) && guitar && guitar.loaded
           && ev.info.pitch != null && ev.attackDurSec > 0) {
         const name = midiToName(ev.info.pitch + 12);
         // Tuplet voice-stealing. The guitar sampler has a 0.6s
@@ -14147,7 +14147,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
     : `${playlist.length}:0:0`;
   // A game run ends at the last bar instead of wrapping to the top;
   // gameRunTick stops playback there so the result marks stay put.
-  if (gameMode && !hasLoop) playbackPart.loop = false;
+  if (gameMode && !gameIsIntervalMode() && !hasLoop) playbackPart.loop = false;
   // When pre-roll count-in is active, defer the Part's start until
   // Transport actually reaches startBarIdx — passing the same time as
   // both `time` and `offset` so events with absolute bar times (e.g.
@@ -14373,7 +14373,7 @@ async function startPlayback(song, bars, startBarIdx = 0, options = {}) {
     currentPlayingBar = startBarIdx;
     highlightBar(startBarIdx);
   }
-  if (gameMode) {
+  if (gameMode && !gameIsIntervalMode()) {
     gameRunBegin({
       startTime: _audioStartTime,
       continueGame: !!options.continueGame,
@@ -15386,6 +15386,7 @@ document.getElementById('rewindBtn').addEventListener('click', async () => {
   //  - While PAUSED or STOPPED: move the selection and highlight so
   //    the next Play press starts from the target.
   const target = loopIn != null ? loopIn : 0;
+  if (gameIsIntervalMode()) gameReset();
   // When "At Loop Start" is on AND we have a real Loop In/Out pair AND
   // the user has count-in configured, ask startPlayback to pre-roll a
   // count-in before re-entering the loop. Applies whether we're
@@ -15403,7 +15404,7 @@ document.getElementById('rewindBtn').addEventListener('click', async () => {
     stopPlayback();
     // Game mode: back-to-start also clears the game (while playing,
     // the rebuild above starts a fresh timed run instead).
-    if (gameMode) {
+    if (gameMode && !gameIsIntervalMode()) {
       gameBuildSequence();
       gameReset();
     }
@@ -16447,7 +16448,7 @@ async function refreshScoreDropdownForCurrentSong() {
       // chord-tone reveal for a non-exercise chart doesn't make sense.
       const gameBtn = document.getElementById('gameToggle');
       if (gameBtn) {
-        const allowGame = (mode === 'exercise');
+        const allowGame = (mode === 'exercise' || mode === 'head');
         gameBtn.disabled = !allowGame;
         if (!allowGame && typeof gameMode !== 'undefined' && gameMode
             && typeof gameSetMode === 'function') {
@@ -18635,9 +18636,14 @@ function gameApplyVisibility() {
           el.classList.remove('game-hidden');
           el.classList.remove('game-wrong-note');
           el.classList.remove('game-correct-note');
+          el.classList.remove('interval-pair');
         }
       }
     }
+    return;
+  }
+  if (gameIsIntervalMode()) {
+    intervalApplyVisibility();
     return;
   }
   // Compute the active green set per-mode.
@@ -18728,6 +18734,10 @@ function gameHiddenInitialCursor() {
 // Reset all game state to the start of the current song (cursor at
 // the first hidden note; counters back to zero).
 function gameReset() {
+  if (gameIsIntervalMode()) {
+    intervalStart();
+    return;
+  }
   // Untimed Hidden reveals the first note for free (cursor starts at
   // 1), except in the 3rd-first exercises — see gameHiddenInitialCursor.
   gameCursor = gameHiddenInitialCursor();
@@ -18939,7 +18949,7 @@ function gameHandleKeyPress(pc, playLead) {
   // guitar sampler. The mic path passes false: the player just made
   // that sound themselves, and the guitar would feed back into the mic.
   if (playLead === undefined) playLead = true;
-  if (!gameMode) return;
+  if (!gameMode || gameIsIntervalMode()) return;
   if (gameRun) { gameRunInput(pc); return; }
   // Follow has nothing to judge without playback, and a finished
   // timed run's results stay frozen until Reset or the next Play.
@@ -19386,6 +19396,238 @@ function gameFlashKey(pc, ok) {
   setTimeout(() => cell.classList.remove('flash-correct', 'flash-wrong'), 220);
 }
 
+// ===== Game mode: interval quiz (Score mode) =====
+// With Game Mode on in Score mode, the head melody becomes an interval
+// quiz. Notes are revealed one at a time. Each question pairs the latest
+// in-scale note with the next in-scale note; chromatic notes between
+// them (outside the current chord's scale) are revealed but never asked
+// about, so D E♭ F over a B♭ chord asks D → F, a minor 3rd. Both notes
+// play, a line joins their noteheads, and the player names the
+// interval. Direction is ignored, repeated notes are skipped, and
+// anything wider than an octave counts as its simple form.
+// { notes, keyToNote, questions, q, advancing } while the quiz is up.
+let intervalQuiz = null;
+let gameShowingIntervals = false;
+
+function gameIsIntervalMode() {
+  return gameMode && _dropdownMode === 'score';
+}
+
+// Show the quiz or the regular game controls in the panel. Returns true
+// when that just changed, so the caller can reset the game for the new
+// kind of play.
+function gameSyncPanelMode() {
+  const on = gameIsIntervalMode();
+  const panel = document.getElementById('gamePanel');
+  if (panel) panel.classList.toggle('mode-intervals', on);
+  const changed = on !== gameShowingIntervals;
+  gameShowingIntervals = on;
+  if (!on) {
+    intervalQuiz = null;
+    intervalClearMarks();
+  }
+  return changed;
+}
+
+function intervalBuild() {
+  const notes = [];            // attacked melody notes, in order
+  const keyToNote = new Map(); // 'bar:slot' -> notes index (tie continuations -> their attack)
+  for (let bi = 0; bi < barElements.length; bi++) {
+    const info = barElements[bi];
+    if (!info || !info.noteData) continue;
+    info.noteData.forEach((nd, si) => {
+      if (!nd || nd.pitch == null) return;
+      const beat = lastBeatInfo && lastBeatInfo[bi] && lastBeatInfo[bi][nd.stepStart];
+      if (beat && beat.tieFromPrev && notes.length) {
+        keyToNote.set(bi + ':' + si, notes.length - 1);
+        return;
+      }
+      let inScale = true;
+      if (beat && beat.scaleRoot && beat.scaleIntervals) {
+        const pc = ((nd.pitch % 12) + 12) % 12;
+        inScale = beat.scaleIntervals.some(x => (beat.scaleRoot.pitchClass + x.s) % 12 === pc);
+      }
+      keyToNote.set(bi + ':' + si, notes.length);
+      notes.push({ barIdx: bi, slotIdx: si, pitch: nd.pitch, inScale });
+    });
+  }
+  const questions = [];
+  let anchor = -1;
+  notes.forEach((n, i) => {
+    if (!n.inScale) return;
+    if (anchor >= 0 && n.pitch !== notes[anchor].pitch) {
+      questions.push({ from: anchor, to: i, semis: Math.abs(n.pitch - notes[anchor].pitch) });
+    }
+    anchor = i;
+  });
+  return { notes, keyToNote, questions, q: 0, advancing: false };
+}
+
+// Fresh quiz from the first question.
+function intervalStart() {
+  intervalQuiz = intervalBuild();
+  intervalQuiz.title = window.currentSong && window.currentSong.song && window.currentSong.song.title;
+  gameCorrect = 0;
+  gameMistakes = 0;
+  gameUpdateCounters();
+  intervalShowQuestion(true);
+}
+
+// After a re-render, rebuild against the new noteheads. Same song (key
+// change, overlay toggle, ...) stays on the same question; a different
+// song starts over. `song` is the one being rendered — renderChart runs
+// before window.currentSong is updated on a song change.
+function intervalRefresh(song) {
+  const title = song && song.title;
+  if (!intervalQuiz || intervalQuiz.title !== title) {
+    intervalStart();
+  } else {
+    const q = intervalQuiz.q;
+    intervalQuiz = intervalBuild();
+    intervalQuiz.q = Math.min(q, intervalQuiz.questions.length);
+    intervalShowQuestion(false);
+  }
+  intervalQuiz.title = title;
+}
+
+function intervalShowQuestion(play) {
+  const z = intervalQuiz;
+  intervalClearMarks();
+  intervalApplyVisibility();
+  const total = z.questions.length;
+  const prog = document.getElementById('intervalProgress');
+  if (prog) {
+    prog.textContent = !total ? 'No melody to quiz'
+      : z.q < total ? `${z.q + 1} / ${total}` : `Done · ${total} intervals`;
+  }
+  const qn = z.questions[z.q];
+  if (!qn) return;
+  const a = z.notes[qn.from], b = z.notes[qn.to];
+  intervalDrawLine(a, b);
+  intervalDrawCovers(b);
+  gameScrollToBar(b.barIdx);
+  if (play) intervalPlayCurrent();
+}
+
+// Notes up to the current question's target are shown; the two being
+// compared are highlighted. Once the quiz is finished, everything shows.
+function intervalApplyVisibility() {
+  const z = intervalQuiz;
+  const qn = z && z.questions[z.q];
+  const revealTo = qn ? qn.to : Infinity;
+  for (let bi = 0; bi < barElements.length; bi++) {
+    const info = barElements[bi];
+    if (!info || !info.noteEls) continue;
+    info.noteEls.forEach((el, si) => {
+      if (!el || !el.classList) return;
+      const idx = z ? z.keyToNote.get(bi + ':' + si) : undefined;
+      el.classList.remove('game-wrong-note', 'game-correct-note');
+      el.classList.toggle('game-hidden', idx !== undefined && idx > revealTo);
+      el.classList.toggle('interval-pair', !!qn && (idx === qn.from || idx === qn.to));
+    });
+  }
+}
+
+function intervalNoteCenter(n) {
+  const info = barElements[n.barIdx];
+  const sn = info.noteData[n.slotIdx].staveNote;
+  const w = (sn.getGlyphWidth && sn.getGlyphWidth()) || 11;
+  return { svg: info.rowEl.querySelector('svg'), x: sn.getAbsoluteX() + w / 2, y: sn.getYs()[0] };
+}
+
+// Line between the two noteheads, drawn beneath the notes. When the
+// pair spans two rows, each end runs off toward its row's edge.
+function intervalDrawLine(a, b) {
+  const A = intervalNoteCenter(a), B = intervalNoteCenter(b);
+  const seg = (svg, x1, y1, x2, y2) => {
+    const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    ln.setAttribute('class', 'interval-line');
+    ln.setAttribute('x1', x1); ln.setAttribute('y1', y1);
+    ln.setAttribute('x2', x2); ln.setAttribute('y2', y2);
+    ln.setAttribute('stroke', '#1e6fd4');
+    ln.setAttribute('stroke-width', '2.5');
+    ln.setAttribute('stroke-linecap', 'round');
+    ln.setAttribute('stroke-opacity', '0.75');
+    ln.setAttribute('pointer-events', 'none');
+    svg.insertBefore(ln, svg.firstChild);
+  };
+  if (A.svg === B.svg) {
+    seg(A.svg, A.x, A.y, B.x, B.y);
+  } else {
+    const midY = (A.y + B.y) / 2;
+    seg(A.svg, A.x, A.y, A.svg.viewBox.baseVal.width - 6, midY);
+    seg(B.svg, 6, midY, B.x, B.y);
+  }
+}
+
+function intervalClearMarks() {
+  document.querySelectorAll('.interval-line, .interval-cover').forEach(el => el.remove());
+}
+
+// Cover everything after the target note: the rest of its row and every
+// row below. Hiding notes one by one would still leave their stems,
+// beams, ties, and fingering numbers showing the shape of what's next.
+// Positioned in % of the row so it tracks the SVG as the page resizes.
+function intervalDrawCovers(b) {
+  const B = intervalNoteCenter(b);
+  const rowB = barElements[b.barIdx].rowEl;
+  const rows = Array.from(document.querySelectorAll('#chart .staff-row'));
+  const iB = rows.indexOf(rowB);
+  rows.forEach((row, i) => {
+    if (i < iB) return;
+    let left = 0;
+    if (i === iB) {
+      const vb = B.svg.viewBox.baseVal;
+      left = Math.min(100, Math.max(0, (B.x + 9 - vb.x) / vb.width * 100));
+    }
+    const cover = document.createElement('div');
+    cover.className = 'interval-cover';
+    cover.style.left = left + '%';
+    row.appendChild(cover);
+  });
+}
+
+// Play the pair: the earlier note, then the later one.
+async function intervalPlayCurrent() {
+  if (typeof initAudio === 'function') {
+    try { await initAudio(); } catch (e) { return; }
+  }
+  const z = intervalQuiz;
+  const qn = z && z.questions[z.q];
+  if (!qn || typeof guitar === 'undefined' || !guitar || !guitar.loaded) return;
+  const a = z.notes[qn.from], b = z.notes[qn.to];
+  const t = Tone.now() + 0.05;
+  guitar.triggerAttackRelease(midiToName(a.pitch + 12), 0.7, t, 0.75);
+  guitar.triggerAttackRelease(midiToName(b.pitch + 12), 0.9, t + 0.8, 0.75);
+}
+
+function intervalAnswer(semis, btn) {
+  const z = intervalQuiz;
+  const qn = z && z.questions[z.q];
+  if (!qn || z.advancing) return;
+  const ok = semis === (qn.semis % 12 || 12);
+  btn.classList.add(ok ? 'flash-correct' : 'flash-wrong');
+  setTimeout(() => btn.classList.remove('flash-correct', 'flash-wrong'), 350);
+  if (!ok) {
+    gameMistakes++;
+    gameUpdateCounters();
+    return;
+  }
+  gameCorrect++;
+  gameUpdateCounters();
+  z.advancing = true;
+  setTimeout(() => {
+    if (intervalQuiz !== z) return;
+    z.advancing = false;
+    z.q++;
+    intervalShowQuestion(true);
+    if (z.q >= z.questions.length) {
+      document.getElementById('status').textContent =
+        `Intervals done · ${gameCorrect} right, ${gameMistakes} wrong`;
+    }
+  }, 450);
+}
+
 // Note input: 'sound' listens to the mic / chosen audio input,
 // 'keyboard' shows the on-screen note ring. Remembered across visits.
 const GAME_INPUT_KEY = 'songPractice.gameInput';
@@ -19512,6 +19754,7 @@ function gameSetMode(on) {
     const landscape = document.body.classList.contains('layout-landscape');
     if (!landscape && fbPanel) fbPanel.setAttribute('hidden', '');
     gameDockPanelForCurrentLayout();
+    gameSyncPanelMode();
     gameBuildSequence();
     gameReset();
     gameMicSync();
@@ -19528,6 +19771,7 @@ function gameSetMode(on) {
     }
   } else {
     if (gamePanel) gamePanel.setAttribute('hidden', '');
+    gameSyncPanelMode();
     // Don't auto-show the fingerboard — leave its visibility to its
     // own toggle button. Just clear any hidden marks on notes.
     gameClearWrongFlash();
@@ -19592,6 +19836,16 @@ function gameSetMode(on) {
       if (key) gameHandleKeyPress(Number(key.dataset.pc));
     });
   }
+  // Interval quiz answers + replay.
+  const intervalGrid = document.getElementById('intervalGrid');
+  if (intervalGrid) {
+    intervalGrid.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-semis]');
+      if (b) intervalAnswer(Number(b.dataset.semis), b);
+    });
+  }
+  const intervalReplay = document.getElementById('intervalReplay');
+  if (intervalReplay) intervalReplay.addEventListener('click', () => intervalPlayCurrent());
   // Sound | Keyboard input switch.
   const inputSeg = document.getElementById('gameInputSeg');
   if (inputSeg) {
@@ -19613,6 +19867,17 @@ renderChart = function gameWrappedRenderChart() {
   const result = _gameOriginalRenderChart.apply(this, arguments);
   if (gameMode) {
     gameBuildSequence();
+    // Switched between Score (interval quiz) and Exercise (note game):
+    // start the new kind of play fresh.
+    if (gameSyncPanelMode()) {
+      gameReset();
+      gameMicSync();
+      return result;
+    }
+    if (gameIsIntervalMode()) {
+      intervalRefresh(arguments[0]);
+      return result;
+    }
     // Clamp cursors in case the new sequence is shorter than where
     // we were (e.g. user switched to a shorter song mid-game).
     if (gameCursor > gameSequence.length) gameCursor = gameSequence.length;
@@ -19959,7 +20224,7 @@ function gameMicSaveDevice(id, label) {
 // level meter can confirm a device before playing. In the desktop
 // layout that panel is always on screen, so it doesn't count there.
 function gameMicWanted() {
-  if (gameMode && gameInputMode === 'sound') return true;
+  if (gameMode && gameInputMode === 'sound' && !gameIsIntervalMode()) return true;
   const panel = document.getElementById('instrumentsPanel');
   return !!panel && !panel.hidden && !document.body.classList.contains('layout-landscape');
 }

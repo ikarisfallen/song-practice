@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="stylesheet" href="style.css?v=133" />
+<link rel="stylesheet" href="style.css?v=134" />
 </head>
 <body>
 <div id="app">
@@ -247,7 +247,7 @@
           <span>Dark mode</span>
         </label>
         <label class="wake-label">
-          <input type="checkbox" id="gameToggle" class="switch-input" disabled />
+          <input type="checkbox" id="gameToggle" class="switch-input" />
           <span class="switch" aria-hidden="true"></span>
           <span>Game Mode</span>
         </label>
@@ -345,6 +345,28 @@
             <span id="gameMistakeCount">0</span>
           </span>
         </div>
+        <div class="interval-quiz">
+          <div class="interval-grid" id="intervalGrid">
+            <button type="button" data-semis="1">m2</button>
+            <button type="button" data-semis="2">M2</button>
+            <button type="button" data-semis="3">m3</button>
+            <button type="button" data-semis="4">M3</button>
+            <button type="button" data-semis="5">P4</button>
+            <button type="button" data-semis="6">TT</button>
+            <button type="button" data-semis="7">P5</button>
+            <button type="button" data-semis="8">m6</button>
+            <button type="button" data-semis="9">M6</button>
+            <button type="button" data-semis="10">m7</button>
+            <button type="button" data-semis="11">M7</button>
+            <button type="button" data-semis="12">P8</button>
+          </div>
+          <div class="interval-footer">
+            <button type="button" class="interval-replay" id="intervalReplay" title="Hear the two notes again" aria-label="Replay the two notes">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M18.5 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+            </button>
+            <span class="interval-progress" id="intervalProgress"></span>
+          </div>
+        </div>
         <div class="game-controls">
           <div class="game-seg" id="gameKindSeg" role="radiogroup" aria-label="Game kind">
             <button type="button" data-kind="follow" role="radio" aria-checked="false" title="Follow — notes shown" aria-label="Follow">
@@ -370,7 +392,7 @@
   <footer>
     <div class="status-bar">
       <div class="status" id="status">Ready</div>
-      <span class="app-version" id="appVersion">v4.92</span>
+      <span class="app-version" id="appVersion">v4.93</span>
     </div>
   </footer>
   </div><!-- /#mainArea -->
@@ -378,7 +400,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
-<script src="app.js?v=597"></script>
+<script src="app.js?v=598"></script>
 <script>
   // Register the service worker so Chrome/Android will surface the
   // "Install app" / "Add to Home screen" prompt. Fails silently on

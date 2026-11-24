@@ -882,11 +882,51 @@ main {
 /* Touch input: ring layout. The stage gets side padding so the bottom
    corners have room for the switches beside the ring's curve. */
 .game-panel.input-sound .game-cof { display: none; }
-.game-panel:not(.input-sound) .game-stage {
+/* Score mode: the interval quiz replaces the ring and the switches. */
+.interval-quiz { display: none; }
+.game-panel.mode-intervals .game-cof,
+.game-panel.mode-intervals .game-controls { display: none; }
+.game-panel.mode-intervals .interval-quiz {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.interval-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 42px);
+  gap: 5px;
+}
+.interval-grid button,
+.interval-replay {
+  height: 32px;
+  padding: 0;
+  border: 1px solid #888;
+  border-radius: 6px;
+  background: #fff;
+  color: #222;
+  font-family: serif;
+  font-size: 15px;
+  font-weight: bold;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.interval-grid button.flash-correct { background: #2b8a3e; border-color: #2b8a3e; color: #fff; }
+.interval-grid button.flash-wrong   { background: #c92a2a; border-color: #c92a2a; color: #fff; }
+.interval-footer { display: flex; align-items: center; gap: 10px; }
+.interval-replay {
+  width: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.interval-replay svg { width: 18px; height: 18px; }
+.interval-progress { font-family: serif; font-size: 13px; color: #555; }
+.game-panel:not(.input-sound):not(.mode-intervals) .game-stage {
   position: relative;
   padding: 0 30px;
 }
-.game-panel:not(.input-sound) .game-score-counters {
+.game-panel:not(.input-sound):not(.mode-intervals) .game-score-counters {
   position: absolute;
   left: 50%;
   top: 50%;
@@ -897,7 +937,7 @@ main {
   font-size: 19px;
   pointer-events: none;
 }
-.game-panel:not(.input-sound) .game-controls {
+.game-panel:not(.input-sound):not(.mode-intervals) .game-controls {
   position: absolute;
   left: 0;
   right: 0;
@@ -905,7 +945,7 @@ main {
   justify-content: space-between;
   pointer-events: none;
 }
-.game-panel:not(.input-sound) .game-seg { pointer-events: auto; }
+.game-panel:not(.input-sound):not(.mode-intervals) .game-seg { pointer-events: auto; }
 /* Circle-of-fifths note ring (same design as the chord-practice app):
    naturals light, accidentals dark with flat over sharp. */
 .game-cof svg {
@@ -967,6 +1007,22 @@ main {
    not-yet-guessed notes). visibility:hidden keeps layout intact so
    barlines and beats stay positioned correctly. */
 .vf-stavenote.game-hidden { visibility: hidden; }
+/* Interval quiz: hides the score after the note being asked about. */
+.interval-cover {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  background: #fff;
+  pointer-events: none;
+}
+body.dark-mode .interval-cover { background: #0f1720; }
+/* Interval quiz: the two notes being compared. */
+.vf-stavenote.interval-pair,
+.vf-stavenote.interval-pair * {
+  fill: #1e6fd4 !important;
+  stroke: #1e6fd4 !important;
+}
 /* Red "wrong note" flash — temporary clone of a notehead, painted red. */
 .vf-stavenote.game-wrong-flash {
   color: #c92a2a;
@@ -1539,6 +1595,11 @@ body.dark-mode .game-seg button { background: #1e2a36; color: #e6eef7; }
 body.dark-mode .game-seg button + button { border-left-color: #334654; }
 body.dark-mode .game-seg button.active { background: #1e6fd4; color: #fff; }
 body.dark-mode .game-correct  { color: #40c463; }
+body.dark-mode .interval-grid button,
+body.dark-mode .interval-replay { background: #1e2a36; color: #e6eef7; border-color: #334654; }
+body.dark-mode .interval-grid button.flash-correct { background: #2b8a3e; color: #fff; }
+body.dark-mode .interval-grid button.flash-wrong   { background: #c92a2a; color: #fff; }
+body.dark-mode .interval-progress { color: #9ab; }
 body.dark-mode .game-mistakes { color: #ff6b6b; }
 
 /* Wrong-note flash overlay clone stays red; explicit background
